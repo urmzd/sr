@@ -23,8 +23,8 @@ The npm `semantic-release` ecosystem is battle-tested but comes with friction:
 
 - Conventional Commits parsing (built-in, configurable via `commit_pattern`)
 - Semantic versioning bumps (major / minor / patch)
-- Automatic version file bumping (`Cargo.toml`, `package.json`, `pyproject.toml`)
-- Changelog generation (Jinja2 templates via `minijinja`)
+- Automatic version file bumping (Cargo.toml, package.json, pyproject.toml, pom.xml, Gradle, Go)
+- Changelog generation (markdown, with configurable sections)
 - GitHub Releases (via REST API — no external tools needed)
 - Structured JSON output for CI piping (`sr release | jq .version`)
 - Trunk-based workflow (tag + release from `main`)
@@ -395,55 +395,173 @@ Force mode will error if:
 
 `sr` looks for `.urmzd.sr.yml` in the repository root. All fields are optional and have sensible defaults.
 
+### Configuration reference
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `branches` | `string[]` | `["main", "master"]` | Branches that trigger releases |
+| `tag_prefix` | `string` | `"v"` | Prefix for git tags (e.g. `v1.0.0`) |
+| `commit_pattern` | `string` | See below | Regex for parsing commit messages (must use named groups: `type`, `scope`, `breaking`, `description`) |
+| `breaking_section` | `string` | `"Breaking Changes"` | Changelog section heading for breaking changes |
+| `misc_section` | `string` | `"Miscellaneous"` | Changelog section heading for commit types without an explicit section |
+| `types` | `CommitType[]` | See below | Commit type definitions (name, bump level, changelog section) |
+| `changelog.file` | `string?` | `null` | Path to the changelog file (e.g. `CHANGELOG.md`). Omit to skip changelog generation |
+| `version_files` | `string[]` | `[]` | Manifest files to bump (see supported formats below) |
+| `version_files_strict` | `bool` | `false` | When `true`, fail the release if any version file is unsupported. When `false`, skip unsupported files with a warning |
+| `artifacts` | `string[]` | `[]` | Glob patterns for files to upload to the GitHub release |
+| `floating_tags` | `bool` | `false` | Create floating major version tags (e.g. `v3` always points to the latest `v3.x.x` release) |
+| `build_command` | `string?` | `null` | Shell command to run after version bump but before commit. `SR_VERSION` and `SR_TAG` env vars are set |
+
+### Example config
+
 ```yaml
-# Branches that trigger releases
 branches:
   - main
 
-# Prefix for git tags
 tag_prefix: "v"
 
-# Changelog settings
-changelog:
-  file: CHANGELOG.md       # Path to the changelog file (optional)
-  template: null            # Custom Jinja2 template (optional)
+# Regex for parsing commits — must have named groups: type, scope, breaking, description
+commit_pattern: '^(?P<type>\w+)(?:\((?P<scope>[^)]+)\))?(?P<breaking>!)?:\s+(?P<description>.+)'
 
-# Version files to bump automatically
+breaking_section: Breaking Changes
+misc_section: Miscellaneous
+
+types:
+  - name: feat
+    bump: minor
+    section: Features
+  - name: fix
+    bump: patch
+    section: Bug Fixes
+  - name: perf
+    bump: patch
+    section: Performance
+  - name: docs
+    section: Documentation
+  - name: refactor
+    section: Refactoring
+  - name: revert
+    section: Reverts
+  - name: chore          # no bump, no changelog section
+  - name: ci
+  - name: test
+  - name: build
+  - name: style
+
+changelog:
+  file: CHANGELOG.md
+
 version_files:
   - Cargo.toml
-  # - package.json
-  # - pyproject.toml
+  - package.json
 
-# Shell command to run after version bump, before commit
-# SR_VERSION and SR_TAG env vars are available
-build_command: null
-# Example: "cargo build --release"
+version_files_strict: false
 
-# Override commit-type to bump-level mapping (merged with defaults)
-commit_types: {}
-# Example:
-#   docs: patch
-#   refactor: patch
+floating_tags: false
+
+build_command: "cargo build --release"
+
+artifacts:
+  - "dist/*.tar.gz"
 ```
 
 ### Supported version files
 
-| Filename | Key updated | Notes |
-|---|---|---|
-| `Cargo.toml` | `package.version` (or `workspace.package.version`) | Preserves formatting and comments |
-| `package.json` | `version` | Pretty-printed JSON output |
-| `pyproject.toml` | `project.version` (or `tool.poetry.version`) | Preserves formatting and comments |
+| Filename | Key updated | Method | Notes |
+|---|---|---|---|
+| `Cargo.toml` | `package.version` or `workspace.package.version` | TOML parser | Preserves formatting/comments. Also updates `[workspace.dependencies]` entries that have both `path` and `version` fields |
+| `package.json` | `version` | JSON parser | Pretty-printed output with trailing newline |
+| `pyproject.toml` | `project.version` or `tool.poetry.version` | TOML parser | Preserves formatting/comments. Supports both PEP 621 and Poetry layouts |
+| `pom.xml` | First `<version>` after `</parent>` (or `</modelVersion>`) | Regex | Skips the `<parent>` block to avoid changing the parent version |
+| `build.gradle` | `version = '...'` or `version = "..."` | Regex | Only replaces the first match (avoids changing dependency versions) |
+| `build.gradle.kts` | `version = "..."` | Regex | Only replaces the first match |
+| `*.go` | `var Version = "..."` or `const Version string = "..."` | Regex | Matches the first `Version` variable/constant declaration |
 
-### Default commit-type mapping
+### Environment variables
 
-| Type | Bump |
-|------|------|
-| `feat` | minor |
-| `fix` | patch |
-| `perf` | patch |
-| Breaking change (`!`) | major |
+| Variable | Context | Description |
+|----------|---------|-------------|
+| `GH_TOKEN` / `GITHUB_TOKEN` | Release | GitHub API token for creating releases and uploading artifacts. Not needed for `--dry-run` |
+| `SR_VERSION` | Build command | The new version string (e.g. `1.2.3`), set automatically when `build_command` runs |
+| `SR_TAG` | Build command | The new tag name (e.g. `v1.2.3`), set automatically when `build_command` runs |
 
-All other types (e.g. `chore`, `docs`, `ci`) do not trigger a release unless overridden in `commit_types`.
+### Commit types
+
+Each entry in the `types` list has these fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | `string` | Yes | The commit type prefix (e.g. `feat`, `fix`) |
+| `bump` | `string?` | No | Bump level: `major`, `minor`, or `patch`. Omit to not trigger a release for this type |
+| `section` | `string?` | No | Changelog section heading (e.g. `"Features"`). Omit to exclude from changelog |
+
+Breaking changes (commits with `!` after the type, e.g. `feat!:`) always trigger a `major` bump regardless of the type's configured bump level.
+
+#### Default commit-type mapping
+
+| Type | Bump | Changelog Section |
+|------|------|-------------------|
+| `feat` | minor | Features |
+| `fix` | patch | Bug Fixes |
+| `perf` | patch | Performance |
+| `docs` | — | Documentation |
+| `refactor` | — | Refactoring |
+| `revert` | — | Reverts |
+| `chore` | — | — |
+| `ci` | — | — |
+| `test` | — | — |
+| `build` | — | — |
+| `style` | — | — |
+
+Types without a bump level do not trigger a release on their own. Types without a section are grouped under the `misc_section` heading if they appear in a release with other releasable commits.
+
+### Commit pattern
+
+The default pattern follows the [Conventional Commits](https://www.conventionalcommits.org/) spec:
+
+```
+^(?P<type>\w+)(?:\((?P<scope>[^)]+)\))?(?P<breaking>!)?:\s+(?P<description>.+)
+```
+
+If you override `commit_pattern`, your regex **must** include these named capture groups:
+
+| Group | Required | Description |
+|-------|----------|-------------|
+| `type` | Yes | The commit type (e.g. `feat`, `fix`) |
+| `scope` | No | Optional scope in parentheses |
+| `breaking` | No | The `!` marker for breaking changes |
+| `description` | Yes | The commit description |
+
+### Changelog behavior
+
+When `changelog.file` is set:
+- If the file doesn't exist, it's created with a `# Changelog` heading
+- If it already exists, new entries are inserted after the first heading (prepended, not appended)
+- Each entry has the format: `## <version> (<date>)`
+- Sections appear in order: Breaking Changes, then type sections in definition order, then Miscellaneous
+- Commits link to their full SHA on GitHub when the repo URL is available
+
+### Release execution order
+
+Understanding the execution order helps when configuring `build_command`:
+
+1. **Bump version files** — all configured `version_files` are updated on disk
+2. **Write changelog** — the changelog file is written (if configured)
+3. **Run build command** — your `build_command` runs with `SR_VERSION`/`SR_TAG` set. The version files already contain the new version, so tools like `cargo build` will pick it up
+4. **Git commit** — version files + changelog are staged and committed as `chore(release): <tag> [skip ci]`
+5. **Create and push tag**
+6. **Create/update floating tag** (if `floating_tags: true`)
+7. **Create GitHub release**
+8. **Upload artifacts**
+
+If any step fails, execution stops. Steps 5-8 are idempotent — re-running with `--force` will skip already-completed steps.
+
+### Limitations
+
+- **Single branch only** — no release branches or multi-branch workflows
+- **No pre-releases** — no support for alpha/beta/rc tags
+- **GitHub only** — the `VcsProvider` trait exists for extensibility, but only GitHub is implemented
+- **No custom hooks beyond `build_command`** — use CI pipeline steps for pre/post-release actions
 
 ## Architecture
 
