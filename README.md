@@ -639,7 +639,6 @@ Or via CLI: `sr release --prerelease alpha`
 
 ### Limitations
 
-- **Single branch only** — no release branches or multi-branch workflows
 - **GitHub only** — the `VcsProvider` trait exists for extensibility, but only GitHub is implemented
 
 ## Architecture
