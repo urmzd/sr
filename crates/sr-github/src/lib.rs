@@ -87,7 +87,6 @@ impl VcsProvider for GitHubProvider {
             "body": body,
             "prerelease": prerelease,
             "draft": draft,
-            "target_commitish": tag,
         });
 
         let resp = self
