@@ -214,11 +214,16 @@ where
             .map(|i| i.name.clone())
             .unwrap_or_else(|| "(none)".into());
         let commit_count = conventional_commits.len();
-        let bump =
-            determine_bump(&conventional_commits, &classifier).ok_or(ReleaseError::NoBump {
-                tag: tag_for_err,
-                commit_count,
-            })?;
+        let bump = match determine_bump(&conventional_commits, &classifier) {
+            Some(b) => b,
+            None if self.force => BumpLevel::Patch,
+            None => {
+                return Err(ReleaseError::NoBump {
+                    tag: tag_for_err,
+                    commit_count,
+                });
+            }
+        };
 
         // For pre-releases, base the version on the latest *stable* tag
         let base_version = if is_prerelease {
@@ -916,6 +921,24 @@ mod tests {
         );
         let err = s.plan().unwrap_err();
         assert!(matches!(err, ReleaseError::NoBump { .. }));
+    }
+
+    #[test]
+    fn force_releases_patch_when_no_releasable_commits() {
+        let tag = TagInfo {
+            name: "v1.2.3".into(),
+            version: Version::new(1, 2, 3),
+            sha: "d".repeat(40),
+        };
+        let mut s = make_strategy(
+            vec![tag],
+            vec![raw_commit("chore: rename package")],
+            ReleaseConfig::default(),
+        );
+        s.force = true;
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.next_version, Version::new(1, 2, 4));
+        assert_eq!(plan.bump, BumpLevel::Patch);
     }
 
     #[test]
