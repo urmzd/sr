@@ -1,8 +1,19 @@
-# sr — Semantic Release
+<p align="center">
+  <h1 align="center">sr</h1>
+  <p align="center">
+    A single-binary, zero-dependency semantic release tool for any language.
+    <br /><br />
+    <a href="https://github.com/urmzd/semantic-release/releases">Download</a>
+    &middot;
+    <a href="https://github.com/urmzd/semantic-release/issues">Report Bug</a>
+    &middot;
+    <a href="https://github.com/urmzd/semantic-release/blob/main/action.yml">GitHub Action</a>
+  </p>
+</p>
 
-A single-binary, zero-dependency semantic release tool for any language.
-
-[![CI](https://github.com/urmzd/semantic-release/actions/workflows/ci.yml/badge.svg)](https://github.com/urmzd/semantic-release/actions/workflows/ci.yml)
+<p align="center">
+  <a href="https://github.com/urmzd/semantic-release/actions/workflows/ci.yml"><img src="https://github.com/urmzd/semantic-release/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
 
 ## Why?
 
