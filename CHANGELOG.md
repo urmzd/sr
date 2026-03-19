@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.8.1 (2026-03-19)
+
+### Bug Fixes
+
+- **ci**: checkout release tag for publish and handle re-publishes ([e5e40dd](https://github.com/urmzd/sr/commit/e5e40ddfd7c9cf6456cdb32ee6a9b39d2adde435))
+
+### Documentation
+
+- update all documentation to reflect AI-powered CLI ([6271e9e](https://github.com/urmzd/sr/commit/6271e9ec6b648444eb2d2fa86f4080d211a71222))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v1.8.0...v1.8.1)
+
+
 ## 1.8.0 (2026-03-19)
 
 ### Features
