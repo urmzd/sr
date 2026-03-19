@@ -279,29 +279,37 @@ sr completions bash >> ~/.bashrc
 
 ### Commit message validation
 
-`sr` ships a `commit-msg` git hook that enforces [Conventional Commits](https://www.conventionalcommits.org/) at commit time. It reads allowed types and patterns from `sr.yaml`, falling back to built-in defaults.
-
-**Option 1 — Native git hooks:**
-
-```bash
-# Copy the hook into your project
-curl -o .githooks/commit-msg https://raw.githubusercontent.com/urmzd/sr/main/.githooks/commit-msg
-chmod +x .githooks/commit-msg
-git config core.hooksPath .githooks/
-```
-
-**Option 2 — pre-commit framework:**
+`sr` manages git hooks through the `hooks` section in `sr.yaml`. Each hook is a list of shell commands. Every command receives a JSON context on stdin with the hook's arguments — pipe it to `jq`, parse it in your script, or ignore it.
 
 ```yaml
-# .pre-commit-config.yaml
-repos:
-  - repo: https://github.com/urmzd/sr
-    rev: v0.5.0
-    hooks:
-      - id: conventional-commit-msg
+# sr.yaml
+hooks:
+  commit-msg:
+    - sr hook commit-msg                          # built-in conventional commit validation
+  pre-commit:
+    - cargo fmt -- --check
+    - cargo clippy --workspace -- -D warnings
+  pre-push:
+    - cargo test --workspace
 ```
 
-The hook validates the first line of each commit message against the pattern `<type>(<scope>): <description>`. Merge commits and rebase-generated commits (`fixup!`, `squash!`, `amend!`) are always allowed through.
+Hooks are installed as thin wrappers in `.githooks/` that call `sr hook run <name>`:
+
+```bash
+sr init              # writes sr.yaml + installs hooks
+sr init --no-hooks   # writes sr.yaml only
+sr hook install      # re-install hooks after editing sr.yaml
+```
+
+**JSON context** piped to each command (example for `commit-msg`):
+
+```json
+{"hook": "commit-msg", "args": [".git/COMMIT_EDITMSG"], "message_file": ".git/COMMIT_EDITMSG"}
+```
+
+Known hooks get named fields (`message_file`, `remote_name`, `remote_url`, `upstream`, `branch`, etc.) alongside the raw `args` array. Unknown hooks still receive `hook` and `args`.
+
+The built-in `sr hook commit-msg` validates the first line against the configured `commit_pattern` and `types`. Merge commits and rebase-generated commits (`fixup!`, `squash!`, `amend!`) are always allowed through.
 
 ### End-to-end release flow
 
