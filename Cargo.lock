@@ -1113,6 +1113,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml_ng",
