@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.8.0 (2026-03-19)
+
+### Features
+
+- integrate AI-powered git commands into sr ([0c333ab](https://github.com/urmzd/sr/commit/0c333ab568818dc6d59195541bdf608ce1ac0bd0))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v1.7.2...v1.8.0)
+
+
 ## 1.7.2 (2026-03-16)
 
 ### Refactoring
