@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.8.2 (2026-03-19)
+
+### Bug Fixes
+
+- **ci**: handle already-published crates in publish step ([4b2c8d1](https://github.com/urmzd/sr/commit/4b2c8d1da5ae5fcacbec5dbe73ddec1d0f9b2eee))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v1.8.1...v1.8.2)
+
+
 ## 1.8.1 (2026-03-19)
 
 ### Bug Fixes
