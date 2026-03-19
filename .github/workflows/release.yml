@@ -92,6 +92,8 @@ jobs:
           cargo publish -p sr-git --allow-dirty
           cargo publish -p sr-github --allow-dirty
           sleep 30
+          cargo publish -p sr-ai --allow-dirty
+          sleep 30
           cargo publish -p sr-cli --allow-dirty
 
   build:

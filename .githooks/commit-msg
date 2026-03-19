@@ -27,14 +27,22 @@ esac
 
 # --- Read config or use defaults ---
 
-config_file=".urmzd.sr.yml"
+if [ -f "sr.yaml" ]; then
+    config_file="sr.yaml"
+elif [ -f "sr.yml" ]; then
+    config_file="sr.yml"
+elif [ -f ".urmzd.sr.yml" ]; then
+    config_file=".urmzd.sr.yml"
+else
+    config_file=""
+fi
 
 # Default conventional commits pattern (POSIX ERE — no named groups)
 default_pattern='^[a-zA-Z0-9_]+(\([^)]+\))?(!)?: .+'
 # Default allowed types
 default_types="feat fix perf chore docs ci refactor test build style revert"
 
-if [ -f "$config_file" ]; then
+if [ -n "$config_file" ] && [ -f "$config_file" ]; then
     # Extract commit_pattern from config (first match, strip YAML key + quotes)
     cfg_pattern=$(sed -n "s/^commit_pattern: *//p" "$config_file" | head -n1)
     # Strip surrounding quotes if present

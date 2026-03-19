@@ -31,6 +31,7 @@ publish:
     cargo publish -p sr-core --dry-run
     cargo publish -p sr-git --dry-run
     cargo publish -p sr-github --dry-run
+    cargo publish -p sr-ai --dry-run
     cargo publish -p sr-cli --dry-run
 
 check: check-fmt lint test

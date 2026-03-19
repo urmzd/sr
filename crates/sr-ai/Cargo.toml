@@ -1,0 +1,25 @@
+[package]
+name = "sr-ai"
+version = "1.7.2"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+description = "AI backends, caching, and AI-powered git commands for sr"
+readme = "README.md"
+keywords = ["semantic-release", "ai", "git", "conventional-commits"]
+categories = ["development-tools"]
+
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+sha2 = { workspace = true }
+crossterm = { workspace = true }
+indicatif = { workspace = true }
+async-trait = { workspace = true }
+dirs = { workspace = true }
