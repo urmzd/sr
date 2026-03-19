@@ -2,6 +2,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use sr_ai::ai::{Backend, BackendConfig};
 use sr_core::changelog::DefaultChangelogFormatter;
 use sr_core::commit::DefaultCommitParser;
 use sr_core::config::{DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE, ReleaseConfig};
@@ -11,8 +12,24 @@ use sr_git::NativeGitRepository;
 use sr_github::GitHubProvider;
 
 #[derive(Parser)]
-#[command(name = "sr", about = "Semantic Release CLI", version)]
+#[command(name = "sr", about = "AI-powered release engineering CLI", version)]
 struct Cli {
+    /// AI backend to use
+    #[arg(long, global = true, env = "SR_BACKEND")]
+    backend: Option<Backend>,
+
+    /// AI model to use
+    #[arg(long, global = true, env = "SR_MODEL")]
+    model: Option<String>,
+
+    /// Max budget in USD (claude only)
+    #[arg(long, global = true, env = "SR_BUDGET", default_value = "0.50")]
+    budget: f64,
+
+    /// Enable debug output
+    #[arg(long, global = true, env = "SR_DEBUG")]
+    debug: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -106,6 +123,28 @@ enum Commands {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
     },
+
+    // --- AI-powered commands ---
+    /// Generate atomic commits from changes
+    Commit(sr_ai::commands::commit::CommitArgs),
+
+    /// AI code review of staged/branch changes
+    Review(sr_ai::commands::review::ReviewArgs),
+
+    /// Explain recent commits
+    Explain(sr_ai::commands::explain::ExplainArgs),
+
+    /// Suggest conventional branch name
+    Branch(sr_ai::commands::branch::BranchArgs),
+
+    /// Generate PR title + body from branch commits
+    Pr(sr_ai::commands::pr::PrArgs),
+
+    /// Freeform Q&A about the repo
+    Ask(sr_ai::commands::ask::AskArgs),
+
+    /// Manage the AI commit plan cache
+    Cache(sr_ai::commands::cache::CacheArgs),
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -245,8 +284,15 @@ fn resolve_config_path() -> std::path::PathBuf {
     }
 }
 
-fn run() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    let backend_config = BackendConfig {
+        backend: cli.backend,
+        model: cli.model,
+        budget: cli.budget,
+        debug: cli.debug,
+    };
 
     match cli.command {
         Commands::Init { force } => {
@@ -576,11 +622,21 @@ fn run() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string(&output)?);
             Ok(())
         }
+
+        // --- AI-powered commands ---
+        Commands::Commit(args) => sr_ai::commands::commit::run(&args, &backend_config).await,
+        Commands::Review(args) => sr_ai::commands::review::run(&args, &backend_config).await,
+        Commands::Explain(args) => sr_ai::commands::explain::run(&args, &backend_config).await,
+        Commands::Branch(args) => sr_ai::commands::branch::run(&args, &backend_config).await,
+        Commands::Pr(args) => sr_ai::commands::pr::run(&args, &backend_config).await,
+        Commands::Ask(args) => sr_ai::commands::ask::run(&args, &backend_config).await,
+        Commands::Cache(args) => sr_ai::commands::cache::run(&args),
     }
 }
 
-fn main() -> ExitCode {
-    match run() {
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run().await {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
             if is_no_release_error(&e) {

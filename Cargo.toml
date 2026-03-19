@@ -15,6 +15,7 @@ homepage = "https://github.com/urmzd/sr"
 sr-core = { path = "crates/sr-core", version = "1.7.2" }
 sr-git = { path = "crates/sr-git", version = "1.7.2" }
 sr-github = { path = "crates/sr-github", version = "1.7.2" }
+sr-ai = { path = "crates/sr-ai", version = "1.7.2" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -30,7 +31,7 @@ semver = { version = "1", features = ["serde"] }
 minijinja = "2"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 
 # Serialization (JSON)
@@ -52,6 +53,19 @@ glob = "0.3"
 
 # Hashing
 sha2 = "0.10"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Terminal UI
+crossterm = "0.28"
+indicatif = "0.17"
+
+# Async traits
+async-trait = "0.1"
+
+# Directories
+dirs = "6"
 
 # Testing
 tempfile = "3"
