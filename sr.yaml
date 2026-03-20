@@ -38,8 +38,5 @@ version_files:
 changelog:
   file: CHANGELOG.md
 
-stage_files:
-  - Cargo.lock
-
 floating_tags: true
 

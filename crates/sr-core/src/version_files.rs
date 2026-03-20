@@ -371,6 +371,54 @@ fn resolve_member_globs(root_dir: &Path, patterns: &[String], manifest_name: &st
     paths
 }
 
+/// Known manifest → lock file mappings. Lock files are searched in the same
+/// directory as the manifest, then in ancestor directories up to the repo root.
+const LOCK_FILE_MAPPINGS: &[(&str, &[&str])] = &[
+    ("Cargo.toml", &["Cargo.lock"]),
+    (
+        "package.json",
+        &["package-lock.json", "yarn.lock", "pnpm-lock.yaml"],
+    ),
+    ("pyproject.toml", &["uv.lock", "poetry.lock"]),
+];
+
+/// Given a list of bumped manifest paths, discover associated lock files that exist on disk.
+/// Searches the manifest's directory and ancestors (for monorepo roots).
+/// Returns deduplicated paths.
+pub fn discover_lock_files(bumped_files: &[String]) -> Vec<PathBuf> {
+    let mut seen = std::collections::BTreeSet::new();
+    for file in bumped_files {
+        let path = Path::new(file);
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+
+        let lock_names: &[&str] = LOCK_FILE_MAPPINGS
+            .iter()
+            .find(|(manifest, _)| *manifest == filename)
+            .map(|(_, locks)| *locks)
+            .unwrap_or(&[]);
+
+        // Search the manifest's directory and ancestors
+        let mut dir = path.parent();
+        while let Some(d) = dir {
+            for lock_name in lock_names {
+                let lock_path = d.join(lock_name);
+                if lock_path.exists() {
+                    seen.insert(lock_path);
+                }
+            }
+            dir = d.parent();
+            // Stop at repo root (don't traverse beyond .git)
+            if d.join(".git").exists() {
+                break;
+            }
+        }
+    }
+    seen.into_iter().collect()
+}
+
 fn read_file(path: &Path) -> Result<String, ReleaseError> {
     fs::read_to_string(path)
         .map_err(|e| ReleaseError::VersionBump(format!("failed to read {}: {e}", path.display())))
