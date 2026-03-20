@@ -307,6 +307,33 @@ impl GitRepository for NativeGitRepository {
     fn head_sha(&self) -> Result<String, ReleaseError> {
         self.git(&["rev-parse", "HEAD"])
     }
+
+    fn commits_since_in_path(
+        &self,
+        from: Option<&str>,
+        path: &str,
+    ) -> Result<Vec<Commit>, ReleaseError> {
+        let range = match from {
+            Some(sha) => format!("{sha}..HEAD"),
+            None => "HEAD".to_string(),
+        };
+        let output = self.git(&["log", "--format=%H%n%B%n--END--", &range, "--", path])?;
+        Ok(parse_commit_log(&output))
+    }
+
+    fn commits_between_in_path(
+        &self,
+        from: Option<&str>,
+        to: &str,
+        path: &str,
+    ) -> Result<Vec<Commit>, ReleaseError> {
+        let range = match from {
+            Some(sha) => format!("{sha}..{to}"),
+            None => to.to_string(),
+        };
+        let output = self.git(&["log", "--format=%H%n%B%n--END--", &range, "--", path])?;
+        Ok(parse_commit_log(&output))
+    }
 }
 
 #[cfg(test)]

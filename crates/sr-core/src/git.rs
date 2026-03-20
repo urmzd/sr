@@ -57,4 +57,26 @@ pub trait GitRepository: Send + Sync {
 
     /// Return the full SHA of HEAD.
     fn head_sha(&self) -> Result<String, ReleaseError>;
+
+    /// Like `commits_since`, but only includes commits that touched files under `path`.
+    fn commits_since_in_path(
+        &self,
+        from: Option<&str>,
+        path: &str,
+    ) -> Result<Vec<Commit>, ReleaseError> {
+        // Default: ignore path filter (for test fakes and backwards compat)
+        let _ = path;
+        self.commits_since(from)
+    }
+
+    /// Like `commits_between`, but only includes commits that touched files under `path`.
+    fn commits_between_in_path(
+        &self,
+        from: Option<&str>,
+        to: &str,
+        path: &str,
+    ) -> Result<Vec<Commit>, ReleaseError> {
+        let _ = path;
+        self.commits_between(from, to)
+    }
 }

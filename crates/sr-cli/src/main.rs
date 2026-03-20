@@ -38,6 +38,10 @@ struct Cli {
 enum Commands {
     /// Execute a release (trunk flow: tag + GitHub release)
     Release {
+        /// Target a specific package in a monorepo
+        #[arg(long, short)]
+        package: Option<String>,
+
         /// Preview what would happen without making changes
         #[arg(long)]
         dry_run: bool,
@@ -81,6 +85,10 @@ enum Commands {
 
     /// Show what the next release would look like
     Plan {
+        /// Target a specific package in a monorepo
+        #[arg(long, short)]
+        package: Option<String>,
+
         /// Output format
         #[arg(long, default_value = "human")]
         format: PlanFormat,
@@ -88,6 +96,10 @@ enum Commands {
 
     /// Generate or preview the changelog
     Changelog {
+        /// Target a specific package in a monorepo
+        #[arg(long, short)]
+        package: Option<String>,
+
         /// Write the changelog to disk
         #[arg(long)]
         write: bool,
@@ -99,6 +111,10 @@ enum Commands {
 
     /// Show the next version
     Version {
+        /// Target a specific package in a monorepo
+        #[arg(long, short)]
+        package: Option<String>,
+
         /// Print only the version number
         #[arg(long)]
         short: bool,
@@ -297,6 +313,19 @@ fn is_no_release_error(err: &anyhow::Error) -> bool {
         )
     } else {
         false
+    }
+}
+
+/// Load config and optionally resolve a package, returning the effective config.
+fn load_config_for_package(package: Option<&str>) -> anyhow::Result<ReleaseConfig> {
+    let config_path = resolve_config_path();
+    let config = ReleaseConfig::load(&config_path)?;
+    match package {
+        Some(name) => {
+            let pkg = config.find_package(name)?;
+            Ok(config.resolve_package(pkg))
+        }
+        None => Ok(config),
     }
 }
 
@@ -612,9 +641,8 @@ async fn run() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Commands::Version { short } => {
-            let config_path = resolve_config_path();
-            let config = ReleaseConfig::load(&config_path)?;
+        Commands::Version { short, package } => {
+            let config = load_config_for_package(package.as_deref())?;
             let strategy = build_local_strategy(config, false)?;
             let plan = strategy.plan()?;
             if short {
@@ -632,9 +660,8 @@ async fn run() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Commands::Plan { format } => {
-            let config_path = resolve_config_path();
-            let config = ReleaseConfig::load(&config_path)?;
+        Commands::Plan { format, package } => {
+            let config = load_config_for_package(package.as_deref())?;
             let formatter = DefaultChangelogFormatter::new(
                 config.changelog.template.clone(),
                 config.types.clone(),
@@ -705,9 +732,12 @@ async fn run() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Commands::Changelog { write, regenerate } => {
-            let config_path = resolve_config_path();
-            let config = ReleaseConfig::load(&config_path)?;
+        Commands::Changelog {
+            write,
+            regenerate,
+            package,
+        } => {
+            let config = load_config_for_package(package.as_deref())?;
 
             let formatter = DefaultChangelogFormatter::new(
                 config.changelog.template.clone(),
@@ -740,7 +770,11 @@ async fn run() -> anyhow::Result<()> {
                     } else {
                         Some(tags[i - 1].sha.as_str())
                     };
-                    let raw_commits = git.commits_between(from, &tag.name)?;
+                    let raw_commits = if let Some(ref path) = config.path_filter {
+                        git.commits_between_in_path(from, &tag.name, path)?
+                    } else {
+                        git.commits_between(from, &tag.name)?
+                    };
                     let conventional: Vec<_> = raw_commits
                         .iter()
                         .filter(|c| !c.message.starts_with("chore(release):"))
@@ -829,6 +863,7 @@ async fn run() -> anyhow::Result<()> {
         }
 
         Commands::Release {
+            package,
             dry_run,
             artifacts,
             force,
@@ -840,8 +875,7 @@ async fn run() -> anyhow::Result<()> {
             sign_tags,
             draft,
         } => {
-            let config_path = resolve_config_path();
-            let mut config = ReleaseConfig::load(&config_path)?;
+            let mut config = load_config_for_package(package.as_deref())?;
             config.artifacts.extend(artifacts);
             config.stage_files.extend(stage_files);
             if build_command.is_some() {

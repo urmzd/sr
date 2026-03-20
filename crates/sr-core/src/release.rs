@@ -169,7 +169,11 @@ where
             None => (None, None),
         };
 
-        let raw_commits = self.git.commits_since(from_sha)?;
+        let raw_commits = if let Some(ref path) = self.config.path_filter {
+            self.git.commits_since_in_path(from_sha, path)?
+        } else {
+            self.git.commits_since(from_sha)?
+        };
         if raw_commits.is_empty() {
             // Force mode: re-release if HEAD is exactly at the latest tag
             if self.force
@@ -701,6 +705,8 @@ mod tests {
     struct FakeGit {
         tags: Vec<TagInfo>,
         commits: Vec<Commit>,
+        /// Commits returned when path filtering is active (None = fall back to `commits`).
+        path_commits: Option<Vec<Commit>>,
         head: String,
         created_tags: Mutex<Vec<String>>,
         pushed_tags: Mutex<Vec<String>>,
@@ -719,6 +725,7 @@ mod tests {
             Self {
                 tags,
                 commits,
+                path_commits: None,
                 head,
                 created_tags: Mutex::new(Vec::new()),
                 pushed_tags: Mutex::new(Vec::new()),
@@ -813,6 +820,17 @@ mod tests {
 
         fn head_sha(&self) -> Result<String, ReleaseError> {
             Ok(self.head.clone())
+        }
+
+        fn commits_since_in_path(
+            &self,
+            _from: Option<&str>,
+            _path: &str,
+        ) -> Result<Vec<Commit>, ReleaseError> {
+            Ok(self
+                .path_commits
+                .clone()
+                .unwrap_or_else(|| self.commits.clone()))
         }
     }
 
@@ -1802,5 +1820,70 @@ mod tests {
         let plan = s.plan().unwrap();
         assert!(plan.prerelease);
         assert!(plan.next_version.to_string().contains("alpha"));
+    }
+
+    // --- monorepo (path_filter) tests ---
+
+    #[test]
+    fn plan_with_path_filter_uses_filtered_commits() {
+        let mut config = ReleaseConfig::default();
+        config.path_filter = Some("crates/core".into());
+
+        // All commits include a feat, but path-filtered commits only have a fix
+        let mut s = make_strategy(
+            vec![],
+            vec![raw_commit("feat: big feature"), raw_commit("fix: patch")],
+            config,
+        );
+        s.git.path_commits = Some(vec![raw_commit("fix: patch only in core")]);
+
+        let plan = s.plan().unwrap();
+        // Should be a patch bump (from path-filtered commits), not minor
+        assert_eq!(plan.bump, BumpLevel::Patch);
+        assert_eq!(plan.commits.len(), 1);
+        assert_eq!(plan.commits[0].description, "patch only in core");
+    }
+
+    #[test]
+    fn plan_without_path_filter_uses_all_commits() {
+        let config = ReleaseConfig::default();
+
+        let mut s = make_strategy(vec![], vec![raw_commit("feat: big feature")], config);
+        s.git.path_commits = Some(vec![raw_commit("fix: filtered")]);
+
+        let plan = s.plan().unwrap();
+        // path_filter is None, so should use all commits (feat → minor)
+        assert_eq!(plan.bump, BumpLevel::Minor);
+    }
+
+    #[test]
+    fn plan_with_path_filter_no_commits_returns_error() {
+        let mut config = ReleaseConfig::default();
+        config.path_filter = Some("crates/core".into());
+
+        let mut s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
+        s.git.path_commits = Some(vec![]);
+
+        let err = s.plan().unwrap_err();
+        assert!(matches!(err, ReleaseError::NoCommits { .. }));
+    }
+
+    #[test]
+    fn plan_with_path_filter_custom_tag_prefix() {
+        let mut config = ReleaseConfig::default();
+        config.path_filter = Some("crates/core".into());
+        config.tag_prefix = "core/v".into();
+
+        let tag = TagInfo {
+            name: "core/v1.0.0".into(),
+            version: Version::new(1, 0, 0),
+            sha: "a".repeat(40),
+        };
+        let mut s = make_strategy(vec![tag], vec![raw_commit("feat: something")], config);
+        s.git.path_commits = Some(vec![raw_commit("fix: core bug")]);
+
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.tag_name, "core/v1.0.1");
+        assert_eq!(plan.current_version, Some(Version::new(1, 0, 0)));
     }
 }
