@@ -10,7 +10,7 @@ use crate::config::ReleaseConfig;
 use crate::error::ReleaseError;
 use crate::git::GitRepository;
 use crate::version::{BumpLevel, apply_bump, apply_prerelease_bump, determine_bump};
-use crate::version_files::bump_version_file;
+use crate::version_files::{bump_version_file, discover_lock_files};
 
 /// The computed plan for a release, before execution.
 #[derive(Debug, Serialize)]
@@ -533,6 +533,14 @@ where
                     eprintln!("warning: {e} — skipping {file}");
                 }
                 Err(e) => return Err(e),
+            }
+        }
+
+        // 2.5. Auto-discover and stage lock files associated with bumped manifests
+        for lock_file in discover_lock_files(&bumped_files) {
+            let lock_str = lock_file.to_string_lossy().into_owned();
+            if !bumped_files.contains(&lock_str) {
+                bumped_files.push(lock_str);
             }
         }
 
