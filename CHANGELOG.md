@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.10.0 (2026-03-20)
+
+### Features
+
+- **git**: add head_short and file_statuses methods ([e512a4c](https://github.com/urmzd/sr/commit/e512a4c2b7211e1f001191b85c691209ab4a8c78))
+- **commands/commit**: add config-driven commit types and real-time event display ([deb0ea8](https://github.com/urmzd/sr/commit/deb0ea849a8892b3c9ba86209f48bc851f88c2a1))
+- **ai**: refactor backends with streaming and event support ([4bed74f](https://github.com/urmzd/sr/commit/4bed74fd185942c6b10d0baeb095b5145294fc98))
+- **ai**: add sr-core dependency to sr-ai ([c9e2e38](https://github.com/urmzd/sr/commit/c9e2e38c5185a665bf5014d9f5c0b4b5d3bae882))
+
+### Refactoring
+
+- **ui**: redesign output with improved styling and interactive progress ([a679810](https://github.com/urmzd/sr/commit/a679810ba67bd3e562396e1fa1ca3dfd787b07e7))
+- **commands**: update backend request calls for new event parameter ([6877e1e](https://github.com/urmzd/sr/commit/6877e1e39798a2df3b2c143372e6aa81f951eb54))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v1.9.0...v1.10.0)
+
+
 ## 1.9.0 (2026-03-19)
 
 ### Features
