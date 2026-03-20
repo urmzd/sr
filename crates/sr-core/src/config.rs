@@ -50,6 +50,12 @@ pub struct ReleaseConfig {
     pub release_name_template: Option<String>,
     /// Git hooks configuration.
     pub hooks: HooksConfig,
+    /// Monorepo packages. When non-empty, each package is released independently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<PackageConfig>,
+    /// Internal: set when resolving a package config. Commits are filtered to this path.
+    #[serde(skip)]
+    pub path_filter: Option<String>,
 }
 
 impl Default for ReleaseConfig {
@@ -75,8 +81,47 @@ impl Default for ReleaseConfig {
             draft: false,
             release_name_template: None,
             hooks: HooksConfig::with_defaults(),
+            packages: vec![],
+            path_filter: None,
         }
     }
+}
+
+/// A package in a monorepo. Each package is released independently with its own
+/// version, tags, and changelog. Commits are filtered by `path`.
+///
+/// ```yaml
+/// packages:
+///   - name: core
+///     path: crates/core
+///     version_files:
+///       - crates/core/Cargo.toml
+///   - name: cli
+///     path: crates/cli
+///     version_files:
+///       - crates/cli/Cargo.toml
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageConfig {
+    /// Package name — used in the default tag prefix (`{name}/v`).
+    pub name: String,
+    /// Directory path relative to the repo root. Only commits touching this path trigger a release.
+    pub path: String,
+    /// Tag prefix override (default: `{name}/v`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag_prefix: Option<String>,
+    /// Version files override.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_files: Vec<String>,
+    /// Changelog override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changelog: Option<ChangelogConfig>,
+    /// Build command override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_command: Option<String>,
+    /// Stage files override.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stage_files: Vec<String>,
 }
 
 /// Git hooks configuration.
@@ -140,6 +185,49 @@ impl ReleaseConfig {
             std::fs::read_to_string(path).map_err(|e| ReleaseError::Config(e.to_string()))?;
 
         serde_yaml_ng::from_str(&contents).map_err(|e| ReleaseError::Config(e.to_string()))
+    }
+
+    /// Resolve a package into a full release config by merging package overrides with root config.
+    pub fn resolve_package(&self, pkg: &PackageConfig) -> Self {
+        let mut config = self.clone();
+        config.tag_prefix = pkg
+            .tag_prefix
+            .clone()
+            .unwrap_or_else(|| format!("{}/v", pkg.name));
+        config.path_filter = Some(pkg.path.clone());
+        if !pkg.version_files.is_empty() {
+            config.version_files = pkg.version_files.clone();
+        }
+        if let Some(ref cl) = pkg.changelog {
+            config.changelog = cl.clone();
+        }
+        if let Some(ref cmd) = pkg.build_command {
+            config.build_command = Some(cmd.clone());
+        }
+        if !pkg.stage_files.is_empty() {
+            config.stage_files = pkg.stage_files.clone();
+        }
+        // Clear packages to avoid recursion
+        config.packages = vec![];
+        config
+    }
+
+    /// Find a package by name. Returns an error if the package is not found.
+    pub fn find_package(&self, name: &str) -> Result<&PackageConfig, ReleaseError> {
+        self.packages
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| {
+                let available: Vec<&str> = self.packages.iter().map(|p| p.name.as_str()).collect();
+                ReleaseError::Config(format!(
+                    "package '{name}' not found. Available: {}",
+                    if available.is_empty() {
+                        "(none — no packages configured)".to_string()
+                    } else {
+                        available.join(", ")
+                    }
+                ))
+            })
     }
 }
 
@@ -278,5 +366,115 @@ mod tests {
         assert_eq!(parsed.types[0].name, "feat");
         assert_eq!(parsed.commit_pattern, config.commit_pattern);
         assert_eq!(parsed.breaking_section, config.breaking_section);
+    }
+
+    #[test]
+    fn load_yaml_with_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        std::fs::write(
+            &path,
+            r#"
+packages:
+  - name: core
+    path: crates/core
+    version_files:
+      - crates/core/Cargo.toml
+  - name: cli
+    path: crates/cli
+    tag_prefix: "cli-v"
+"#,
+        )
+        .unwrap();
+
+        let config = ReleaseConfig::load(&path).unwrap();
+        assert_eq!(config.packages.len(), 2);
+        assert_eq!(config.packages[0].name, "core");
+        assert_eq!(config.packages[0].path, "crates/core");
+        assert_eq!(config.packages[1].tag_prefix.as_deref(), Some("cli-v"));
+    }
+
+    #[test]
+    fn resolve_package_defaults() {
+        let mut config = ReleaseConfig::default();
+        config.packages = vec![PackageConfig {
+            name: "core".into(),
+            path: "crates/core".into(),
+            tag_prefix: None,
+            version_files: vec![],
+            changelog: None,
+            build_command: None,
+            stage_files: vec![],
+        }];
+
+        let resolved = config.resolve_package(&config.packages[0]);
+        assert_eq!(resolved.tag_prefix, "core/v");
+        assert_eq!(resolved.path_filter.as_deref(), Some("crates/core"));
+        // Inherits root config values
+        assert_eq!(resolved.branches, config.branches);
+        assert!(resolved.packages.is_empty());
+    }
+
+    #[test]
+    fn resolve_package_overrides() {
+        let mut config = ReleaseConfig::default();
+        config.version_files = vec!["Cargo.toml".into()];
+        config.packages = vec![PackageConfig {
+            name: "cli".into(),
+            path: "crates/cli".into(),
+            tag_prefix: Some("cli-v".into()),
+            version_files: vec!["crates/cli/Cargo.toml".into()],
+            changelog: Some(ChangelogConfig {
+                file: Some("crates/cli/CHANGELOG.md".into()),
+                template: None,
+            }),
+            build_command: Some("cargo build -p cli".into()),
+            stage_files: vec!["crates/cli/Cargo.lock".into()],
+        }];
+
+        let resolved = config.resolve_package(&config.packages[0]);
+        assert_eq!(resolved.tag_prefix, "cli-v");
+        assert_eq!(resolved.version_files, vec!["crates/cli/Cargo.toml"]);
+        assert_eq!(
+            resolved.changelog.file.as_deref(),
+            Some("crates/cli/CHANGELOG.md")
+        );
+        assert_eq!(
+            resolved.build_command.as_deref(),
+            Some("cargo build -p cli")
+        );
+        assert_eq!(resolved.stage_files, vec!["crates/cli/Cargo.lock"]);
+    }
+
+    #[test]
+    fn find_package_found() {
+        let mut config = ReleaseConfig::default();
+        config.packages = vec![PackageConfig {
+            name: "core".into(),
+            path: "crates/core".into(),
+            tag_prefix: None,
+            version_files: vec![],
+            changelog: None,
+            build_command: None,
+            stage_files: vec![],
+        }];
+
+        let pkg = config.find_package("core").unwrap();
+        assert_eq!(pkg.name, "core");
+    }
+
+    #[test]
+    fn find_package_not_found() {
+        let config = ReleaseConfig::default();
+        let err = config.find_package("nonexistent").unwrap_err();
+        assert!(err.to_string().contains("nonexistent"));
+        assert!(err.to_string().contains("no packages configured"));
+    }
+
+    #[test]
+    fn packages_not_serialized_when_empty() {
+        let config = ReleaseConfig::default();
+        let yaml = serde_yaml_ng::to_string(&config).unwrap();
+        assert!(!yaml.contains("packages"));
     }
 }
