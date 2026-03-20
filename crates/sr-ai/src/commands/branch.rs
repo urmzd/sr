@@ -44,7 +44,7 @@ pub async fn run(args: &BranchArgs, backend_config: &BackendConfig) -> Result<()
         working_dir: repo.root().to_string_lossy().to_string(),
     };
 
-    let response = backend.request(&request).await?;
+    let response = backend.request(&request, None).await?;
     spinner.finish_and_clear();
 
     let branch_name = response.text.trim().to_string();
