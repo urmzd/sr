@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.0 (2026-03-21)
+
+### Breaking Changes
+
+- **ai**: sandbox agent backends to read-only git access with working tree snapshots ([a8937ed](https://github.com/urmzd/sr/commit/a8937ed34df8f5947b6eac6e951ec207e0e6bb2b))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v1.13.0...v2.0.0)
+
+
 ## 1.13.0 (2026-03-20)
 
 ### Features
