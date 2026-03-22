@@ -239,6 +239,18 @@ where
             current_version.clone().unwrap_or(Version::new(0, 0, 0))
         };
 
+        // v0 protection: downshift Major → Minor when version is 0.x.y
+        // to prevent accidentally leaving v0. Use --force to bump to v1.
+        let bump = if base_version.major == 0 && bump == BumpLevel::Major && !self.force {
+            eprintln!(
+                "v0 protection: breaking change detected at v{base_version}, \
+                 downshifting major → minor (use --force to bump to v1)"
+            );
+            BumpLevel::Minor
+        } else {
+            bump
+        };
+
         let next_version = if let Some(ref prerelease_id) = self.config.prerelease {
             let existing_versions: Vec<Version> =
                 all_tags.iter().map(|t| t.version.clone()).collect();
@@ -1006,6 +1018,79 @@ mod tests {
         );
         let plan = s.plan().unwrap();
         assert_eq!(plan.next_version, Version::new(2, 0, 0));
+    }
+
+    #[test]
+    fn plan_v0_breaking_downshifts_to_minor() {
+        let tag = TagInfo {
+            name: "v0.5.0".into(),
+            version: Version::new(0, 5, 0),
+            sha: "c".repeat(40),
+        };
+        let s = make_strategy(
+            vec![tag],
+            vec![raw_commit("feat!: breaking change")],
+            ReleaseConfig::default(),
+        );
+        let plan = s.plan().unwrap();
+        // v0 protection: Major → Minor, so 0.5.0 → 0.6.0 (not 1.0.0)
+        assert_eq!(plan.next_version, Version::new(0, 6, 0));
+        assert_eq!(plan.bump, BumpLevel::Minor);
+    }
+
+    #[test]
+    fn plan_v0_breaking_with_force_bumps_major() {
+        let tag = TagInfo {
+            name: "v0.5.0".into(),
+            version: Version::new(0, 5, 0),
+            sha: "c".repeat(40),
+        };
+        let mut s = make_strategy(
+            vec![tag],
+            vec![raw_commit("feat!: breaking change")],
+            ReleaseConfig::default(),
+        );
+        s.force = true;
+        let plan = s.plan().unwrap();
+        // --force bypasses v0 protection
+        assert_eq!(plan.next_version, Version::new(1, 0, 0));
+        assert_eq!(plan.bump, BumpLevel::Major);
+    }
+
+    #[test]
+    fn plan_v0_feat_stays_minor() {
+        let tag = TagInfo {
+            name: "v0.5.0".into(),
+            version: Version::new(0, 5, 0),
+            sha: "c".repeat(40),
+        };
+        let s = make_strategy(
+            vec![tag],
+            vec![raw_commit("feat: new feature")],
+            ReleaseConfig::default(),
+        );
+        let plan = s.plan().unwrap();
+        // Non-breaking feat in v0 stays as minor bump
+        assert_eq!(plan.next_version, Version::new(0, 6, 0));
+        assert_eq!(plan.bump, BumpLevel::Minor);
+    }
+
+    #[test]
+    fn plan_v0_fix_stays_patch() {
+        let tag = TagInfo {
+            name: "v0.5.0".into(),
+            version: Version::new(0, 5, 0),
+            sha: "c".repeat(40),
+        };
+        let s = make_strategy(
+            vec![tag],
+            vec![raw_commit("fix: bug fix")],
+            ReleaseConfig::default(),
+        );
+        let plan = s.plan().unwrap();
+        // Fix in v0 stays as patch
+        assert_eq!(plan.next_version, Version::new(0, 5, 1));
+        assert_eq!(plan.bump, BumpLevel::Patch);
     }
 
     // --- execute() tests ---
