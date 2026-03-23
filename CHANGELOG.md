@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.3.1 (2026-03-23)
+
+### Bug Fixes
+
+- **snapshot**: replace stash-based snapshots with direct file copies ([898fb67](https://github.com/urmzd/sr/commit/898fb67d59998e112d7e9dfaaf5c75c5575c80b1))
+
+### Documentation
+
+- add sr rebase command and fix stale versions ([038ba35](https://github.com/urmzd/sr/commit/038ba3594aee9756d91ee908be1d18eba2db1ca8))
+
+### Miscellaneous
+
+- **snapshot**: add snapshot/restore integration tests ([42742c6](https://github.com/urmzd/sr/commit/42742c64bb431bb08582e5433483ac3e24954396))
+- **justfile**: add record and ci recipes ([0f86f98](https://github.com/urmzd/sr/commit/0f86f9841f096aed18fa246b8fce133877f62c9c))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v2.3.0...v2.3.1)
+
+
 ## 2.3.0 (2026-03-22)
 
 ### Features
