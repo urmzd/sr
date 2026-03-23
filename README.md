@@ -18,7 +18,15 @@
 ## Showcase
 
 <p align="center">
-  <img src="showcase/sr-commit.gif" alt="sr commit demo" width="600">
+  <img src="showcase/sr-commit.gif" alt="sr commit — AI-powered atomic commits" width="600">
+</p>
+
+<p align="center">
+  <img src="showcase/sr-commit.png" alt="sr commit — commit plan and execution" width="600">
+</p>
+
+<p align="center">
+  <img src="showcase/sr-plan.png" alt="sr plan — release preview with changelog" width="600">
 </p>
 
 ## Why?
