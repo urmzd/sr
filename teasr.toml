@@ -16,13 +16,28 @@ name = "sr-commit"
 theme = "dracula"
 cols = 110
 rows = 40
-cwd = "."
 
 [scenes.intro]
 text = "sr commit\nAI-powered atomic commits"
 duration = 2000
 center = true
 
+# Hidden: reset one commit to stage changes for the demo
+[[scenes.interactions]]
+type = "type"
+text = "git reset --soft HEAD~1 && clear"
+speed = 0
+hidden = true
+[[scenes.interactions]]
+type = "key"
+key = "enter"
+hidden = true
+[[scenes.interactions]]
+type = "wait"
+duration = 1000
+hidden = true
+
+# Visible demo
 [[scenes.interactions]]
 type = "type"
 text = "sr commit --dry-run"
