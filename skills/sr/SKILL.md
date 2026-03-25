@@ -1,7 +1,8 @@
 ---
 name: sr
 description: AI-powered release engineering — from commit to release. AI-powered commits, code review, PR generation, version bumping, changelog generation, and GitHub releases from conventional commits.
-argument-hint: [command]
+metadata:
+  argument-hint: [command]
 ---
 
 # sr — AI-powered Release Engineering
