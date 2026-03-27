@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use sr_ai::ai::{Backend, BackendConfig};
 use sr_core::changelog::DefaultChangelogFormatter;
 use sr_core::commit::DefaultCommitParser;
-use sr_core::config::{DEFAULT_CONFIG_FILE, HookEntry, LEGACY_CONFIG_FILE, ReleaseConfig};
+use sr_core::config::{DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE, ReleaseConfig};
 use sr_core::error::ReleaseError;
 use sr_core::release::{ReleaseStrategy, TrunkReleaseStrategy, VcsProvider};
 use sr_git::NativeGitRepository;
@@ -367,274 +367,6 @@ fn ensure_hooks_synced() {
             Err(e) => eprintln!("warning: failed to sync hooks: {e}"),
         }
     }
-}
-
-/// Build a JSON context object for a git hook based on its name and positional args.
-fn build_hook_json(hook_name: &str, args: &[String]) -> serde_json::Value {
-    let mut obj = serde_json::Map::new();
-    obj.insert("hook".into(), serde_json::Value::String(hook_name.into()));
-    obj.insert(
-        "args".into(),
-        serde_json::Value::Array(
-            args.iter()
-                .map(|a| serde_json::Value::String(a.clone()))
-                .collect(),
-        ),
-    );
-
-    // Add named fields for well-known hooks
-    match hook_name {
-        "commit-msg" => {
-            if let Some(f) = args.first() {
-                obj.insert("message_file".into(), serde_json::Value::String(f.clone()));
-            }
-        }
-        "prepare-commit-msg" => {
-            if let Some(f) = args.first() {
-                obj.insert("message_file".into(), serde_json::Value::String(f.clone()));
-            }
-            if let Some(s) = args.get(1) {
-                obj.insert("source".into(), serde_json::Value::String(s.clone()));
-            }
-            if let Some(s) = args.get(2) {
-                obj.insert("sha".into(), serde_json::Value::String(s.clone()));
-            }
-        }
-        "pre-push" => {
-            if let Some(r) = args.first() {
-                obj.insert("remote_name".into(), serde_json::Value::String(r.clone()));
-            }
-            if let Some(u) = args.get(1) {
-                obj.insert("remote_url".into(), serde_json::Value::String(u.clone()));
-            }
-        }
-        "pre-rebase" => {
-            if let Some(u) = args.first() {
-                obj.insert("upstream".into(), serde_json::Value::String(u.clone()));
-            }
-            if let Some(b) = args.get(1) {
-                obj.insert("branch".into(), serde_json::Value::String(b.clone()));
-            }
-        }
-        "post-checkout" => {
-            if let Some(r) = args.first() {
-                obj.insert("prev_ref".into(), serde_json::Value::String(r.clone()));
-            }
-            if let Some(r) = args.get(1) {
-                obj.insert("new_ref".into(), serde_json::Value::String(r.clone()));
-            }
-            if let Some(f) = args.get(2) {
-                obj.insert(
-                    "branch_checkout".into(),
-                    serde_json::Value::String(f.clone()),
-                );
-            }
-        }
-        "post-merge" => {
-            if let Some(s) = args.first() {
-                obj.insert("squash".into(), serde_json::Value::String(s.clone()));
-            }
-        }
-        _ => {}
-    }
-
-    serde_json::Value::Object(obj)
-}
-
-/// Get staged files from git (excluding deletes).
-fn staged_files() -> anyhow::Result<Vec<String>> {
-    let output = std::process::Command::new("git")
-        .args(["diff", "--cached", "--name-only", "--diff-filter=ACMR"])
-        .output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect())
-}
-
-/// Match files against glob patterns. Matches against both the full path and the basename.
-fn match_files(files: &[String], patterns: &[String]) -> Vec<String> {
-    let compiled: Vec<glob::Pattern> = patterns
-        .iter()
-        .filter_map(|p| glob::Pattern::new(p).ok())
-        .collect();
-
-    files
-        .iter()
-        .filter(|f| {
-            let basename = Path::new(f)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(f);
-            compiled
-                .iter()
-                .any(|pat| pat.matches(f) || pat.matches(basename))
-        })
-        .cloned()
-        .collect()
-}
-
-/// Run a single shell command, optionally piping JSON context to stdin.
-fn run_shell_cmd(cmd: &str, json_str: Option<&str>) -> anyhow::Result<()> {
-    let status = std::process::Command::new("sh")
-        .args(["-c", cmd])
-        .stdin(if json_str.is_some() {
-            std::process::Stdio::piped()
-        } else {
-            std::process::Stdio::inherit()
-        })
-        .spawn()
-        .and_then(|mut child| {
-            if let Some(json) = json_str
-                && let Some(ref mut stdin) = child.stdin
-            {
-                use std::io::Write;
-                let _ = stdin.write_all(json.as_bytes());
-            }
-            child.wait()
-        })?;
-
-    if !status.success() {
-        let code = status.code().unwrap_or(1);
-        std::process::exit(code);
-    }
-
-    Ok(())
-}
-
-/// Run all entries for a configured hook.
-///
-/// Simple entries run as shell commands with JSON context piped to stdin.
-/// Step entries match staged files against patterns and run rules only when matches exist.
-/// Rules containing `{files}` receive the matched file list.
-fn run_hook(config: &ReleaseConfig, hook_name: &str, args: &[String]) -> anyhow::Result<()> {
-    let entries = config
-        .hooks
-        .hooks
-        .get(hook_name)
-        .ok_or_else(|| anyhow::anyhow!("no hook configured for '{hook_name}'"))?;
-
-    if entries.is_empty() {
-        return Ok(());
-    }
-
-    let json = build_hook_json(hook_name, args);
-    let json_str = serde_json::to_string(&json)?;
-
-    // Lazily fetch staged files only when a Step entry needs them.
-    let mut cached_staged: Option<Vec<String>> = None;
-
-    for entry in entries {
-        match entry {
-            HookEntry::Simple(cmd) => {
-                run_shell_cmd(cmd, Some(&json_str))?;
-            }
-            HookEntry::Step {
-                step,
-                patterns,
-                rules,
-            } => {
-                let all_staged =
-                    cached_staged.get_or_insert_with(|| staged_files().unwrap_or_default());
-
-                if all_staged.is_empty() {
-                    eprintln!("{hook_name}: no staged files, skipping.");
-                    return Ok(());
-                }
-
-                let matched = match_files(all_staged, patterns);
-                if matched.is_empty() {
-                    eprintln!("{hook_name} [{step}]: no files match {patterns:?}, skipping.");
-                    continue;
-                }
-
-                let files_str = matched.join(" ");
-
-                for rule in rules {
-                    let cmd = if rule.contains("{files}") {
-                        rule.replace("{files}", &files_str)
-                    } else {
-                        rule.clone()
-                    };
-
-                    eprintln!("{hook_name} [{step}]: {cmd}");
-                    run_shell_cmd(&cmd, None)?;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Validate a commit message file against the configured conventional commit pattern and types.
-/// Reads hook JSON from stdin to get the message_file path.
-fn validate_commit_msg(config: &ReleaseConfig) -> anyhow::Result<()> {
-    use std::io::Read;
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
-
-    let json: serde_json::Value =
-        serde_json::from_str(&input).map_err(|e| anyhow::anyhow!("invalid JSON on stdin: {e}"))?;
-
-    let file = json["message_file"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("missing 'message_file' in hook JSON"))?;
-
-    let content = std::fs::read_to_string(file)
-        .map_err(|e| anyhow::anyhow!("cannot read commit message file: {e}"))?;
-
-    let first_line = content.lines().next().unwrap_or("").trim();
-
-    // Allow merge commits
-    if first_line.starts_with("Merge ") {
-        return Ok(());
-    }
-
-    // Allow fixup/squash/amend commits (from rebase -i)
-    if first_line.starts_with("fixup! ")
-        || first_line.starts_with("squash! ")
-        || first_line.starts_with("amend! ")
-    {
-        return Ok(());
-    }
-
-    let re = regex::Regex::new(&config.commit_pattern)
-        .map_err(|e| anyhow::anyhow!("invalid commit_pattern: {e}"))?;
-
-    if !re.is_match(first_line) {
-        let type_names: Vec<&str> = config.types.iter().map(|t| t.name.as_str()).collect();
-        anyhow::bail!(
-            "commit message does not follow Conventional Commits.\n\n\
-             \x20 Expected: <type>(<scope>): <description>\n\
-             \x20 Got:      {first_line}\n\n\
-             \x20 Valid types: {}\n\
-             \x20 Breaking:    append '!' before the colon, e.g. feat!: ...\n\n\
-             \x20 Examples:\n\
-             \x20   feat: add release dry-run flag\n\
-             \x20   fix(core): handle empty tag list\n\
-             \x20   feat!: redesign config format",
-            type_names.join(", "),
-        );
-    }
-
-    // Extract and validate the type
-    if let Some(caps) = re.captures(first_line) {
-        let msg_type = caps.name("type").map(|m| m.as_str()).unwrap_or_default();
-
-        if !config.types.iter().any(|t| t.name == msg_type) {
-            let type_names: Vec<&str> = config.types.iter().map(|t| t.name.as_str()).collect();
-            anyhow::bail!(
-                "commit type '{msg_type}' is not allowed.\n\n\
-                 \x20 Valid types: {}",
-                type_names.join(", "),
-            );
-        }
-    }
-
-    Ok(())
 }
 
 const INSTALL_SCRIPT_URL: &str = "https://raw.githubusercontent.com/urmzd/sr/main/install.sh";
@@ -1039,18 +771,19 @@ async fn run() -> anyhow::Result<()> {
         Commands::Ask(args) => sr_ai::commands::ask::run(&args, &backend_config).await,
         Commands::Cache(args) => sr_ai::commands::cache::run(&args),
 
-        Commands::Hook { command } => match command {
-            HookCommands::CommitMsg => {
-                let config_path = resolve_config_path();
-                let config = ReleaseConfig::load(&config_path)?;
-                validate_commit_msg(&config)
+        Commands::Hook { command } => {
+            let config_path = resolve_config_path();
+            let config = ReleaseConfig::load(&config_path)?;
+            match command {
+                HookCommands::CommitMsg => {
+                    sr_core::hooks::validate_commit_msg(&config)?;
+                }
+                HookCommands::Run { hook_name, args } => {
+                    sr_core::hooks::run_hook(&config, &hook_name, &args)?;
+                }
             }
-            HookCommands::Run { hook_name, args } => {
-                let config_path = resolve_config_path();
-                let config = ReleaseConfig::load(&config_path)?;
-                run_hook(&config, &hook_name, &args)
-            }
-        },
+            Ok(())
+        }
 
         Commands::Update => self_update(),
     }

@@ -1,4 +1,4 @@
-name: "sr"
+name: "SR - Semantic Release"
 author: "urmzd"
 description: "Automated semantic versioning and release management — single binary, zero-config, language-agnostic."
 
