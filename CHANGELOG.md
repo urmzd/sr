@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.4.3 (2026-03-27)
+
+### Bug Fixes
+
+- use lightweight tags and refactor hooks to core (#4) ([8b87757](https://github.com/urmzd/sr/commit/8b877570aea0e5ba29d5acf02fa0beb52d1debf9))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v2.4.2...v2.4.3)
+
+
 ## 2.4.2 (2026-03-26)
 
 ### Bug Fixes
