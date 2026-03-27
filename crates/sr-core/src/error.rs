@@ -28,6 +28,9 @@ pub enum ReleaseError {
     #[error("build command failed: {0}")]
     BuildCommand(String),
 
+    #[error("hook failed: {0}")]
+    Hook(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

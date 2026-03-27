@@ -351,7 +351,7 @@ where
         // 0. Run pre-release command if configured
         if let Some(ref cmd) = self.config.pre_release_command {
             eprintln!("Running pre-release command: {cmd}");
-            run_hook(cmd, &version_str, &plan.tag_name, "pre_release_command")?;
+            run_lifecycle_hook(cmd, &version_str, &plan.tag_name, "pre_release_command")?;
         }
 
         // 1. Format changelog
@@ -497,7 +497,7 @@ where
         // 12. Run post-release command if configured
         if let Some(ref cmd) = self.config.post_release_command {
             eprintln!("Running post-release command: {cmd}");
-            run_hook(cmd, &version_str, &plan.tag_name, "post_release_command")?;
+            run_lifecycle_hook(cmd, &version_str, &plan.tag_name, "post_release_command")?;
         }
 
         eprintln!("Released {}", plan.tag_name);
@@ -570,7 +570,7 @@ where
         // 3.5. Run build command if configured
         if let Some(ref cmd) = self.config.build_command {
             eprintln!("Running build command: {cmd}");
-            run_hook(cmd, version_str, &plan.tag_name, "build_command")?;
+            run_lifecycle_hook(cmd, version_str, &plan.tag_name, "build_command")?;
         }
 
         Ok(bumped_files)
@@ -599,21 +599,15 @@ fn restore_snapshots(snapshots: &[(String, Option<String>)]) {
     }
 }
 
-/// Run a shell hook command with SR_VERSION and SR_TAG env vars.
-fn run_hook(cmd: &str, version: &str, tag: &str, label: &str) -> Result<(), ReleaseError> {
-    let status = std::process::Command::new("sh")
-        .args(["-c", cmd])
-        .env("SR_VERSION", version)
-        .env("SR_TAG", tag)
-        .status()
-        .map_err(|e| ReleaseError::BuildCommand(format!("{label}: {e}")))?;
-    if !status.success() {
-        return Err(ReleaseError::BuildCommand(format!(
-            "{label} exited with {}",
-            status.code().unwrap_or(-1)
-        )));
-    }
-    Ok(())
+/// Run a release lifecycle command with SR_VERSION and SR_TAG env vars.
+fn run_lifecycle_hook(
+    cmd: &str,
+    version: &str,
+    tag: &str,
+    label: &str,
+) -> Result<(), ReleaseError> {
+    crate::hooks::run_shell(cmd, None, &[("SR_VERSION", version), ("SR_TAG", tag)])
+        .map_err(|e| ReleaseError::BuildCommand(format!("{label}: {e}")))
 }
 
 /// Resolve glob patterns into a list of file paths.
