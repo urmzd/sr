@@ -102,7 +102,7 @@ The installer automatically adds `~/.local/bin` to your `PATH` in your shell pro
 ### GitHub Action (recommended)
 
 ```yaml
-- uses: urmzd/sr@v2
+- uses: urmzd/sr@v3
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -126,13 +126,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v2
+      - uses: urmzd/sr@v3
 ```
 
 Dry-run on pull requests:
 
 ```yaml
-      - uses: urmzd/sr@v2
+      - uses: urmzd/sr@v3
         with:
           command: release
           dry-run: "true"
@@ -141,7 +141,7 @@ Dry-run on pull requests:
 Use outputs in subsequent steps:
 
 ```yaml
-      - uses: urmzd/sr@v2
+      - uses: urmzd/sr@v3
         id: sr
       - if: steps.sr.outputs.released == 'true'
         run: echo "Released ${{ steps.sr.outputs.version }}"
@@ -156,7 +156,7 @@ Upload artifacts to the release:
           path: release-assets
           merge-multiple: true
 
-      - uses: urmzd/sr@v2
+      - uses: urmzd/sr@v3
         with:
           artifacts: "release-assets/*"
 ```
@@ -166,7 +166,7 @@ The `artifacts` input accepts glob patterns (newline or comma separated). All ma
 Run a build step between version bump and commit (useful for lock files, codegen, etc.):
 
 ```yaml
-      - uses: urmzd/sr@v2
+      - uses: urmzd/sr@v3
         with:
           build-command: "cargo build --release"
 ```
@@ -196,7 +196,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v2
+      - uses: urmzd/sr@v3
         with:
           force: ${{ github.event.inputs.force || 'false' }}
 ```
@@ -344,7 +344,7 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - uses: urmzd/sr@v2
+      - uses: urmzd/sr@v3
         with:
           github-token: ${{ steps.app-token.outputs.token }}
 ```
@@ -445,7 +445,7 @@ sr commit → sr review → sr pr → push → sr plan → sr release
 Use the action outputs to run steps conditionally:
 
 ```yaml
-- uses: urmzd/sr@v2
+- uses: urmzd/sr@v3
   id: sr
 - if: steps.sr.outputs.released == 'true'
   run: ./deploy.sh ${{ steps.sr.outputs.version }}
