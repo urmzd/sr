@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.4.8 (2026-03-30)
+
+### Bug Fixes
+
+- **github**: increase body size limit for floating tag asset sync ([40644d2](https://github.com/urmzd/sr/commit/40644d265a6a5ffd5f507b309995c8ee2842bbdd))
+
+### Refactoring
+
+- **core**: improve release strategy design for maintainability ([48049c1](https://github.com/urmzd/sr/commit/48049c1da7bd9e58719ea7cc37e2e36fe6e29315))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v2.4.7...v2.4.8)
+
+
 ## 2.4.7 (2026-03-30)
 
 ### Bug Fixes
