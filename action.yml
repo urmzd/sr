@@ -83,6 +83,8 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        SR_REPO: ${{ github.action_repository }}
+        SR_REF: ${{ github.action_ref }}
       run: |
         set -euo pipefail
 
@@ -102,7 +104,7 @@ runs:
         esac
 
         BINARY_NAME="sr-${TARGET}"
-        DOWNLOAD_URL="https://github.com/${{ github.action_repository }}/releases/download/${{ github.action_ref }}/${BINARY_NAME}"
+        DOWNLOAD_URL="https://github.com/${SR_REPO}/releases/download/${SR_REF}/${BINARY_NAME}"
 
         mkdir -p "$HOME/.local/bin"
         curl -sSfL "$DOWNLOAD_URL" -o "$HOME/.local/bin/sr"
