@@ -209,31 +209,11 @@ impl VcsProvider for GitHubProvider {
         floating_tag: &str,
         versioned_tag: &str,
     ) -> Result<(), ReleaseError> {
-        // Get the versioned release to read its assets and metadata
         let versioned = self.get_release_by_tag(versioned_tag)?;
 
         // Create or update the floating tag release
         let floating_release = if self.release_exists(floating_tag)? {
             let existing = self.get_release_by_tag(floating_tag)?;
-            // Delete existing assets first
-            for asset in &existing.assets {
-                let url = format!(
-                    "{}/repos/{}/{}/releases/assets/{}",
-                    self.api_url(),
-                    self.owner,
-                    self.repo,
-                    asset.id
-                );
-                let _ = self
-                    .agent()
-                    .delete(&url)
-                    .header("Authorization", &format!("Bearer {}", self.token))
-                    .header("Accept", "application/vnd.github+json")
-                    .header("X-GitHub-Api-Version", "2022-11-28")
-                    .header("User-Agent", "sr-github")
-                    .call();
-            }
-            // Update the release metadata and ensure it's not marked as latest
             let url = format!(
                 "{}/repos/{}/{}/releases/{}",
                 self.api_url(),
@@ -257,7 +237,7 @@ impl VcsProvider for GitHubProvider {
                 .map_err(|e| {
                     ReleaseError::Vcs(format!("GitHub API PATCH floating release: {e}"))
                 })?;
-            self.get_release_by_tag(floating_tag)?
+            existing
         } else {
             let url = format!(
                 "{}/repos/{}/{}/releases",
@@ -285,46 +265,88 @@ impl VcsProvider for GitHubProvider {
                 .map_err(|e| ReleaseError::Vcs(format!("failed to parse release response: {e}")))?
         };
 
-        // Copy assets from the versioned release to the floating release
-        if !versioned.assets.is_empty() {
-            let upload_base = floating_release
-                .upload_url
-                .split('{')
-                .next()
-                .unwrap_or(&floating_release.upload_url);
+        // Swap assets per-asset: delete old then upload new for each, minimising
+        // the window where a given asset is unavailable.
+        let upload_base = floating_release
+            .upload_url
+            .split('{')
+            .next()
+            .unwrap_or(&floating_release.upload_url);
 
-            for asset in &versioned.assets {
-                // Download the asset from the versioned release
-                let data = self
+        for asset in &versioned.assets {
+            // Download from versioned release first
+            let data = self
+                .agent()
+                .get(&asset.browser_download_url)
+                .header("Authorization", &format!("Bearer {}", self.token))
+                .header("Accept", "application/octet-stream")
+                .header("User-Agent", "sr-github")
+                .call()
+                .map_err(|e| ReleaseError::Vcs(format!("download asset {}: {e}", asset.name)))?
+                .into_body()
+                .with_config()
+                .limit(512 * 1024 * 1024)
+                .read_to_vec()
+                .map_err(|e| ReleaseError::Vcs(format!("read asset body {}: {e}", asset.name)))?;
+
+            // Delete the matching old asset (if any) then immediately upload
+            if let Some(old) = floating_release
+                .assets
+                .iter()
+                .find(|a| a.name == asset.name)
+            {
+                let del_url = format!(
+                    "{}/repos/{}/{}/releases/assets/{}",
+                    self.api_url(),
+                    self.owner,
+                    self.repo,
+                    old.id
+                );
+                let _ = self
                     .agent()
-                    .get(&asset.browser_download_url)
-                    .header("Authorization", &format!("Bearer {}", self.token))
-                    .header("Accept", "application/octet-stream")
-                    .header("User-Agent", "sr-github")
-                    .call()
-                    .map_err(|e| ReleaseError::Vcs(format!("download asset {}: {e}", asset.name)))?
-                    .into_body()
-                    .with_config()
-                    .limit(512 * 1024 * 1024)
-                    .read_to_vec()
-                    .map_err(|e| {
-                        ReleaseError::Vcs(format!("read asset body {}: {e}", asset.name))
-                    })?;
-
-                let content_type = mime_from_extension(&asset.name);
-                let url = format!("{}?name={}", upload_base, asset.name);
-
-                self.agent()
-                    .post(&url)
+                    .delete(&del_url)
                     .header("Authorization", &format!("Bearer {}", self.token))
                     .header("Accept", "application/vnd.github+json")
                     .header("X-GitHub-Api-Version", "2022-11-28")
                     .header("User-Agent", "sr-github")
-                    .header("Content-Type", content_type)
-                    .send(&data[..])
-                    .map_err(|e| {
-                        ReleaseError::Vcs(format!("upload asset {} to floating: {e}", asset.name))
-                    })?;
+                    .call();
+            }
+
+            let content_type = mime_from_extension(&asset.name);
+            let url = format!("{}?name={}", upload_base, asset.name);
+            self.agent()
+                .post(&url)
+                .header("Authorization", &format!("Bearer {}", self.token))
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .header("User-Agent", "sr-github")
+                .header("Content-Type", content_type)
+                .send(&data[..])
+                .map_err(|e| {
+                    ReleaseError::Vcs(format!("upload asset {} to floating: {e}", asset.name))
+                })?;
+        }
+
+        // Clean up any leftover assets not present in the versioned release
+        let versioned_names: std::collections::HashSet<&str> =
+            versioned.assets.iter().map(|a| a.name.as_str()).collect();
+        for old in &floating_release.assets {
+            if !versioned_names.contains(old.name.as_str()) {
+                let del_url = format!(
+                    "{}/repos/{}/{}/releases/assets/{}",
+                    self.api_url(),
+                    self.owner,
+                    self.repo,
+                    old.id
+                );
+                let _ = self
+                    .agent()
+                    .delete(&del_url)
+                    .header("Authorization", &format!("Bearer {}", self.token))
+                    .header("Accept", "application/vnd.github+json")
+                    .header("X-GitHub-Api-Version", "2022-11-28")
+                    .header("User-Agent", "sr-github")
+                    .call();
             }
         }
 
