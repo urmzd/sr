@@ -43,6 +43,10 @@ inputs:
     description: "Shell command to run after version bump, before commit (SR_VERSION and SR_TAG env vars available)"
     required: false
     default: ""
+  sha256:
+    description: "Expected SHA256 checksum of the sr binary (hex string). When provided, the downloaded binary is verified against this value."
+    required: false
+    default: ""
 
 outputs:
   version:
@@ -85,6 +89,7 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         SR_REPO: ${{ github.action_repository }}
         SR_REF: ${{ github.action_ref }}
+        SR_SHA256: ${{ inputs.sha256 }}
       run: |
         set -euo pipefail
 
@@ -104,12 +109,22 @@ runs:
         esac
 
         BINARY_NAME="sr-${TARGET}"
-        BASE_URL="https://github.com/${SR_REPO}/releases/download/${SR_REF}"
 
         mkdir -p "$HOME/.local/bin"
-        curl -sSfL "${BASE_URL}/${BINARY_NAME}" -o "$HOME/.local/bin/sr"
-        curl -sSfL "${BASE_URL}/${BINARY_NAME}.sha256" -o "/tmp/sr.sha256"
-        (cd "$HOME/.local/bin" && sed "s/${BINARY_NAME}/sr/" /tmp/sr.sha256 | sha256sum -c -)
+        gh release download "$SR_REF" \
+          --repo "$SR_REPO" \
+          --pattern "$BINARY_NAME" \
+          --output "$HOME/.local/bin/sr"
+
+        if [ -n "$SR_SHA256" ]; then
+          ACTUAL=$(sha256sum "$HOME/.local/bin/sr" | awk '{print $1}')
+          if [ "$ACTUAL" != "$SR_SHA256" ]; then
+            echo "SHA256 mismatch: expected $SR_SHA256, got $ACTUAL"
+            exit 1
+          fi
+          echo "SHA256 verified: $ACTUAL"
+        fi
+
         chmod +x "$HOME/.local/bin/sr"
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
