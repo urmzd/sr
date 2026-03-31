@@ -71,7 +71,7 @@ sr plan -p cli              # preview next release for cli
 
 ## Release Execution Order
 
-1. Pre-release command → 2. Bump version files → 3. Write changelog → 4. Build command → 5. Git commit → 6. Create/push tag (signed if configured) → 7. Floating tag → 8. Create/update GitHub release (draft if configured) → 9. Upload artifacts + SHA256 checksums → 10. Verify release → 11. Post-release command
+1. Pre-release command → 2. Bump version files → 3. Write changelog → 4. Build command → 5. Git commit → 6. Create/push tag (signed if configured) → 7. Floating tag → 8. Create/update GitHub release (draft if configured) → 9. Upload artifacts → 10. Verify release → 11. Post-release command
 
 ## Environment
 

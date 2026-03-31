@@ -84,7 +84,6 @@ If a snapshot restore fails, the snapshot is preserved for manual recovery and i
 - Changelog generation (markdown, with configurable sections and compare URLs)
 - GitHub Releases (via REST API — no external tools needed)
 - Draft releases and signed tags (GPG/SSH)
-- SHA256 checksum sidecar files for uploaded artifacts
 - Customizable release names via minijinja templates
 - Structured JSON output for CI piping (`sr release | jq .version`)
 - Trunk-based workflow (tag + release from `main`)
@@ -162,6 +161,22 @@ Upload artifacts to the release:
 ```
 
 The `artifacts` input accepts glob patterns (newline or comma separated). All matching files are uploaded to the GitHub release. This keeps artifact handling self-contained in the action — no separate upload steps needed.
+
+Verify the downloaded sr binary with a SHA256 checksum:
+
+```yaml
+      - uses: urmzd/sr@v3
+        with:
+          sha256: "abc123..."
+```
+
+For maximum security, pin the action to a full-length commit SHA:
+
+```yaml
+      - uses: urmzd/sr@<commit-sha> # v3.x.x
+        with:
+          sha256: "abc123..."
+```
 
 Run a build step between version bump and commit (useful for lock files, codegen, etc.):
 
@@ -899,7 +914,7 @@ Understanding the execution order helps when configuring hooks:
 6. **Create and push tag** — annotated tag at HEAD (signed with GPG/SSH when `sign_tags: true`)
 7. **Create/update floating tag** (if `floating_tags: true`)
 8. **Create or update GitHub release** — uses PATCH to preserve existing assets on re-runs; supports `draft` mode
-9. **Upload artifacts** — with SHA256 checksum sidecar files (`.sha256`) and MIME-type-aware uploads
+9. **Upload artifacts** — MIME-type-aware uploads to the GitHub release
 10. **Verify release** — confirms the GitHub release exists and is accessible
 11. **Post-release command** — `post_release_command` runs last (notifications, deployments)
 
