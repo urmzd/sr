@@ -7,6 +7,7 @@
 # Environment variables:
 #   SR_VERSION     — version to install (e.g. "v1.2.0"); defaults to latest
 #   SR_INSTALL_DIR — installation directory; defaults to $HOME/.local/bin
+#   SR_SHA256      — expected SHA256 checksum of the binary (hex string); skips verification if unset
 
 set -eu
 
@@ -57,6 +58,22 @@ main() {
 
     echo "Downloading sr $tag for $target..."
     curl -fsSL "$url" -o "$install_dir/sr"
+
+    if [ -n "${SR_SHA256:-}" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum "$install_dir/sr" | awk '{print $1}')
+        elif command -v shasum >/dev/null 2>&1; then
+            actual=$(shasum -a 256 "$install_dir/sr" | awk '{print $1}')
+        else
+            err "sha256sum or shasum required for checksum verification"
+        fi
+        if [ "$actual" != "$SR_SHA256" ]; then
+            rm -f "$install_dir/sr"
+            err "SHA256 mismatch: expected $SR_SHA256, got $actual"
+        fi
+        echo "SHA256 verified: $actual"
+    fi
+
     chmod +x "$install_dir/sr"
 
     echo "Installed sr to $install_dir/sr"
