@@ -113,8 +113,9 @@ runs:
         API="https://api.github.com/repos/${SR_REPO}"
         echo "Resolving ref=${SR_REF} via ${API}"
 
+        # API calls use no auth — the repo is public and the caller's token
+        # may be scoped to a different repository (e.g. GitHub App tokens).
         RELEASE_TAG=$(curl -fsSL \
-          -H "Authorization: token $GH_TOKEN" \
           -H "Accept: application/vnd.github+json" \
           "${API}/releases/tags/${SR_REF}" 2>/dev/null \
           | grep '"tag_name"' | head -1 \
@@ -125,7 +126,6 @@ runs:
           # Floating tag or non-release ref — find the latest release whose tag
           # shares the same major version prefix (v1 -> v1.x.x).
           RELEASES=$(curl -fsSL \
-            -H "Authorization: token $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "${API}/releases?per_page=20")
           MAJOR=$(echo "$SR_REF" | grep -oE '^v[0-9]+')
