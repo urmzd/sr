@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.2.0 (2026-04-01)
+
+### Features
+
+- **install**: add optional SHA256 verification support ([027e01b](https://github.com/urmzd/sr/commit/027e01b31d9869b14d585c48fbf0c55e4447dffd))
+- **action**: add optional SHA256 verification input ([946a3a4](https://github.com/urmzd/sr/commit/946a3a4cb0c7c6a3b835654e518752bd495d5195))
+
+### Documentation
+
+- update for checksum verification changes ([cc2465b](https://github.com/urmzd/sr/commit/cc2465be1f9c631dbcac9936b200e356969ebc17))
+
+### Refactoring
+
+- **release**: remove floating release and checksum features ([35ba5ea](https://github.com/urmzd/sr/commit/35ba5ea6f4c0821557ffd685c5f85165f707925e))
+- **core**: remove sha2 dependency ([ede06bf](https://github.com/urmzd/sr/commit/ede06bfd0b859d45d8e28d4d501db2e1dfb0964f))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v3.1.0...v3.2.0)
+
+
 ## 3.1.0 (2026-03-30)
 
 ### Features
