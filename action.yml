@@ -1,6 +1,6 @@
 name: "SR - Semantic Release"
-author: "urmzd"
 description: "Automated semantic versioning and release management — single binary, zero-config, language-agnostic."
+author: "urmzd"
 
 branding:
   icon: "upload-cloud"
@@ -9,43 +9,33 @@ branding:
 inputs:
   command:
     description: "The sr subcommand to run (release, plan, changelog, version, config, init, completions, commit, rebase, review, explain, branch, pr, ask, cache, hook, update)"
-    required: false
     default: "release"
   dry-run:
     description: "Preview changes without executing them"
-    required: false
     default: "false"
   force:
     description: "Re-release the current tag (use when a previous release partially failed)"
-    required: false
     default: "false"
   config:
     description: "Path to the config file"
-    required: false
     default: "sr.yaml"
   github-token:
     description: "GitHub token for creating releases"
-    required: false
     default: ${{ github.token }}
   git-user-name:
     description: "Git user name for tag creation"
-    required: false
     default: "sr[bot]"
   git-user-email:
     description: "Git user email for tag creation"
-    required: false
     default: "sr[bot]@urmzd.com"
   artifacts:
     description: "Glob patterns for artifact files to upload (newline or comma separated)"
-    required: false
     default: ""
   build-command:
     description: "Shell command to run after version bump, before commit (SR_VERSION and SR_TAG env vars available)"
-    required: false
     default: ""
   sha256:
     description: "Expected SHA256 checksum of the sr binary (hex string). When provided, the downloaded binary is verified against this value."
-    required: false
     default: ""
 
 outputs:
