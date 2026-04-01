@@ -110,18 +110,8 @@ runs:
         DEST="$HOME/.local/bin/sr"
         mkdir -p "$HOME/.local/bin"
 
-        if command -v gh >/dev/null 2>&1; then
-          gh release download "$SR_REF" \
-            --repo "$SR_REPO" \
-            --pattern "$BINARY_NAME" \
-            --output "$DEST"
-        else
-          # gh CLI unavailable (e.g. GitHub Enterprise Server): fall back to curl.
-          # Releases are always on github.com regardless of the server running this action.
-          URL="https://github.com/${SR_REPO}/releases/download/${SR_REF}/${BINARY_NAME}"
-          echo "gh CLI not found; downloading via curl: $URL"
-          curl -fsSL -H "Authorization: token $GH_TOKEN" "$URL" -o "$DEST"
-        fi
+        URL="https://github.com/${SR_REPO}/releases/download/${SR_REF}/${BINARY_NAME}"
+        curl -fsSL -H "Authorization: token $GH_TOKEN" "$URL" -o "$DEST"
 
         if [ -n "$SR_SHA256" ]; then
           ACTUAL=$(sha256sum "$DEST" | awk '{print $1}')
