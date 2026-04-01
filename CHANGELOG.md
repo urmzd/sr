@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.2.2 (2026-04-01)
+
+### Refactoring
+
+- extract sr binary download into standalone script with curl fallback (#10) ([fa1b52f](https://github.com/urmzd/sr/commit/fa1b52f2735d108d8bfd6a4ef55cc9be18003c58))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v3.2.1...v3.2.2)
+
+
 ## 3.2.1 (2026-04-01)
 
 ### Bug Fixes
