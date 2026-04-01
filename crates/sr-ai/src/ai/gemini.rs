@@ -1,27 +1,48 @@
 use super::{AiBackend, AiEvent, AiRequest, AiResponse};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use std::io::Write as _;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-/// Read-only tools the Gemini agent is allowed to use.
-/// Replaces `--yolo` (which auto-approves everything) with an explicit allowlist.
-/// No mutating git commands (add, commit, push, reset, clean, rm, etc.).
-const ALLOWED_TOOLS: &[&str] = &[
-    "shell(git diff *)",
-    "shell(git log *)",
-    "shell(git show *)",
-    "shell(git status *)",
-    "shell(git ls-files *)",
-    "shell(git rev-parse *)",
-    "shell(git branch *)",
-    "shell(git cat-file *)",
-    "shell(git rev-list *)",
-    "shell(git shortlog *)",
-    "shell(git blame *)",
-    "read_file",
-];
+/// Inline TOML policy that allows only read-only git commands and file reading.
+/// Passed to `--policy` via a temporary file to replace the deprecated `--allowed-tools`.
+const POLICY_TOML: &str = r#"
+# Allow read-only git commands
+[[rule]]
+toolName = "run_shell_command"
+commandRegex = "^git (status|log|diff|show|branch|tag|remote|rev-parse|ls-files|blame|shortlog|describe|cat-file|ls-tree|name-rev|reflog|rev-list)"
+decision = "allow"
+priority = 100
+
+# Allow file reading, searching, and listing
+[[rule]]
+toolName = ["read_file", "glob", "grep_search", "list_directory"]
+decision = "allow"
+priority = 100
+
+# Deny all other shell commands
+[[rule]]
+toolName = "run_shell_command"
+decision = "deny"
+priority = 50
+denyMessage = "Only read-only git commands are permitted."
+
+# Deny file writing/editing
+[[rule]]
+toolName = ["write_file", "replace"]
+decision = "deny"
+priority = 50
+denyMessage = "Write operations are not permitted."
+
+# Deny everything else
+[[rule]]
+toolName = "*"
+decision = "deny"
+priority = 10
+denyMessage = "Only read-only operations are allowed."
+"#;
 
 pub struct GeminiBackend {
     model: Option<String>,
@@ -41,13 +62,20 @@ impl GeminiBackend {
     ) -> Result<AiResponse> {
         let prompt = build_prompt(req);
 
+        // Write policy to a temp file so it lives long enough for the process.
+        let mut policy_file =
+            tempfile::NamedTempFile::new().context("failed to create policy temp file")?;
+        policy_file
+            .write_all(POLICY_TOML.as_bytes())
+            .context("failed to write policy file")?;
+
         let mut cmd = Command::new("gemini");
         cmd.current_dir(&req.working_dir)
             .arg("--prompt")
             .arg(&prompt)
             .arg("--sandbox")
-            .arg("--allowed-tools")
-            .args(ALLOWED_TOOLS)
+            .arg("--policy")
+            .arg(policy_file.path())
             .arg("--output-format")
             .arg("stream-json");
 
@@ -137,13 +165,19 @@ impl GeminiBackend {
     async fn request_batch(&self, req: &AiRequest) -> Result<AiResponse> {
         let prompt = build_prompt(req);
 
+        let mut policy_file =
+            tempfile::NamedTempFile::new().context("failed to create policy temp file")?;
+        policy_file
+            .write_all(POLICY_TOML.as_bytes())
+            .context("failed to write policy file")?;
+
         let mut cmd = Command::new("gemini");
         cmd.current_dir(&req.working_dir)
             .arg("--prompt")
             .arg(&prompt)
             .arg("--sandbox")
-            .arg("--allowed-tools")
-            .args(ALLOWED_TOOLS);
+            .arg("--policy")
+            .arg(policy_file.path());
 
         if let Some(model) = &self.model {
             cmd.arg("--model").arg(model);

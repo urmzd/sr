@@ -69,11 +69,14 @@ impl AiBackend for CopilotBackend {
         let model = self.model.as_deref().unwrap_or(DEFAULT_MODEL);
         let system = build_system_prompt(&req.system_prompt, req.json_schema.as_deref());
 
+        // Copilot CLI has no --system-prompt flag; embed system prompt in the user prompt.
+        let combined_prompt = format!("{system}\n\n{}", req.user_prompt);
+
         let mut cmd = Command::new("gh");
         cmd.current_dir(&req.working_dir)
             .arg("copilot")
             .arg("-p")
-            .arg(&req.user_prompt)
+            .arg(&combined_prompt)
             .arg("-s")
             .arg("--model")
             .arg(model);
@@ -83,9 +86,7 @@ impl AiBackend for CopilotBackend {
             cmd.arg("--allow-tool").arg(tool);
         }
 
-        cmd.arg("--no-custom-instructions")
-            .arg("--system-prompt")
-            .arg(&system);
+        cmd.arg("--no-custom-instructions").arg("--autopilot");
 
         if self.debug {
             eprintln!("[DEBUG] Calling gh copilot (model={model})");
