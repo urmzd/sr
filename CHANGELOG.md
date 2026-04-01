@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.2.5 (2026-04-01)
+
+### Bug Fixes
+
+- **action**: handle floating tag resolution under pipefail ([b0d6461](https://github.com/urmzd/sr/commit/b0d646191c630cf10c88e70f3a6626e81c16b628))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v3.2.4...v3.2.5)
+
+
 ## 3.2.4 (2026-04-01)
 
 ### Bug Fixes
