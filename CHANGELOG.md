@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.2.1 (2026-04-01)
+
+### Bug Fixes
+
+- **sr-ai**: embed system prompt in user message and replace deprecated tools allowlist with TOML policy ([f685934](https://github.com/urmzd/sr/commit/f685934b4e6387f0e3e709560519792d7056428d))
+
+### Refactoring
+
+- **sr-ai**: move tempfile to runtime dependency ([bf28ad8](https://github.com/urmzd/sr/commit/bf28ad845d51f069343b9d350d87ea5e6f3eafb1))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v3.2.0...v3.2.1)
+
+
 ## 3.2.0 (2026-04-01)
 
 ### Features
