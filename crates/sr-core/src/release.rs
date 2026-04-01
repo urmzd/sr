@@ -74,16 +74,6 @@ pub trait VcsProvider: Send + Sync {
         ))
     }
 
-    /// Sync a floating tag release (e.g. v3) with the versioned release (e.g. v3.4.0).
-    /// Creates or updates the floating release and copies assets from the versioned release.
-    fn sync_floating_release(
-        &self,
-        _floating_tag: &str,
-        _versioned_tag: &str,
-    ) -> Result<(), ReleaseError> {
-        Ok(())
-    }
-
     /// Upload asset files to an existing release identified by tag.
     fn upload_assets(&self, _tag: &str, _files: &[&str]) -> Result<(), ReleaseError> {
         Ok(())
@@ -339,7 +329,7 @@ where
         self.create_and_push_tags(plan, &changelog_body, dry_run)?;
         self.create_or_update_release(plan, &changelog_body, dry_run)?;
         self.upload_artifacts(plan, dry_run)?;
-        self.verify_and_sync_release(plan, dry_run)?;
+        self.verify_release_exists(plan, dry_run)?;
 
         self.run_lifecycle_command(
             &self.config.post_release_command,
@@ -574,39 +564,20 @@ where
         }
 
         if !resolved.is_empty() {
-            let checksum_files = generate_checksums(&resolved)?;
-            let mut all_files = resolved.clone();
-            all_files.extend(checksum_files.iter().cloned());
-
-            let file_refs: Vec<&str> = all_files.iter().map(|s| s.as_str()).collect();
+            let file_refs: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
             self.vcs.upload_assets(&plan.tag_name, &file_refs)?;
             eprintln!(
-                "Uploaded {} artifact(s) + {} checksum(s) to {}",
+                "Uploaded {} artifact(s) to {}",
                 resolved.len(),
-                checksum_files.len(),
                 plan.tag_name
             );
-
-            for f in &checksum_files {
-                let _ = fs::remove_file(f);
-            }
         }
         Ok(())
     }
 
-    fn verify_and_sync_release(
-        &self,
-        plan: &ReleasePlan,
-        dry_run: bool,
-    ) -> Result<(), ReleaseError> {
+    fn verify_release_exists(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError> {
         if dry_run {
             eprintln!("[dry-run] Would verify release: {}", plan.tag_name);
-            if let Some(ref floating) = plan.floating_tag_name {
-                eprintln!(
-                    "[dry-run] Would sync floating release {floating} with {}",
-                    plan.tag_name
-                );
-            }
             return Ok(());
         }
 
@@ -617,12 +588,6 @@ where
                 plan.tag_name
             );
             eprintln!("  Re-run with --force to retry.");
-        }
-
-        if let Some(ref floating) = plan.floating_tag_name
-            && let Err(e) = self.vcs.sync_floating_release(floating, &plan.tag_name)
-        {
-            eprintln!("warning: failed to sync floating release {floating}: {e}");
         }
         Ok(())
     }
@@ -744,31 +709,6 @@ fn resolve_globs(patterns: &[String]) -> Result<Vec<String>, String> {
         }
     }
     Ok(files.into_iter().collect())
-}
-
-/// Generate SHA256 checksum sidecar files for a list of artifact paths.
-/// Returns the paths to the generated `.sha256` files.
-fn generate_checksums(files: &[String]) -> Result<Vec<String>, ReleaseError> {
-    use sha2::{Digest, Sha256};
-
-    let mut checksum_paths = Vec::new();
-    for file_path in files {
-        let data = fs::read(file_path).map_err(|e| {
-            ReleaseError::Vcs(format!("failed to read {file_path} for checksum: {e}"))
-        })?;
-        let hash = Sha256::digest(&data);
-        let hex = format!("{hash:x}");
-        let file_name = Path::new(file_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown");
-        let checksum_content = format!("{hex}  {file_name}\n");
-        let checksum_path = format!("{file_path}.sha256");
-        fs::write(&checksum_path, checksum_content)
-            .map_err(|e| ReleaseError::Vcs(format!("failed to write checksum file: {e}")))?;
-        checksum_paths.push(checksum_path);
-    }
-    Ok(checksum_paths)
 }
 
 pub fn today_string() -> String {
@@ -1445,17 +1385,9 @@ mod tests {
         let uploaded = s.vcs.uploaded_assets.lock().unwrap();
         assert_eq!(uploaded.len(), 1);
         assert_eq!(uploaded[0].0, "v0.1.0");
-        // 2 artifacts + 2 SHA256 checksum sidecar files
-        assert_eq!(uploaded[0].1.len(), 4);
+        assert_eq!(uploaded[0].1.len(), 2);
         assert!(uploaded[0].1.iter().any(|f| f.ends_with("app.tar.gz")));
         assert!(uploaded[0].1.iter().any(|f| f.ends_with("app.zip")));
-        assert!(
-            uploaded[0]
-                .1
-                .iter()
-                .any(|f| f.ends_with("app.tar.gz.sha256"))
-        );
-        assert!(uploaded[0].1.iter().any(|f| f.ends_with("app.zip.sha256")));
     }
 
     #[test]
