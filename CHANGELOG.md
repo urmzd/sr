@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.3.0 (2026-04-02)
+
+### Features
+
+- **action,install**: add GitHub Enterprise support with optional authentication ([930a6d7](https://github.com/urmzd/sr/commit/930a6d7cf9d7e52627ea57aa87b097666549999c))
+- **commit**: make refactor commits trigger patch bump ([2c8b5de](https://github.com/urmzd/sr/commit/2c8b5de6743d4a32edbe623649abb8972c08404e))
+- **config**: enable floating tags and update defaults ([6eee880](https://github.com/urmzd/sr/commit/6eee880ce79364460293db0567213f2cc0d999e1))
+
+### Documentation
+
+- **sr-core**: remove duplicate changelog entries ([39e9879](https://github.com/urmzd/sr/commit/39e9879ee2c0b25dcb1a0e90c9f918a332d8ae12))
+- **changelog**: add changelog for version 3.2.4 ([defdafc](https://github.com/urmzd/sr/commit/defdafc735e3248148b057edabfd5aa5e04b1de9))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v3.2.5...v3.3.0)
+
+
 ## 3.2.5 (2026-04-01)
 
 ### Bug Fixes
