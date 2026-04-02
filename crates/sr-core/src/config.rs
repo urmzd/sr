@@ -62,7 +62,7 @@ pub struct ReleaseConfig {
 impl Default for ReleaseConfig {
     fn default() -> Self {
         Self {
-            branches: vec!["main".into(), "master".into()],
+            branches: vec!["main".into()],
             tag_prefix: "v".into(),
             commit_pattern: DEFAULT_COMMIT_PATTERN.into(),
             breaking_section: "Breaking Changes".into(),
@@ -72,7 +72,7 @@ impl Default for ReleaseConfig {
             version_files: vec![],
             version_files_strict: false,
             artifacts: vec![],
-            floating_tags: false,
+            floating_tags: true,
             build_command: None,
             stage_files: vec![],
             prerelease: None,
@@ -176,11 +176,20 @@ impl HooksConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChangelogConfig {
     pub file: Option<String>,
     pub template: Option<String>,
+}
+
+impl Default for ChangelogConfig {
+    fn default() -> Self {
+        Self {
+            file: Some("CHANGELOG.md".into()),
+            template: None,
+        }
+    }
 }
 
 impl ReleaseConfig {
@@ -284,7 +293,6 @@ pub fn default_config_template(version_files: &[String]) -> String {
 # Branches that trigger releases when commits are pushed.
 branches:
   - main
-  - master
 
 # Prefix prepended to version tags (e.g. "v1.2.0").
 tag_prefix: "v"
@@ -317,6 +325,7 @@ types:
   - name: docs
     section: Documentation
   - name: refactor
+    bump: patch
     section: Refactoring
   - name: revert
     section: Reverts
@@ -330,7 +339,7 @@ types:
 # file:     path to the changelog file (e.g. CHANGELOG.md), or omit to skip writing
 # template: custom Minijinja template string for changelog rendering
 changelog:
-  file:
+  file: CHANGELOG.md
   template:
 
 # Manifest files to bump on release (e.g. Cargo.toml, package.json, pyproject.toml).
@@ -343,7 +352,7 @@ version_files_strict: false
 artifacts: []
 
 # Create floating major version tags (e.g. "v3" pointing to latest v3.x.x).
-floating_tags: false
+floating_tags: true
 
 # Shell command to run after version files are bumped (e.g. "cargo build --release").
 build_command:
@@ -495,7 +504,7 @@ mod tests {
     #[test]
     fn default_values() {
         let config = ReleaseConfig::default();
-        assert_eq!(config.branches, vec!["main", "master"]);
+        assert_eq!(config.branches, vec!["main"]);
         assert_eq!(config.tag_prefix, "v");
         assert_eq!(config.commit_pattern, DEFAULT_COMMIT_PATTERN);
         assert_eq!(config.breaking_section, "Breaking Changes");
@@ -503,7 +512,8 @@ mod tests {
         assert!(!config.types.is_empty());
         assert!(!config.version_files_strict);
         assert!(config.artifacts.is_empty());
-        assert!(!config.floating_tags);
+        assert!(config.floating_tags);
+        assert_eq!(config.changelog.file.as_deref(), Some("CHANGELOG.md"));
     }
 
     #[test]
@@ -534,7 +544,7 @@ mod tests {
 
         let config = ReleaseConfig::load(&path).unwrap();
         assert_eq!(config.tag_prefix, "rel-");
-        assert_eq!(config.branches, vec!["main", "master"]);
+        assert_eq!(config.branches, vec!["main"]);
         // defaults should still apply for types/pattern/breaking_section
         assert_eq!(config.commit_pattern, DEFAULT_COMMIT_PATTERN);
         assert_eq!(config.breaking_section, "Breaking Changes");
@@ -720,7 +730,7 @@ packages:
         assert_eq!(config.commit_pattern, default.commit_pattern);
         assert_eq!(config.breaking_section, default.breaking_section);
         assert_eq!(config.types.len(), default.types.len());
-        assert!(!config.floating_tags);
+        assert!(config.floating_tags);
         assert!(!config.sign_tags);
         assert!(!config.draft);
     }
@@ -770,7 +780,7 @@ packages:
         // User value preserved
         assert_eq!(config.tag_prefix, "rel-");
         // Defaults filled in
-        assert_eq!(config.branches, vec!["main", "master"]);
+        assert_eq!(config.branches, vec!["main"]);
         assert_eq!(config.breaking_section, "Breaking Changes");
         assert!(!config.types.is_empty());
     }

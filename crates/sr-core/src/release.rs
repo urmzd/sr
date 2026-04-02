@@ -1473,7 +1473,10 @@ mod tests {
         let s = make_strategy(
             vec![],
             vec![raw_commit("feat: something")],
-            ReleaseConfig::default(),
+            ReleaseConfig {
+                floating_tags: false,
+                ..Default::default()
+            },
         );
         let plan = s.plan().unwrap();
         assert!(plan.floating_tag_name.is_none());
@@ -1524,7 +1527,10 @@ mod tests {
         let s = make_strategy(
             vec![],
             vec![raw_commit("feat: something")],
-            ReleaseConfig::default(),
+            ReleaseConfig {
+                floating_tags: false,
+                ..Default::default()
+            },
         );
         let plan = s.plan().unwrap();
         assert!(plan.floating_tag_name.is_none());
