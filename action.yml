@@ -156,7 +156,7 @@ runs:
           echo "$tag"
         }
 
-        API="${GITHUB_API_URL:-https://api.github.com}/repos/${SR_REPO}"
+        API="https://api.github.com/repos/${SR_REPO}"
         echo "Resolving ref=${SR_REF} via ${API}"
         RELEASE_TAG=$(resolve_release_tag "$API" "$SR_REF")
 
@@ -166,7 +166,7 @@ runs:
         fi
 
         echo "Resolved release tag: ${RELEASE_TAG}"
-        URL="${GITHUB_SERVER_URL:-https://github.com}/${SR_REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
+        URL="https://github.com/${SR_REPO}/releases/download/${RELEASE_TAG}/${BINARY_NAME}"
         echo "Downloading from ${URL}"
         curl -fsSL -H "Authorization: token $GH_TOKEN" "$URL" -o "$DEST"
 
