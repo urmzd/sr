@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.3.5 (2026-04-06)
+
+### Bug Fixes
+
+- **action**: hardcode public GitHub URLs for binary download ([e3437db](https://github.com/urmzd/sr/commit/e3437db1df205d9709997754fbbf7524f46c442b))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v3.3.4...v3.3.5)
+
+
 ## 3.3.4 (2026-04-06)
 
 ### Refactoring
