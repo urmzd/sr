@@ -948,6 +948,18 @@ mod tests {
 
     // --- Helpers ---
 
+    /// Config with changelog file disabled so tests don't pollute the real CHANGELOG.md.
+    /// Use instead of `ReleaseConfig::default()` in tests that call `.execute()`.
+    fn test_config() -> ReleaseConfig {
+        ReleaseConfig {
+            changelog: crate::config::ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
     fn raw_commit(msg: &str) -> Commit {
         Commit {
             sha: "a".repeat(40),
@@ -1137,7 +1149,7 @@ mod tests {
         let s = make_strategy(
             vec![],
             vec![raw_commit("feat: something")],
-            ReleaseConfig::default(),
+            test_config(),
         );
         let plan = s.plan().unwrap();
         s.execute(&plan, true).unwrap();
@@ -1151,7 +1163,7 @@ mod tests {
         let s = make_strategy(
             vec![],
             vec![raw_commit("feat: something")],
-            ReleaseConfig::default(),
+            test_config(),
         );
         let plan = s.plan().unwrap();
         s.execute(&plan, false).unwrap();
@@ -1165,7 +1177,7 @@ mod tests {
         let s = make_strategy(
             vec![],
             vec![raw_commit("feat: something")],
-            ReleaseConfig::default(),
+            test_config(),
         );
         let plan = s.plan().unwrap();
         s.execute(&plan, false).unwrap();
@@ -1211,7 +1223,7 @@ mod tests {
         let s = make_strategy(
             vec![],
             vec![raw_commit("feat: something")],
-            ReleaseConfig::default(),
+            test_config(),
         );
         let plan = s.plan().unwrap();
 
@@ -1233,7 +1245,7 @@ mod tests {
         let s = make_strategy(
             vec![],
             vec![raw_commit("feat: something")],
-            ReleaseConfig::default(),
+            test_config(),
         );
         let plan = s.plan().unwrap();
 
@@ -1261,7 +1273,7 @@ mod tests {
         let s = make_strategy(
             vec![],
             vec![raw_commit("feat: something")],
-            ReleaseConfig::default(),
+            test_config(),
         );
         let plan = s.plan().unwrap();
 
@@ -1301,7 +1313,7 @@ mod tests {
 
         let config = ReleaseConfig {
             version_files: vec![cargo_path.to_str().unwrap().to_string()],
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1375,7 +1387,7 @@ mod tests {
                 dir.path().join("*.tar.gz").to_str().unwrap().to_string(),
                 dir.path().join("*.zip").to_str().unwrap().to_string(),
             ],
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1397,7 +1409,7 @@ mod tests {
 
         let config = ReleaseConfig {
             artifacts: vec![dir.path().join("*.tar.gz").to_str().unwrap().to_string()],
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1414,7 +1426,7 @@ mod tests {
         let s = make_strategy(
             vec![],
             vec![raw_commit("feat: something")],
-            ReleaseConfig::default(),
+            test_config(),
         );
         let plan = s.plan().unwrap();
         s.execute(&plan, false).unwrap();
@@ -1504,7 +1516,7 @@ mod tests {
     fn execute_floating_tags_force_create_and_push() {
         let config = ReleaseConfig {
             floating_tags: true,
-            ..Default::default()
+            ..test_config()
         };
 
         let tag = TagInfo {
@@ -1529,7 +1541,7 @@ mod tests {
             vec![raw_commit("feat: something")],
             ReleaseConfig {
                 floating_tags: false,
-                ..Default::default()
+                ..test_config()
             },
         );
         let plan = s.plan().unwrap();
@@ -1545,7 +1557,7 @@ mod tests {
     fn execute_floating_tags_dry_run_no_side_effects() {
         let config = ReleaseConfig {
             floating_tags: true,
-            ..Default::default()
+            ..test_config()
         };
 
         let tag = TagInfo {
@@ -1567,7 +1579,7 @@ mod tests {
     fn execute_floating_tags_idempotent() {
         let config = ReleaseConfig {
             floating_tags: true,
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1632,7 +1644,7 @@ mod tests {
                 "echo $SR_VERSION > {}",
                 output_file.to_str().unwrap()
             )),
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1647,7 +1659,7 @@ mod tests {
     fn execute_build_command_failure_aborts_release() {
         let config = ReleaseConfig {
             build_command: Some("exit 1".into()),
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1665,7 +1677,7 @@ mod tests {
 
         let config = ReleaseConfig {
             build_command: Some(format!("echo test > {}", output_file.to_str().unwrap())),
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1695,7 +1707,7 @@ mod tests {
         let config = ReleaseConfig {
             build_command: Some(format!("echo 'new lock' > {}", lock_file.to_str().unwrap())),
             stage_files: vec![lock_file.to_str().unwrap().to_string()],
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1715,7 +1727,7 @@ mod tests {
     fn execute_dry_run_shows_stage_files() {
         let config = ReleaseConfig {
             stage_files: vec!["Cargo.lock".into()],
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1739,7 +1751,7 @@ mod tests {
         let config = ReleaseConfig {
             version_files: vec![cargo_toml.to_str().unwrap().to_string()],
             build_command: Some("exit 1".into()),
-            ..Default::default()
+            ..test_config()
         };
 
         let tag = TagInfo {
@@ -1769,7 +1781,7 @@ mod tests {
 
         let config = ReleaseConfig {
             pre_release_command: Some(format!("touch {}", marker.to_str().unwrap())),
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1786,7 +1798,7 @@ mod tests {
 
         let config = ReleaseConfig {
             post_release_command: Some(format!("touch {}", marker.to_str().unwrap())),
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1800,7 +1812,7 @@ mod tests {
     fn execute_pre_release_failure_aborts_release() {
         let config = ReleaseConfig {
             pre_release_command: Some("exit 1".into()),
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1823,7 +1835,7 @@ mod tests {
                 "echo $SR_VERSION $SR_TAG > {}",
                 output_file.to_str().unwrap()
             )),
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1844,7 +1856,7 @@ mod tests {
         let config = ReleaseConfig {
             pre_release_command: Some(format!("touch {}", pre_marker.to_str().unwrap())),
             post_release_command: Some(format!("touch {}", post_marker.to_str().unwrap())),
-            ..Default::default()
+            ..test_config()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
