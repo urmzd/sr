@@ -1,5 +1,28 @@
 # Changelog
 
+## 3.3.3 (2026-04-06)
+
+### Bug Fixes
+
+- **sr-ai**: unquote C-quoted paths from git status --porcelain ([558b467](https://github.com/urmzd/sr/commit/558b46768fb540750b3bf295612583638a1bdbfa))
+- **tests**: prevent changelog file pollution from release tests ([2950f9c](https://github.com/urmzd/sr/commit/2950f9cf6e9cca62bb0cc9af60a03a2d29d702d4))
+
+### Documentation
+
+- **sr-core**: update changelog with v0.1.0 entries ([a875757](https://github.com/urmzd/sr/commit/a8757573ace5a81bc3d6a95b13782671c060261c))
+
+### Miscellaneous
+
+- apply cargo fmt formatting ([c985790](https://github.com/urmzd/sr/commit/c985790555ec5d924cde0d02e808d05163ec659c))
+- update Cargo.lock for v3.3.2 ([e3d87e0](https://github.com/urmzd/sr/commit/e3d87e03e84ac0edd59e0b65da1c7df989536809))
+- add linguist overrides to fix language stats (#17) ([f40b27e](https://github.com/urmzd/sr/commit/f40b27ec9a0915c4e6e259bfbf478216e1c528e5))
+- **deps**: bump actions/download-artifact from 4 to 8 ([c89b261](https://github.com/urmzd/sr/commit/c89b2618d999024a1935832621e0b08149940918))
+- **deps**: bump actions/create-github-app-token from 1 to 3 ([445b3e8](https://github.com/urmzd/sr/commit/445b3e83b9ef1b71d252cc675fc6aa3d4eef50ae))
+- **deps**: bump actions/upload-artifact from 4 to 7 ([09be4c2](https://github.com/urmzd/sr/commit/09be4c23f6f156af1fdf049616596aad7449426f))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v3.3.2...v3.3.3)
+
+
 ## 3.3.2 (2026-04-03)
 
 ### Bug Fixes
