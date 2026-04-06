@@ -3,6 +3,59 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Strip C-style quoting that git applies to paths containing spaces,
+/// non-ASCII characters, or other special bytes. Git wraps such paths
+/// in double quotes and uses backslash escapes (e.g. `\t`, `\n`, `\\`,
+/// `\"`, and octal `\NNN`).
+fn git_unquote(s: &str) -> String {
+    let s = s.trim();
+    if !(s.starts_with('"') && s.ends_with('"')) {
+        return s.to_string();
+    }
+    // Strip surrounding quotes
+    let inner = &s[1..s.len() - 1];
+    let mut out = Vec::new();
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 1;
+            match bytes[i] {
+                b'\\' => out.push(b'\\'),
+                b'"' => out.push(b'"'),
+                b'n' => out.push(b'\n'),
+                b't' => out.push(b'\t'),
+                b'r' => out.push(b'\r'),
+                b'a' => out.push(0x07),
+                b'b' => out.push(0x08),
+                b'f' => out.push(0x0C),
+                b'v' => out.push(0x0B),
+                // Octal escape: \NNN (1-3 digits)
+                b'0'..=b'3' => {
+                    let mut val = (bytes[i] - b'0') as u16;
+                    for _ in 0..2 {
+                        if i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                            i += 1;
+                            val = val * 8 + (bytes[i] - b'0') as u16;
+                        } else {
+                            break;
+                        }
+                    }
+                    out.push(val as u8);
+                }
+                other => {
+                    out.push(b'\\');
+                    out.push(other);
+                }
+            }
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string())
+}
+
 pub struct GitRepo {
     root: PathBuf,
 }
@@ -89,18 +142,13 @@ impl GitRepo {
     }
 
     pub fn stage_file(&self, file: &str) -> Result<bool> {
-        let full_path = self.root.join(file);
-        let exists = full_path.exists();
-
-        if !exists {
-            // Check if it's a deleted file
-            let out = self.git(&["ls-files", "--deleted"])?;
-            let is_deleted = out.lines().any(|l| l.trim() == file);
-            if !is_deleted {
-                return Ok(false);
-            }
-        }
-
+        // Let git decide whether the file can be staged. This handles:
+        //   - existing files (additions/modifications)
+        //   - tracked files deleted from the working tree (deletions/moves)
+        //   - files that don't exist and aren't tracked (returns false)
+        // Previous code ran `git ls-files --deleted` per file as a pre-check,
+        // which was O(n²) for many deletes and could fail when path formats
+        // differed between git commands (e.g. C-quoted vs unquoted paths).
         let (ok, _) = self.git_allow_failure(&["add", "--", file])?;
         Ok(ok)
     }
@@ -233,12 +281,12 @@ impl GitRepo {
             let is_rename = matches!((x, y), (b'R', _) | (_, b'R'));
             if is_rename {
                 if let Some(pos) = path.find(" -> ") {
-                    let old_path = path[..pos].to_string();
-                    let new_path = path[pos + 4..].to_string();
+                    let old_path = git_unquote(&path[..pos]);
+                    let new_path = git_unquote(&path[pos + 4..]);
                     map.insert(old_path, 'D');
                     map.insert(new_path, 'R');
                 } else {
-                    map.insert(path, 'R');
+                    map.insert(git_unquote(&path), 'R');
                 }
             } else {
                 let status = match (x, y) {
@@ -248,7 +296,7 @@ impl GitRepo {
                     (b'M', _) | (_, b'M') | (b'T', _) | (_, b'T') => 'M',
                     _ => '~',
                 };
-                map.insert(path, status);
+                map.insert(git_unquote(&path), status);
             }
         }
         Ok(map)
@@ -295,10 +343,10 @@ impl GitRepo {
         // Build manifest: every file that shows up in `git status --porcelain`
         // gets its content copied and its status recorded.
         let porcelain = self.git(&["status", "--porcelain"])?;
-        let staged_names = self.git(&["diff", "--cached", "--name-only"])?;
-        let staged_set: std::collections::HashSet<&str> = staged_names
-            .lines()
-            .map(|l| l.trim())
+        let staged_names = self.git(&["diff", "--cached", "--name-only", "-z"])?;
+        let staged_set: std::collections::HashSet<String> = staged_names
+            .split('\0')
+            .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect();
 
@@ -324,11 +372,13 @@ impl GitRepo {
             let bytes = line.as_bytes();
             let x = bytes[0] as char;
             let y = bytes[1] as char;
-            let mut path = line[3..].to_string();
-            // Handle renames: "R  old -> new"
-            if let Some(pos) = path.find(" -> ") {
-                path = path[pos + 4..].to_string();
-            }
+            let raw = line[3..].to_string();
+            // Handle renames: "R  old -> new" — keep only the new path
+            let path = if let Some(pos) = raw.find(" -> ") {
+                git_unquote(&raw[pos + 4..])
+            } else {
+                git_unquote(&raw)
+            };
 
             let src = self.root.join(&path);
             let has_content = src.exists() && src.is_file();
@@ -763,6 +813,343 @@ mod tests {
             statuses.get("new_name.txt").copied(),
             Some('R'),
             "new path should appear as renamed"
+        );
+    }
+
+    /// Simulate the execute_plan flow: many files with moves, deletes, and
+    /// modifications. After reset_head(), every path from file_statuses()
+    /// must be stageable via stage_file(). This is the scenario that breaks
+    /// when there are 100+ changes with moves.
+    #[test]
+    fn stage_file_handles_many_moves_and_deletes_after_reset() {
+        let (_dir, repo) = temp_repo();
+
+        // Create 30 files and commit them
+        for i in 0..30 {
+            fs::write(
+                repo.root.join(format!("file_{i}.txt")),
+                format!("content {i}"),
+            )
+            .unwrap();
+        }
+        repo.git(&["add", "."]).unwrap();
+        repo.git(&["commit", "-m", "add files"]).unwrap();
+
+        // Move files 0..10 into a subdirectory (simulates directory rename)
+        fs::create_dir_all(repo.root.join("moved")).unwrap();
+        for i in 0..10 {
+            repo.git(&[
+                "mv",
+                &format!("file_{i}.txt"),
+                &format!("moved/file_{i}.txt"),
+            ])
+            .unwrap();
+        }
+
+        // Delete files 10..20
+        for i in 10..20 {
+            repo.git(&["rm", &format!("file_{i}.txt")]).unwrap();
+        }
+
+        // Modify files 20..30
+        for i in 20..30 {
+            fs::write(
+                repo.root.join(format!("file_{i}.txt")),
+                format!("modified {i}"),
+            )
+            .unwrap();
+            repo.git(&["add", &format!("file_{i}.txt")]).unwrap();
+        }
+
+        // Add some new files too
+        for i in 30..35 {
+            fs::write(repo.root.join(format!("new_{i}.txt")), format!("new {i}")).unwrap();
+            repo.git(&["add", &format!("new_{i}.txt")]).unwrap();
+        }
+
+        // Capture statuses before reset (this is what the AI sees)
+        let statuses = repo.file_statuses().unwrap();
+        assert!(
+            statuses.len() >= 30,
+            "should have many file statuses, got {}",
+            statuses.len()
+        );
+
+        // Reset head — exactly what execute_plan does
+        repo.reset_head().unwrap();
+
+        // Now try to stage every file from statuses — this is what execute_plan does
+        let mut failed = Vec::new();
+        for (file, status) in &statuses {
+            if file == "init.txt" {
+                continue;
+            }
+            let ok = repo.stage_file(file).unwrap();
+            if !ok {
+                failed.push((file.clone(), *status));
+            }
+        }
+
+        assert!(
+            failed.is_empty(),
+            "stage_file failed for {} files: {:?}",
+            failed.len(),
+            failed
+        );
+    }
+
+    /// Test that stage_file works when files are moved MANUALLY (not git mv)
+    /// and then staged with git add. This is the common case for directory
+    /// renames where users just mv the directory and git add everything.
+    #[test]
+    fn stage_file_handles_manual_moves_after_reset() {
+        let (_dir, repo) = temp_repo();
+
+        // Create files in a directory and commit
+        fs::create_dir_all(repo.root.join("old_dir")).unwrap();
+        for i in 0..10 {
+            fs::write(
+                repo.root.join(format!("old_dir/file_{i}.txt")),
+                format!("content {i}"),
+            )
+            .unwrap();
+        }
+        repo.git(&["add", "."]).unwrap();
+        repo.git(&["commit", "-m", "add directory"]).unwrap();
+
+        // Manually move the directory (simulates user doing: mv old_dir new_dir)
+        fs::rename(repo.root.join("old_dir"), repo.root.join("new_dir")).unwrap();
+
+        // Stage everything (simulates: git add -A)
+        repo.git(&["add", "-A"]).unwrap();
+
+        // Capture statuses
+        let statuses = repo.file_statuses().unwrap();
+
+        // Reset head — like execute_plan does
+        repo.reset_head().unwrap();
+
+        // Try to stage every file
+        let mut failed = Vec::new();
+        for (file, status) in &statuses {
+            if file == "init.txt" {
+                continue;
+            }
+            let ok = repo.stage_file(file).unwrap();
+            if !ok {
+                failed.push((file.clone(), *status));
+            }
+        }
+
+        assert!(
+            failed.is_empty(),
+            "stage_file failed for {} files after manual move: {:?}",
+            failed.len(),
+            failed
+        );
+    }
+
+    /// Test that stage_file works when new (uncommitted) files are involved
+    /// alongside moves and deletes. New files that were staged but never
+    /// committed are tricky because after reset_head() they drop out of
+    /// the index entirely.
+    #[test]
+    fn stage_file_handles_new_files_mixed_with_moves() {
+        let (_dir, repo) = temp_repo();
+
+        // Create and commit existing files
+        for i in 0..5 {
+            fs::write(
+                repo.root.join(format!("existing_{i}.txt")),
+                format!("existing {i}"),
+            )
+            .unwrap();
+        }
+        repo.git(&["add", "."]).unwrap();
+        repo.git(&["commit", "-m", "add existing files"]).unwrap();
+
+        // Move some existing files
+        fs::create_dir_all(repo.root.join("moved")).unwrap();
+        for i in 0..3 {
+            repo.git(&[
+                "mv",
+                &format!("existing_{i}.txt"),
+                &format!("moved/existing_{i}.txt"),
+            ])
+            .unwrap();
+        }
+
+        // Delete some existing files
+        repo.git(&["rm", "existing_3.txt"]).unwrap();
+
+        // Add brand new files (never committed)
+        for i in 0..5 {
+            fs::write(
+                repo.root.join(format!("brand_new_{i}.txt")),
+                format!("new {i}"),
+            )
+            .unwrap();
+        }
+        repo.git(&["add", "."]).unwrap();
+
+        // Capture statuses — includes both committed moves AND new files
+        let statuses = repo.file_statuses().unwrap();
+
+        // Reset head
+        repo.reset_head().unwrap();
+
+        // Stage each file — new files should still be on disk and stageable
+        let mut failed = Vec::new();
+        for (file, status) in &statuses {
+            if file == "init.txt" {
+                continue;
+            }
+            let ok = repo.stage_file(file).unwrap();
+            if !ok {
+                failed.push((file.clone(), *status));
+            }
+        }
+
+        assert!(
+            failed.is_empty(),
+            "stage_file failed for {} files: {:?}",
+            failed.len(),
+            failed
+        );
+    }
+
+    /// Regression: git status --porcelain C-quotes paths that contain
+    /// spaces or non-ASCII characters.  file_statuses() must unquote
+    /// them so that stage_file receives real filesystem paths, not
+    /// quoted strings that git add cannot resolve.
+    #[test]
+    fn stage_file_handles_quoted_paths_from_moves() {
+        let (_dir, repo) = temp_repo();
+
+        // Create and commit a file with spaces in the name
+        fs::write(repo.root.join("old name.txt"), "content").unwrap();
+        repo.git(&["add", "."]).unwrap();
+        repo.git(&["commit", "-m", "add file with spaces"]).unwrap();
+
+        // Move it (git mv)
+        repo.git(&["mv", "old name.txt", "new name.txt"]).unwrap();
+
+        // file_statuses must return unquoted paths
+        let statuses = repo.file_statuses().unwrap();
+
+        // The paths should NOT have C-quotes
+        assert!(
+            statuses.contains_key("old name.txt"),
+            "old path should be unquoted; got keys: {:?}",
+            statuses.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            statuses.contains_key("new name.txt"),
+            "new path should be unquoted; got keys: {:?}",
+            statuses.keys().collect::<Vec<_>>()
+        );
+
+        // After reset, stage_file must succeed for both sides
+        repo.reset_head().unwrap();
+
+        let old_ok = repo.stage_file("old name.txt").unwrap();
+        assert!(old_ok, "stage_file should succeed for old (deleted) path");
+
+        let new_ok = repo.stage_file("new name.txt").unwrap();
+        assert!(new_ok, "stage_file should succeed for new (added) path");
+    }
+
+    /// Regression: ensure file_statuses unquotes C-style paths for
+    /// non-rename entries too (modified, deleted, added files with spaces).
+    #[test]
+    fn file_statuses_unquotes_paths_with_special_chars() {
+        let (_dir, repo) = temp_repo();
+
+        // Create files with spaces
+        fs::write(repo.root.join("my file.txt"), "content").unwrap();
+        fs::write(repo.root.join("to delete.txt"), "delete me").unwrap();
+        repo.git(&["add", "."]).unwrap();
+        repo.git(&["commit", "-m", "add spaced files"]).unwrap();
+
+        // Modify one, delete another, add a new one with spaces
+        fs::write(repo.root.join("my file.txt"), "modified").unwrap();
+        repo.git(&["rm", "to delete.txt"]).unwrap();
+        fs::write(repo.root.join("brand new file.txt"), "new").unwrap();
+        repo.git(&["add", "."]).unwrap();
+
+        let statuses = repo.file_statuses().unwrap();
+
+        // All paths should be unquoted
+        assert!(
+            statuses.contains_key("my file.txt"),
+            "modified file should be unquoted; keys: {:?}",
+            statuses.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            statuses.contains_key("to delete.txt"),
+            "deleted file should be unquoted; keys: {:?}",
+            statuses.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            statuses.contains_key("brand new file.txt"),
+            "new file should be unquoted; keys: {:?}",
+            statuses.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Test that stage_file works for moved files split across multiple
+    /// commits (simulating execute_plan with multiple commits where moves
+    /// are split: new path in one commit, old path deletion in another).
+    #[test]
+    fn stage_file_works_across_sequential_commits_with_moves() {
+        let (_dir, repo) = temp_repo();
+
+        // Create and commit files
+        for i in 0..10 {
+            fs::write(
+                repo.root.join(format!("src_{i}.txt")),
+                format!("content {i}"),
+            )
+            .unwrap();
+        }
+        repo.git(&["add", "."]).unwrap();
+        repo.git(&["commit", "-m", "add source files"]).unwrap();
+
+        // Move all files to a new directory
+        fs::create_dir_all(repo.root.join("dst")).unwrap();
+        for i in 0..10 {
+            repo.git(&["mv", &format!("src_{i}.txt"), &format!("dst/src_{i}.txt")])
+                .unwrap();
+        }
+
+        let statuses = repo.file_statuses().unwrap();
+        repo.reset_head().unwrap();
+
+        // Commit 1: stage the NEW paths (additions)
+        for i in 0..10 {
+            let file = format!("dst/src_{i}.txt");
+            let ok = repo.stage_file(&file).unwrap();
+            assert!(ok, "should stage new path {file}");
+        }
+        repo.commit("feat: add new paths").unwrap();
+
+        // Commit 2: stage the OLD paths (deletions) — these must still work
+        // even though HEAD has changed after commit 1
+        let mut failed = Vec::new();
+        for i in 0..10 {
+            let file = format!("src_{i}.txt");
+            if let Some(&status) = statuses.get(&file) {
+                let ok = repo.stage_file(&file).unwrap();
+                if !ok {
+                    failed.push((file, status));
+                }
+            }
+        }
+
+        assert!(
+            failed.is_empty(),
+            "stage_file failed for old paths after prior commit: {:?}",
+            failed
         );
     }
 }
