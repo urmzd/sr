@@ -1,5 +1,28 @@
 # Changelog
 
+## 3.3.6 (2026-04-09)
+
+### Documentation
+
+- add LICENSE to sub-crates for publishing compliance ([47ad907](https://github.com/urmzd/sr/commit/47ad90737985d3432d9bb8972c1afa067cdbdf8d))
+
+### Refactoring
+
+- **update**: use agentspec update mechanism ([359fae6](https://github.com/urmzd/sr/commit/359fae6b635f48f4db0a298cb0f2ff01f8e9a6b6))
+- **ui**: extract UI primitives to agentspec-ui library ([60cd339](https://github.com/urmzd/sr/commit/60cd3398d4ba48651a080fba7d4dd8d31c9c9194))
+- **ai**: migrate to agentspec-provider library ([a582529](https://github.com/urmzd/sr/commit/a58252930c96dcb57bd4e78df93d44a42bdf79d1))
+
+### Miscellaneous
+
+- fix cargo fmt import formatting ([b8d15a5](https://github.com/urmzd/sr/commit/b8d15a54f422f55599fbd7324919c9fe338ecc36))
+- **deps**: migrate agentspec crates to registry ([bb50305](https://github.com/urmzd/sr/commit/bb50305437a43a8d753012bb79631ff3da1139cf))
+- **workflows**: remove agentspec repository checkout ([0582bfa](https://github.com/urmzd/sr/commit/0582bfae6aebfd2f5a31f20bfbe21b90657e18af))
+- **workflows**: add agentspec checkout and workspace config ([b8615f0](https://github.com/urmzd/sr/commit/b8615f09783c205373c267864851ebb248d7218f))
+- **gitignore**: ignore .fastembed_cache ([039fc00](https://github.com/urmzd/sr/commit/039fc00ed0759eee6ce7d5af02c59776a66c65b4))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v3.3.5...v3.3.6)
+
+
 ## 3.3.5 (2026-04-06)
 
 ### Bug Fixes
