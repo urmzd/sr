@@ -14,15 +14,6 @@ pub enum SrAiError {
     #[error("git command failed: {0}")]
     GitCommand(String),
 
-    #[error("AI backend failed: {0}")]
-    AiBackend(String),
-
-    #[error("no AI backend available (install `claude` or `gemini` CLI)")]
-    NoBackendAvailable,
-
-    #[error("failed to parse AI response: {0}")]
-    ParseResponse(String),
-
     #[error("user cancelled")]
     Cancelled,
 }
