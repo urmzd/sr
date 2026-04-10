@@ -51,7 +51,18 @@ pub struct ReleaseConfig {
     pub release_name_template: Option<String>,
     /// Git hooks configuration.
     pub hooks: HooksConfig,
-    /// Monorepo packages. When non-empty, each package is released independently.
+    /// Structured lifecycle hooks for the release pipeline.
+    /// Each step runs at a specific point in the release flow.
+    /// For simple use cases, `pre_release_command` and `post_release_command` are still supported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lifecycle: Vec<LifecycleStep>,
+    /// Versioning strategy for monorepo packages.
+    /// `independent` (default): each package is versioned separately.
+    /// `fixed`: all packages share one version, tag, and changelog.
+    #[serde(default)]
+    pub versioning: VersioningMode,
+    /// Monorepo packages. When non-empty, each package is released independently
+    /// (or together when `versioning: fixed`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packages: Vec<PackageConfig>,
     /// Internal: set when resolving a package config. Commits are filtered to this path.
@@ -82,10 +93,23 @@ impl Default for ReleaseConfig {
             draft: false,
             release_name_template: None,
             hooks: HooksConfig::with_defaults(),
+            lifecycle: vec![],
+            versioning: VersioningMode::default(),
             packages: vec![],
             path_filter: None,
         }
     }
+}
+
+/// Versioning strategy for monorepo packages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VersioningMode {
+    /// Each package is versioned and released independently (default).
+    #[default]
+    Independent,
+    /// All packages share a single version, tag, and changelog.
+    Fixed,
 }
 
 /// A package in a monorepo. Each package is released independently with its own
@@ -123,6 +147,41 @@ pub struct PackageConfig {
     /// Stage files override.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stage_files: Vec<String>,
+}
+
+/// A lifecycle event in the release pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleEvent {
+    /// Before the release starts (validation, checks, linting).
+    PreRelease,
+    /// After version files are bumped but before build_command runs.
+    PostBump,
+    /// After build_command completes but before git commit.
+    PostBuild,
+    /// After everything completes (notifications, deployments).
+    PostRelease,
+}
+
+/// A named step in the release lifecycle pipeline.
+///
+/// ```yaml
+/// lifecycle:
+///   - name: lint
+///     when: pre_release
+///     run: "cargo clippy -- -D warnings"
+///   - name: notify
+///     when: post_release
+///     run: "./scripts/notify-slack.sh"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LifecycleStep {
+    /// Step name (for logging).
+    pub name: String,
+    /// When this step runs in the release pipeline.
+    pub when: LifecycleEvent,
+    /// Shell command to execute. `SR_VERSION` and `SR_TAG` env vars are set.
+    pub run: String,
 }
 
 /// A single entry in a hook's command list.
@@ -252,6 +311,48 @@ impl ReleaseConfig {
         config
     }
 
+    /// Resolve all packages into a single config for fixed versioning mode.
+    ///
+    /// Collects version files, stage files, and build commands from all packages.
+    /// Uses the root `tag_prefix` (no per-package prefixes). No path filter is set
+    /// so commits from the entire repo determine the version bump.
+    pub fn resolve_fixed(&self) -> Self {
+        let mut config = self.clone();
+        // No path filter — all commits count
+        config.path_filter = None;
+
+        // Collect version files from all packages
+        let mut version_files: Vec<String> = config.version_files.clone();
+        for pkg in &self.packages {
+            if !pkg.version_files.is_empty() {
+                version_files.extend(pkg.version_files.clone());
+            } else {
+                let detected = detect_version_files(Path::new(&pkg.path));
+                version_files.extend(
+                    detected
+                        .into_iter()
+                        .map(|f| format!("{}/{f}", pkg.path)),
+                );
+            }
+        }
+        version_files.sort();
+        version_files.dedup();
+        config.version_files = version_files;
+
+        // Collect stage files from all packages
+        let mut stage_files = config.stage_files.clone();
+        for pkg in &self.packages {
+            stage_files.extend(pkg.stage_files.clone());
+        }
+        stage_files.sort();
+        stage_files.dedup();
+        config.stage_files = stage_files;
+
+        // Clear packages to avoid recursion
+        config.packages = vec![];
+        config
+    }
+
     /// Find a package by name. Returns an error if the package is not found.
     pub fn find_package(&self, name: &str) -> Result<&PackageConfig, ReleaseError> {
         self.packages
@@ -312,6 +413,7 @@ misc_section: Miscellaneous
 # name:    commit type prefix (e.g. "feat", "fix")
 # bump:    version bump level — major, minor, patch, or omit for no bump
 # section: changelog section heading, or omit to exclude from changelog
+# pattern: optional regex to match non-conventional commits as this type (fallback)
 types:
   - name: feat
     bump: minor
@@ -400,6 +502,24 @@ hooks:
   #       - "*.rs"
   #     rules:
   #       - "cargo clippy --workspace -- -D warnings"
+
+# Release lifecycle hooks — run commands at specific points in the release pipeline.
+# Runs after pre_release_command/post_release_command (both systems coexist).
+# Supported events: pre_release, post_bump, post_build, post_release
+# SR_VERSION and SR_TAG env vars are set for all lifecycle steps.
+# lifecycle:
+#   - name: lint
+#     when: pre_release
+#     run: "cargo clippy -- -D warnings"
+#   - name: verify
+#     when: post_bump
+#     run: "./scripts/verify-version.sh"
+#   - name: check
+#     when: post_build
+#     run: "./scripts/check-artifacts.sh"
+#   - name: notify
+#     when: post_release
+#     run: "./scripts/notify-slack.sh"
 
 # Monorepo packages (uncomment and configure if needed).
 # Each package is released independently with its own version, tags, and changelog.
@@ -514,6 +634,9 @@ mod tests {
         assert!(config.artifacts.is_empty());
         assert!(config.floating_tags);
         assert_eq!(config.changelog.file.as_deref(), Some("CHANGELOG.md"));
+        // Verify refactor has bump: patch (must match README)
+        let refactor = config.types.iter().find(|t| t.name == "refactor").unwrap();
+        assert_eq!(refactor.bump, Some(BumpLevel::Patch));
     }
 
     #[test]
@@ -766,6 +889,7 @@ packages:
             "draft",
             "release_name_template",
             "hooks",
+            "lifecycle",
             "packages",
         ] {
             assert!(template.contains(field), "template missing field: {field}");
@@ -803,5 +927,51 @@ packages:
         assert_eq!(config.changelog.file.as_deref(), Some("CHANGELOG.md"));
         // template field should exist (merged from defaults)
         assert!(config.changelog.template.is_none());
+    }
+
+    #[test]
+    fn lifecycle_step_roundtrip() {
+        let step = LifecycleStep {
+            name: "lint".into(),
+            when: LifecycleEvent::PreRelease,
+            run: "cargo clippy".into(),
+        };
+        let yaml = serde_yaml_ng::to_string(&step).unwrap();
+        assert!(yaml.contains("pre_release"));
+        let parsed: LifecycleStep = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert_eq!(parsed, step);
+    }
+
+    #[test]
+    fn lifecycle_config_parses_from_yaml() {
+        let yaml = r#"
+lifecycle:
+  - name: test
+    when: pre_release
+    run: "cargo test"
+  - name: audit
+    when: post_bump
+    run: "cargo audit"
+  - name: verify
+    when: post_build
+    run: "./scripts/verify.sh"
+  - name: notify
+    when: post_release
+    run: "./scripts/notify.sh"
+"#;
+        let config: ReleaseConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.lifecycle.len(), 4);
+        assert_eq!(config.lifecycle[0].name, "test");
+        assert_eq!(config.lifecycle[0].when, LifecycleEvent::PreRelease);
+        assert_eq!(config.lifecycle[1].when, LifecycleEvent::PostBump);
+        assert_eq!(config.lifecycle[2].when, LifecycleEvent::PostBuild);
+        assert_eq!(config.lifecycle[3].when, LifecycleEvent::PostRelease);
+    }
+
+    #[test]
+    fn lifecycle_not_serialized_when_empty() {
+        let config = ReleaseConfig::default();
+        let yaml = serde_yaml_ng::to_string(&config).unwrap();
+        assert!(!yaml.contains("lifecycle"));
     }
 }
