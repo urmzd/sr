@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::changelog::{ChangelogEntry, ChangelogFormatter};
 use crate::commit::{CommitParser, ConventionalCommit, DefaultCommitClassifier};
-use crate::config::ReleaseConfig;
+use crate::config::{LifecycleEvent, ReleaseConfig};
 use crate::error::ReleaseError;
 use crate::git::GitRepository;
 use crate::version::{BumpLevel, apply_bump, apply_prerelease_bump, determine_bump};
@@ -322,6 +322,12 @@ where
             &plan.tag_name,
             dry_run,
         )?;
+        self.run_lifecycle_steps(
+            LifecycleEvent::PreRelease,
+            &version_str,
+            &plan.tag_name,
+            dry_run,
+        )?;
 
         let changelog_body = self.format_changelog(plan)?;
 
@@ -334,6 +340,12 @@ where
         self.run_lifecycle_command(
             &self.config.post_release_command,
             "post_release_command",
+            &version_str,
+            &plan.tag_name,
+            dry_run,
+        )?;
+        self.run_lifecycle_steps(
+            LifecycleEvent::PostRelease,
             &version_str,
             &plan.tag_name,
             dry_run,
@@ -374,6 +386,28 @@ where
         Ok(())
     }
 
+    fn run_lifecycle_steps(
+        &self,
+        event: LifecycleEvent,
+        version: &str,
+        tag: &str,
+        dry_run: bool,
+    ) -> Result<(), ReleaseError> {
+        for step in &self.config.lifecycle {
+            if step.when != event {
+                continue;
+            }
+            let label = format!("lifecycle[{}]", step.name);
+            if dry_run {
+                eprintln!("[dry-run] Would run {label}: {}", step.run);
+            } else {
+                eprintln!("Running {label}: {}", step.run);
+                run_lifecycle_hook(&step.run, version, tag, &label)?;
+            }
+        }
+        Ok(())
+    }
+
     fn bump_and_build(
         &self,
         plan: &ReleasePlan,
@@ -397,9 +431,11 @@ where
                     eprintln!("[dry-run] warning: unsupported version file, would skip: {file}");
                 }
             }
+            self.run_lifecycle_steps(LifecycleEvent::PostBump, version_str, &plan.tag_name, true)?;
             if let Some(ref cmd) = self.config.build_command {
                 eprintln!("[dry-run] Would run build command: {cmd}");
             }
+            self.run_lifecycle_steps(LifecycleEvent::PostBuild, version_str, &plan.tag_name, true)?;
             if !self.config.stage_files.is_empty() {
                 eprintln!(
                     "[dry-run] Would stage additional files: {}",
@@ -625,6 +661,9 @@ where
             }
         }
 
+        // 2.6. Run post_bump lifecycle steps
+        self.run_lifecycle_steps(LifecycleEvent::PostBump, version_str, &plan.tag_name, false)?;
+
         // 3. Write changelog file if configured
         if let Some(ref changelog_file) = self.config.changelog.file {
             let path = Path::new(changelog_file);
@@ -652,6 +691,14 @@ where
             eprintln!("Running build command: {cmd}");
             run_lifecycle_hook(cmd, version_str, &plan.tag_name, "build_command")?;
         }
+
+        // 3.6. Run post_build lifecycle steps
+        self.run_lifecycle_steps(
+            LifecycleEvent::PostBuild,
+            version_str,
+            &plan.tag_name,
+            false,
+        )?;
 
         Ok(files_to_stage)
     }
@@ -2056,5 +2103,39 @@ mod tests {
         let plan = s.plan().unwrap();
         assert_eq!(plan.tag_name, "core/v1.0.1");
         assert_eq!(plan.current_version, Some(Version::new(1, 0, 0)));
+    }
+
+    #[test]
+    fn execute_dry_run_with_lifecycle_steps() {
+        use crate::config::{LifecycleEvent, LifecycleStep};
+
+        let mut config = ReleaseConfig::default();
+        config.lifecycle = vec![
+            LifecycleStep {
+                name: "lint".into(),
+                when: LifecycleEvent::PreRelease,
+                run: "cargo clippy".into(),
+            },
+            LifecycleStep {
+                name: "verify".into(),
+                when: LifecycleEvent::PostBump,
+                run: "./verify.sh".into(),
+            },
+            LifecycleStep {
+                name: "check".into(),
+                when: LifecycleEvent::PostBuild,
+                run: "./check.sh".into(),
+            },
+            LifecycleStep {
+                name: "notify".into(),
+                when: LifecycleEvent::PostRelease,
+                run: "./notify.sh".into(),
+            },
+        ];
+
+        let s = make_strategy(vec![], vec![raw_commit("feat: add feature")], config);
+        let plan = s.plan().unwrap();
+        // Dry run should not fail — lifecycle steps are only logged, not executed
+        s.execute(&plan, true).unwrap();
     }
 }
