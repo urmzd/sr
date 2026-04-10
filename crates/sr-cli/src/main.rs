@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use clap::{CommandFactory, Parser, Subcommand};
 use sr_ai::ai::{Backend, BackendConfig};
 use sr_core::changelog::DefaultChangelogFormatter;
-use sr_core::commit::DefaultCommitParser;
+use sr_core::commit::ConfiguredCommitParser;
 use sr_core::config::{DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE, ReleaseConfig};
 use sr_core::error::ReleaseError;
 use sr_core::release::{ReleaseStrategy, TrunkReleaseStrategy};
@@ -210,11 +210,12 @@ fn build_local_strategy(
     TrunkReleaseStrategy<
         NativeGitRepository,
         NoopVcsProvider,
-        DefaultCommitParser,
+        ConfiguredCommitParser,
         DefaultChangelogFormatter,
     >,
 > {
     let git = NativeGitRepository::open(Path::new("."))?;
+    let parser = ConfiguredCommitParser::new(config.types.clone(), config.commit_pattern.clone());
     let types = config.types.clone();
     let breaking_section = config.breaking_section.clone();
     let misc_section = config.misc_section.clone();
@@ -227,7 +228,7 @@ fn build_local_strategy(
     Ok(TrunkReleaseStrategy {
         git,
         vcs: NoopVcsProvider,
-        parser: DefaultCommitParser,
+        parser,
         formatter,
         config,
         force,
@@ -241,7 +242,7 @@ fn build_full_strategy(
     TrunkReleaseStrategy<
         NativeGitRepository,
         GitHubProvider,
-        DefaultCommitParser,
+        ConfiguredCommitParser,
         DefaultChangelogFormatter,
     >,
 > {
@@ -254,6 +255,7 @@ fn build_full_strategy(
 
     let git = git.with_http_auth(hostname.clone(), token.clone());
     let vcs = GitHubProvider::new(owner, repo, hostname, token);
+    let parser = ConfiguredCommitParser::new(config.types.clone(), config.commit_pattern.clone());
     let types = config.types.clone();
     let breaking_section = config.breaking_section.clone();
     let misc_section = config.misc_section.clone();
@@ -267,7 +269,7 @@ fn build_full_strategy(
     Ok(TrunkReleaseStrategy {
         git,
         vcs,
-        parser: DefaultCommitParser,
+        parser,
         formatter,
         config,
         force,
@@ -537,7 +539,10 @@ async fn run() -> anyhow::Result<()> {
                     anyhow::bail!("no tags found with prefix '{}'", config.tag_prefix);
                 }
 
-                let parser = DefaultCommitParser;
+                let parser = ConfiguredCommitParser::new(
+                    config.types.clone(),
+                    config.commit_pattern.clone(),
+                );
                 let mut entries = Vec::new();
 
                 for (i, tag) in tags.iter().enumerate() {
