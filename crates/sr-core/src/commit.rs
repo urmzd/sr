@@ -31,6 +31,12 @@ pub struct CommitType {
     /// Changelog section heading (e.g. "Features"). None = exclude from changelog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section: Option<String>,
+    /// Optional regex matched against the full raw commit message as a fallback
+    /// when the standard type-prefix pattern doesn't match. Useful for
+    /// non-conventional commit formats (e.g. Dependabot, automated tooling).
+    /// Named groups `type`, `scope`, `breaking`, `description` are used if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
 }
 
 /// Single source of truth for commit type classification.
@@ -97,56 +103,67 @@ pub fn default_commit_types() -> Vec<CommitType> {
             name: "feat".into(),
             bump: Some(BumpLevel::Minor),
             section: Some("Features".into()),
+            pattern: None,
         },
         CommitType {
             name: "fix".into(),
             bump: Some(BumpLevel::Patch),
             section: Some("Bug Fixes".into()),
+            pattern: None,
         },
         CommitType {
             name: "perf".into(),
             bump: Some(BumpLevel::Patch),
             section: Some("Performance".into()),
+            pattern: None,
         },
         CommitType {
             name: "docs".into(),
             bump: None,
             section: Some("Documentation".into()),
+            pattern: None,
         },
         CommitType {
             name: "refactor".into(),
             bump: Some(BumpLevel::Patch),
             section: Some("Refactoring".into()),
+            pattern: None,
         },
         CommitType {
             name: "revert".into(),
             bump: None,
             section: Some("Reverts".into()),
+            pattern: None,
         },
         CommitType {
             name: "chore".into(),
             bump: None,
             section: None,
+            pattern: None,
         },
         CommitType {
             name: "ci".into(),
             bump: None,
             section: None,
+            pattern: None,
         },
         CommitType {
             name: "test".into(),
             bump: None,
             section: None,
+            pattern: None,
         },
         CommitType {
             name: "build".into(),
             bump: None,
             section: None,
+            pattern: None,
         },
         CommitType {
             name: "style".into(),
             bump: None,
             section: None,
+            pattern: None,
         },
     ]
 }
@@ -199,6 +216,103 @@ impl CommitParser for DefaultCommitParser {
             body,
             breaking,
         })
+    }
+}
+
+/// Parser that tries the standard commit pattern first, then falls back to
+/// per-type `pattern` regexes for non-conventional commit formats.
+pub struct ConfiguredCommitParser {
+    types: Vec<CommitType>,
+    commit_pattern: String,
+}
+
+impl ConfiguredCommitParser {
+    pub fn new(types: Vec<CommitType>, commit_pattern: String) -> Self {
+        Self {
+            types,
+            commit_pattern,
+        }
+    }
+}
+
+impl CommitParser for ConfiguredCommitParser {
+    fn parse(&self, commit: &Commit) -> Result<ConventionalCommit, ReleaseError> {
+        let re =
+            Regex::new(&self.commit_pattern).map_err(|e| ReleaseError::Config(e.to_string()))?;
+
+        let first_line = commit.message.lines().next().unwrap_or("");
+
+        // Try the standard type-prefix pattern first.
+        if let Some(caps) = re.captures(first_line) {
+            let r#type = caps.name("type").unwrap().as_str().to_string();
+            let scope = caps.name("scope").map(|m| m.as_str().to_string());
+            let breaking = caps.name("breaking").is_some();
+            let description = caps.name("description").unwrap().as_str().to_string();
+
+            let body = commit
+                .message
+                .split_once("\n\n")
+                .map(|x| x.1)
+                .map(|b| b.to_string());
+
+            let breaking = breaking
+                || body.as_deref().is_some_and(|b| {
+                    b.lines().any(|line| {
+                        let trimmed = line.trim();
+                        trimmed.starts_with("BREAKING CHANGE:")
+                            || trimmed.starts_with("BREAKING CHANGE ")
+                            || trimmed.starts_with("BREAKING-CHANGE:")
+                            || trimmed.starts_with("BREAKING-CHANGE ")
+                    })
+                });
+
+            return Ok(ConventionalCommit {
+                sha: commit.sha.clone(),
+                r#type,
+                scope,
+                description,
+                body,
+                breaking,
+            });
+        }
+
+        // Fallback: try per-type pattern regexes.
+        for ct in &self.types {
+            let Some(ref pat) = ct.pattern else {
+                continue;
+            };
+            let Ok(type_re) = Regex::new(pat) else {
+                continue;
+            };
+            if let Some(caps) = type_re.captures(first_line) {
+                let scope = caps.name("scope").map(|m| m.as_str().to_string());
+                let breaking = caps.name("breaking").is_some();
+                let description = caps
+                    .name("description")
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_else(|| first_line.to_string());
+
+                let body = commit
+                    .message
+                    .split_once("\n\n")
+                    .map(|x| x.1)
+                    .map(|b| b.to_string());
+
+                return Ok(ConventionalCommit {
+                    sha: commit.sha.clone(),
+                    r#type: ct.name.clone(),
+                    scope,
+                    description,
+                    body,
+                    breaking,
+                });
+            }
+        }
+
+        Err(ReleaseError::Config(format!(
+            "not a conventional commit: {}",
+            commit.message
+        )))
     }
 }
 
@@ -363,6 +477,7 @@ mod tests {
             name: "feat".into(),
             bump: Some(BumpLevel::Minor),
             section: Some("Features".into()),
+            pattern: None,
         };
         let yaml = serde_yaml_ng::to_string(&ct).unwrap();
         let parsed: CommitType = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -375,11 +490,83 @@ mod tests {
             name: "chore".into(),
             bump: None,
             section: None,
+            pattern: None,
         };
         let yaml = serde_yaml_ng::to_string(&ct).unwrap();
         assert!(!yaml.contains("bump"));
         assert!(!yaml.contains("section"));
+        assert!(!yaml.contains("pattern"));
         let parsed: CommitType = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(parsed, ct);
+    }
+
+    #[test]
+    fn commit_type_with_pattern_roundtrip() {
+        let ct = CommitType {
+            name: "deps".into(),
+            bump: Some(BumpLevel::Patch),
+            section: Some("Dependencies".into()),
+            pattern: Some(r"^Bump .+ from .+ to .+".into()),
+        };
+        let yaml = serde_yaml_ng::to_string(&ct).unwrap();
+        assert!(yaml.contains("pattern"));
+        let parsed: CommitType = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert_eq!(parsed, ct);
+    }
+
+    // --- ConfiguredCommitParser tests ---
+
+    fn configured_parser_with_deps() -> ConfiguredCommitParser {
+        let mut types = default_commit_types();
+        types.push(CommitType {
+            name: "deps".into(),
+            bump: Some(BumpLevel::Patch),
+            section: Some("Dependencies".into()),
+            pattern: Some(r"^Bump (?P<description>.+)".into()),
+        });
+        ConfiguredCommitParser::new(types, DEFAULT_COMMIT_PATTERN.into())
+    }
+
+    #[test]
+    fn configured_parser_standard_match_preferred() {
+        let parser = configured_parser_with_deps();
+        let result = parser.parse(&raw("feat: add button")).unwrap();
+        assert_eq!(result.r#type, "feat");
+        assert_eq!(result.description, "add button");
+    }
+
+    #[test]
+    fn configured_parser_fallback_match() {
+        let parser = configured_parser_with_deps();
+        let result = parser
+            .parse(&raw("Bump serde from 1.0.0 to 1.1.0"))
+            .unwrap();
+        assert_eq!(result.r#type, "deps");
+        assert_eq!(result.description, "serde from 1.0.0 to 1.1.0");
+    }
+
+    #[test]
+    fn configured_parser_fallback_no_named_groups() {
+        let mut types = default_commit_types();
+        types.push(CommitType {
+            name: "deps".into(),
+            bump: Some(BumpLevel::Patch),
+            section: Some("Dependencies".into()),
+            pattern: Some(r"^Bump .+ from .+ to .+".into()),
+        });
+        let parser = ConfiguredCommitParser::new(types, DEFAULT_COMMIT_PATTERN.into());
+        let result = parser
+            .parse(&raw("Bump serde from 1.0.0 to 1.1.0"))
+            .unwrap();
+        assert_eq!(result.r#type, "deps");
+        // Without named description group, uses full first line
+        assert_eq!(result.description, "Bump serde from 1.0.0 to 1.1.0");
+    }
+
+    #[test]
+    fn configured_parser_no_match() {
+        let parser = configured_parser_with_deps();
+        let result = parser.parse(&raw("random garbage message"));
+        assert!(result.is_err());
     }
 }
