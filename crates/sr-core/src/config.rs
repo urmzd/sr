@@ -328,11 +328,7 @@ impl ReleaseConfig {
                 version_files.extend(pkg.version_files.clone());
             } else {
                 let detected = detect_version_files(Path::new(&pkg.path));
-                version_files.extend(
-                    detected
-                        .into_iter()
-                        .map(|f| format!("{}/{f}", pkg.path)),
-                );
+                version_files.extend(detected.into_iter().map(|f| format!("{}/{f}", pkg.path)));
             }
         }
         version_files.sort();
@@ -1062,16 +1058,22 @@ packages:
         assert!(resolved.path_filter.is_none());
         // Collects version files from root + all packages
         assert!(resolved.version_files.contains(&"Cargo.toml".to_string()));
-        assert!(resolved
-            .version_files
-            .contains(&"crates/core/Cargo.toml".to_string()));
-        assert!(resolved
-            .version_files
-            .contains(&"crates/cli/Cargo.toml".to_string()));
+        assert!(
+            resolved
+                .version_files
+                .contains(&"crates/core/Cargo.toml".to_string())
+        );
+        assert!(
+            resolved
+                .version_files
+                .contains(&"crates/cli/Cargo.toml".to_string())
+        );
         // Collects stage files
-        assert!(resolved
-            .stage_files
-            .contains(&"crates/core/Cargo.lock".to_string()));
+        assert!(
+            resolved
+                .stage_files
+                .contains(&"crates/core/Cargo.lock".to_string())
+        );
         // Packages cleared
         assert!(resolved.packages.is_empty());
     }
