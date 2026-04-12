@@ -30,3 +30,4 @@ regex = { workspace = true }
 glob = { workspace = true }
 crossterm = { workspace = true }
 indicatif = { workspace = true }
+rmcp = { version = "1.4.0", features = ["server"] }

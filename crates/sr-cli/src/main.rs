@@ -95,6 +95,9 @@ enum Commands {
         shell: clap_complete::Shell,
     },
 
+    /// Start MCP server over stdio (for AI tool integration)
+    Mcp,
+
     /// Commit staged changes with a message
     Commit(commands::commit::CommitArgs),
 
@@ -474,6 +477,7 @@ async fn run() -> anyhow::Result<()> {
             Ok(())
         }
 
+        Commands::Mcp => commands::mcp::run().await,
         Commands::Commit(args) => commands::commit::run(&args).await,
         Commands::Review(args) => commands::review::run(&args).await,
         Commands::Worktree(args) => commands::worktree::run(&args).await,
