@@ -13,9 +13,6 @@ homepage = "https://github.com/urmzd/sr"
 [workspace.dependencies]
 # Internal crates
 sr-core = { path = "crates/sr-core", version = "3.3.7" }
-sr-git = { path = "crates/sr-git", version = "3.3.7" }
-sr-github = { path = "crates/sr-github", version = "3.3.7" }
-sr-ai = { path = "crates/sr-ai", version = "3.3.7" }
 
 agentspec-provider = "0.6.0"
 agentspec-ui = "0.6.0"

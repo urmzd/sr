@@ -1130,44 +1130,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "sr-ai"
-version = "3.3.7"
-dependencies = [
- "agentspec-provider",
- "agentspec-ui",
- "anyhow",
- "clap",
- "crossterm",
- "dirs",
- "indicatif",
- "minijinja",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "sr-core",
- "tempfile",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "sr-cli"
 version = "3.3.7"
 dependencies = [
+ "agentspec-ui",
  "agentspec-update",
  "anyhow",
  "clap",
  "clap_complete",
+ "crossterm",
  "glob",
+ "indicatif",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml_ng",
- "sr-ai",
  "sr-core",
- "sr-git",
- "sr-github",
  "tokio",
 ]
 
@@ -1175,7 +1153,9 @@ dependencies = [
 name = "sr-core"
 version = "3.3.7"
 dependencies = [
+ "agentspec-provider",
  "anyhow",
+ "base64",
  "dirs",
  "glob",
  "minijinja",
@@ -1187,26 +1167,8 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "tokio",
  "toml_edit",
-]
-
-[[package]]
-name = "sr-git"
-version = "3.3.7"
-dependencies = [
- "base64",
- "semver",
- "sr-core",
- "tempfile",
-]
-
-[[package]]
-name = "sr-github"
-version = "3.3.7"
-dependencies = [
- "serde",
- "serde_json",
- "sr-core",
  "ureq",
 ]
 
