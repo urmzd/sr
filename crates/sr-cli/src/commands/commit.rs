@@ -52,11 +52,11 @@ pub async fn run(args: &CommitArgs, backend_config: &BackendConfig) -> Result<()
     ui::phase_ok("Repository found", None);
 
     // Load project config
-    let config = sr_core::config::ReleaseConfig::find_config(repo.root().as_path())
-        .map(|(path, _)| sr_core::config::ReleaseConfig::load(&path))
+    let config = sr_core::config::Config::find_config(repo.root().as_path())
+        .map(|(path, _)| sr_core::config::Config::load(&path))
         .transpose()?
         .unwrap_or_default();
-    let type_names: Vec<&str> = config.types.iter().map(|t| t.name.as_str()).collect();
+    let type_names: Vec<&str> = config.commit.types.iter().map(|t| t.name.as_str()).collect();
 
     // Generate plan via service
     let spinner = ui::spinner("Analyzing changes...");
@@ -66,7 +66,7 @@ pub async fn run(args: &CommitArgs, backend_config: &BackendConfig) -> Result<()
         staged_only: false,
         message: args.message.as_deref(),
         no_cache: args.no_cache,
-        commit_pattern: &config.commit_pattern,
+        commit_pattern: &config.commit.pattern,
         type_names: &type_names,
     };
 
@@ -113,7 +113,7 @@ pub async fn run(args: &CommitArgs, backend_config: &BackendConfig) -> Result<()
     }
 
     // Pre-validate commit messages
-    let invalid = commit::validate_messages(&result.plan, &config.commit_pattern);
+    let invalid = commit::validate_messages(&result.plan, &config.commit.pattern);
     if !invalid.is_empty() {
         ui::invalid_messages(&invalid);
         if !args.yes && !ui::confirm("Continue anyway? Invalid commits will likely fail. [y/N]")? {

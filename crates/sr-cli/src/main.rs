@@ -7,7 +7,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use sr_core::ai::{Backend, BackendConfig};
 use sr_core::changelog::DefaultChangelogFormatter;
 use sr_core::commit::ConfiguredCommitParser;
-use sr_core::config::{DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE, ReleaseConfig, VersioningMode};
+use sr_core::config::{Config, DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE, VersioningMode};
 use sr_core::error::ReleaseError;
 use sr_core::release::{ReleaseStrategy, TrunkReleaseStrategy};
 use sr_core::native_git::NativeGitRepository;
@@ -16,17 +16,13 @@ use sr_core::github::GitHubProvider;
 #[derive(Parser)]
 #[command(name = "sr", about = "AI-powered release engineering CLI", version)]
 struct Cli {
-    /// AI backend to use
+    /// AI backend to use (gemini or github-models)
     #[arg(long, global = true, env = "SR_BACKEND")]
     backend: Option<Backend>,
 
     /// AI model to use
     #[arg(long, global = true, env = "SR_MODEL")]
     model: Option<String>,
-
-    /// Max budget in USD (claude only)
-    #[arg(long, global = true, env = "SR_BUDGET", default_value = "0.50")]
-    budget: f64,
 
     /// Enable debug output
     #[arg(long, global = true, env = "SR_DEBUG")]
@@ -143,7 +139,7 @@ enum PlanFormat {
 use sr_core::release::NoopVcsProvider;
 
 fn build_local_strategy(
-    config: ReleaseConfig,
+    config: Config,
     force: bool,
 ) -> anyhow::Result<
     TrunkReleaseStrategy<
@@ -154,12 +150,12 @@ fn build_local_strategy(
     >,
 > {
     let git = NativeGitRepository::open(Path::new("."))?;
-    let parser = ConfiguredCommitParser::new(config.types.clone(), config.commit_pattern.clone());
-    let types = config.types.clone();
-    let breaking_section = config.breaking_section.clone();
-    let misc_section = config.misc_section.clone();
+    let parser = ConfiguredCommitParser::new(config.commit.types.clone(), config.commit.pattern.clone());
+    let types = config.commit.types.clone();
+    let breaking_section = config.commit.breaking_section.clone();
+    let misc_section = config.commit.misc_section.clone();
     let formatter = DefaultChangelogFormatter::new(
-        config.changelog.template.clone(),
+        config.release.changelog.template.clone(),
         types,
         breaking_section,
         misc_section,
@@ -175,7 +171,7 @@ fn build_local_strategy(
 }
 
 fn build_full_strategy(
-    config: ReleaseConfig,
+    config: Config,
     force: bool,
 ) -> anyhow::Result<
     TrunkReleaseStrategy<
@@ -194,12 +190,12 @@ fn build_full_strategy(
 
     let git = git.with_http_auth(hostname.clone(), token.clone());
     let vcs = GitHubProvider::new(owner, repo, hostname, token);
-    let parser = ConfiguredCommitParser::new(config.types.clone(), config.commit_pattern.clone());
-    let types = config.types.clone();
-    let breaking_section = config.breaking_section.clone();
-    let misc_section = config.misc_section.clone();
+    let parser = ConfiguredCommitParser::new(config.commit.types.clone(), config.commit.pattern.clone());
+    let types = config.commit.types.clone();
+    let breaking_section = config.commit.breaking_section.clone();
+    let misc_section = config.commit.misc_section.clone();
     let formatter = DefaultChangelogFormatter::new(
-        config.changelog.template.clone(),
+        config.release.changelog.template.clone(),
         types,
         breaking_section,
         misc_section,
@@ -226,11 +222,11 @@ fn is_no_release_error(err: &anyhow::Error) -> bool {
     }
 }
 
-fn load_config_for_package(package: Option<&str>) -> anyhow::Result<ReleaseConfig> {
+fn load_config_for_package(package: Option<&str>) -> anyhow::Result<Config> {
     let config_path = resolve_config_path();
-    let mut config = ReleaseConfig::load(&config_path)?;
+    let mut config = Config::load(&config_path)?;
 
-    if config.versioning == VersioningMode::Fixed && !config.packages.is_empty() {
+    if config.release.versioning == VersioningMode::Fixed && !config.packages.is_empty() {
         if let Some(name) = package {
             anyhow::bail!(
                 "--package '{name}' is not supported with `versioning: fixed` — \
@@ -246,8 +242,8 @@ fn load_config_for_package(package: Option<&str>) -> anyhow::Result<ReleaseConfi
             Ok(config.resolve_package(pkg))
         }
         None => {
-            if config.version_files.is_empty() {
-                config.version_files = sr_core::version_files::detect_version_files(Path::new("."));
+            if config.release.version_files.is_empty() {
+                config.release.version_files = sr_core::version_files::detect_version_files(Path::new("."));
             }
             Ok(config)
         }
@@ -255,7 +251,7 @@ fn load_config_for_package(package: Option<&str>) -> anyhow::Result<ReleaseConfi
 }
 
 fn resolve_config_path() -> std::path::PathBuf {
-    match ReleaseConfig::find_config(Path::new(".")) {
+    match Config::find_config(Path::new(".")) {
         Some((path, is_legacy)) => {
             if is_legacy {
                 eprintln!(
@@ -291,7 +287,6 @@ async fn run() -> anyhow::Result<()> {
     let backend_config = BackendConfig {
         backend: cli.backend,
         model: cli.model,
-        budget: cli.budget,
         debug: cli.debug,
     };
 
@@ -328,7 +323,7 @@ async fn run() -> anyhow::Result<()> {
 
         Commands::Config { resolved } => {
             let config_path = resolve_config_path();
-            let config = ReleaseConfig::load(&config_path)?;
+            let config = Config::load(&config_path)?;
             if resolved {
                 let yaml = serde_yaml_ng::to_string(&config)?;
                 print!("{yaml}");
@@ -345,7 +340,7 @@ async fn run() -> anyhow::Result<()> {
 
         Commands::Status { package, format } => {
             let config = load_config_for_package(package.as_deref())?;
-            let tag_prefix = config.tag_prefix.clone();
+            let tag_prefix = config.release.tag_prefix.clone();
 
             // Get current branch
             let git = NativeGitRepository::open(Path::new("."))?;
@@ -355,10 +350,10 @@ async fn run() -> anyhow::Result<()> {
             let branch = String::from_utf8_lossy(&branch_output.stdout).trim().to_string();
 
             let formatter = DefaultChangelogFormatter::new(
-                config.changelog.template.clone(),
-                config.types.clone(),
-                config.breaking_section.clone(),
-                config.misc_section.clone(),
+                config.release.changelog.template.clone(),
+                config.commit.types.clone(),
+                config.commit.breaking_section.clone(),
+                config.commit.misc_section.clone(),
             );
             let strategy = build_local_strategy(config, false)?;
             let plan_result = strategy.plan();
@@ -452,20 +447,20 @@ async fn run() -> anyhow::Result<()> {
             let mut config = load_config_for_package(package.as_deref())?;
 
             // Resolve channel (CLI flag or default_channel from config)
-            let channel_name = channel.or_else(|| config.default_channel.clone());
+            let channel_name = channel.or_else(|| config.release.default_channel.clone());
             if let Some(name) = &channel_name {
                 config = config.resolve_channel(name).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
-            config.artifacts.extend(artifacts);
-            config.stage_files.extend(stage_files);
+            config.release.artifacts.extend(artifacts);
+            config.release.stage_files.extend(stage_files);
             if prerelease.is_some() {
-                config.prerelease = prerelease;
+                config.release.prerelease = prerelease;
             }
             if sign_tags {
-                config.sign_tags = true;
+                config.release.sign_tags = true;
             }
             if draft {
-                config.draft = true;
+                config.release.draft = true;
             }
 
             let plan = match build_full_strategy(config.clone(), force) {

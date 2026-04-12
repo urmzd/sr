@@ -20,11 +20,12 @@ pub async fn run(args: &PrArgs, backend_config: &BackendConfig) -> Result<()> {
     let repo = GitRepo::discover()?;
 
     // Auto-detect base branch from sr.yaml config, fallback to "main"
-    let config = sr_core::config::ReleaseConfig::find_config(repo.root().as_path())
-        .map(|(path, _)| sr_core::config::ReleaseConfig::load(&path))
+    let config = sr_core::config::Config::find_config(repo.root().as_path())
+        .map(|(path, _)| sr_core::config::Config::load(&path))
         .transpose()?
         .unwrap_or_default();
     let base = config
+        .release
         .branches
         .first()
         .cloned()

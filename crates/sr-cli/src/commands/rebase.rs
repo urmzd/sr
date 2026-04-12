@@ -31,11 +31,11 @@ pub async fn run(args: &RebaseArgs, backend_config: &BackendConfig) -> Result<()
     ui::phase_ok("Repository found", None);
 
     // Load config for commit pattern/types
-    let config = sr_core::config::ReleaseConfig::find_config(repo.root().as_path())
-        .map(|(path, _)| sr_core::config::ReleaseConfig::load(&path))
+    let config = sr_core::config::Config::find_config(repo.root().as_path())
+        .map(|(path, _)| sr_core::config::Config::load(&path))
         .transpose()?
         .unwrap_or_default();
-    let type_names: Vec<&str> = config.types.iter().map(|t| t.name.as_str()).collect();
+    let type_names: Vec<&str> = config.commit.types.iter().map(|t| t.name.as_str()).collect();
 
     // Determine commit count
     let commit_count = match args.last {
@@ -57,7 +57,7 @@ pub async fn run(args: &RebaseArgs, backend_config: &BackendConfig) -> Result<()
     let input = RebaseInput {
         message: args.message.as_deref(),
         commit_count,
-        commit_pattern: &config.commit_pattern,
+        commit_pattern: &config.commit.pattern,
         type_names: &type_names,
     };
 
