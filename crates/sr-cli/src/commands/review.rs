@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use sr_core::git::GitRepo;
-use sr_core::native_git::NativeGitRepository;
 use sr_core::github::GitHubProvider;
+use sr_core::native_git::NativeGitRepository;
 use std::path::Path;
 
 #[derive(Debug, clap::Args)]

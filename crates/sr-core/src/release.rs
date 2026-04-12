@@ -215,7 +215,10 @@ where
                 let head = self.git.head_sha()?;
                 if head == info.sha {
                     let floating_tag_name = if self.config.release.floating_tags {
-                        Some(format!("{}{}", self.config.release.tag_prefix, info.version.major))
+                        Some(format!(
+                            "{}{}",
+                            self.config.release.tag_prefix, info.version.major
+                        ))
                     } else {
                         None
                     };
@@ -296,7 +299,10 @@ where
 
         // Don't update floating tags for pre-releases
         let floating_tag_name = if self.config.release.floating_tags && !is_prerelease {
-            Some(format!("{}{}", self.config.release.tag_prefix, next_version.major))
+            Some(format!(
+                "{}{}",
+                self.config.release.tag_prefix, next_version.major
+            ))
         } else {
             None
         };
@@ -324,7 +330,8 @@ where
 
         // 1. Run pre_release hooks
         let env = release_env(&version_str, &plan.tag_name);
-        let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let env_refs: Vec<(&str, &str)> =
+            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         if !dry_run {
             crate::hooks::run_event(&self.config.hooks, HookEvent::PreRelease, &env_refs)?;
         }
@@ -372,7 +379,6 @@ where
     C: CommitParser,
     F: ChangelogFormatter,
 {
-
     fn bump_and_build(
         &self,
         plan: &ReleasePlan,
@@ -448,7 +454,8 @@ where
             paths_to_stage.push(file.clone());
         }
         if !self.config.release.stage_files.is_empty() {
-            let extra = resolve_globs(&self.config.release.stage_files).map_err(ReleaseError::Config)?;
+            let extra =
+                resolve_globs(&self.config.release.stage_files).map_err(ReleaseError::Config)?;
             paths_to_stage.extend(extra);
         }
         if !paths_to_stage.is_empty() {
@@ -510,7 +517,11 @@ where
         dry_run: bool,
     ) -> Result<(), ReleaseError> {
         if dry_run {
-            let draft_label = if self.config.release.draft { " (draft)" } else { "" };
+            let draft_label = if self.config.release.draft {
+                " (draft)"
+            } else {
+                ""
+            };
             let release_name = self.release_name(plan);
             eprintln!(
                 "[dry-run] Would create GitHub release \"{release_name}\" for {}{draft_label}",
@@ -1590,5 +1601,4 @@ mod tests {
         let err = s.plan().unwrap_err();
         assert!(matches!(err, ReleaseError::NoCommits { .. }));
     }
-
 }

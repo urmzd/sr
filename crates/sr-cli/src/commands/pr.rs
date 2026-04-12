@@ -46,7 +46,9 @@ pub async fn run(args: &PrArgs) -> Result<()> {
     };
 
     let mut cmd = std::process::Command::new("gh");
-    cmd.args(["pr", "create", "--title", &title, "--body", &body, "--base", &base]);
+    cmd.args([
+        "pr", "create", "--title", &title, "--body", &body, "--base", &base,
+    ]);
 
     if args.draft {
         cmd.arg("--draft");

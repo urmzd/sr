@@ -1,7 +1,7 @@
 use anyhow::Result;
-use rmcp::{ServiceExt, tool, tool_router};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::schemars::{self, JsonSchema};
+use rmcp::{ServiceExt, tool, tool_router};
 use serde::Deserialize;
 use sr_core::git::GitRepo;
 
@@ -73,7 +73,10 @@ impl SrMcpServer {
     /// Get the current repository status: changed files with their status indicators
     /// (M=modified, A=added, D=deleted, ?=untracked) and SHA-256 fingerprints.
     /// Use this first to understand what changed, then call sr_diff for specific files.
-    #[tool(name = "sr_status", description = "Get repository status with file fingerprints. Call this first to see what changed.")]
+    #[tool(
+        name = "sr_status",
+        description = "Get repository status with file fingerprints. Call this first to see what changed."
+    )]
     async fn status(&self) -> String {
         let repo = match GitRepo::discover() {
             Ok(r) => r,
@@ -109,7 +112,10 @@ impl SrMcpServer {
 
     /// Get the diff for changed files. Use `staged: true` for only staged changes.
     /// Specify `files` to get diff for specific files only (reduces context size).
-    #[tool(name = "sr_diff", description = "Get git diff output. Specify files to limit scope and save tokens.")]
+    #[tool(
+        name = "sr_diff",
+        description = "Get git diff output. Specify files to limit scope and save tokens."
+    )]
     async fn diff(&self, Parameters(params): Parameters<DiffParams>) -> String {
         let repo = match GitRepo::discover() {
             Ok(r) => r,
@@ -163,7 +169,10 @@ impl SrMcpServer {
 
     /// Get the commit log. Use `range` for specific ranges (e.g. "main..HEAD" for PR commits)
     /// or `count` for recent N commits.
-    #[tool(name = "sr_log", description = "Get commit log. Use range for PR commits or count for recent history.")]
+    #[tool(
+        name = "sr_log",
+        description = "Get commit log. Use range for PR commits or count for recent history."
+    )]
     async fn log(&self, Parameters(params): Parameters<LogParams>) -> String {
         let repo = match GitRepo::discover() {
             Ok(r) => r,
@@ -185,7 +194,10 @@ impl SrMcpServer {
 
     /// Stage files for commit. Use ["."] to stage all changes.
     /// WARNING: This modifies the repository index.
-    #[tool(name = "sr_stage", description = "Stage files for commit. Use [\".\"] for all changes. Modifies the index.")]
+    #[tool(
+        name = "sr_stage",
+        description = "Stage files for commit. Use [\".\"] for all changes. Modifies the index."
+    )]
     async fn stage(&self, Parameters(params): Parameters<StageParams>) -> String {
         let repo = match GitRepo::discover() {
             Ok(r) => r,
@@ -232,7 +244,10 @@ impl SrMcpServer {
     /// The type, scope, description, body, and footer are structured to prevent
     /// malformed commit messages.
     /// WARNING: This creates a git commit. Ensure files are staged first.
-    #[tool(name = "sr_commit", description = "Create a conventional commit. Stage files first with sr_stage.")]
+    #[tool(
+        name = "sr_commit",
+        description = "Create a conventional commit. Stage files first with sr_stage."
+    )]
     async fn commit(&self, Parameters(params): Parameters<CommitParams>) -> String {
         let repo = match GitRepo::discover() {
             Ok(r) => r,
@@ -279,7 +294,10 @@ impl SrMcpServer {
 
     /// Get or create a branch. Without a name, returns the current branch.
     /// With a name, creates a new branch and switches to it.
-    #[tool(name = "sr_branch", description = "Get current branch or create a new one.")]
+    #[tool(
+        name = "sr_branch",
+        description = "Get current branch or create a new one."
+    )]
     async fn branch(&self, Parameters(params): Parameters<BranchParams>) -> String {
         let repo = match GitRepo::discover() {
             Ok(r) => r,
@@ -306,7 +324,10 @@ impl SrMcpServer {
 
     /// Read the sr.yaml configuration for the current repository.
     /// Returns commit types, release branches, version files, and other settings.
-    #[tool(name = "sr_config", description = "Read sr.yaml config (commit types, release settings, etc.)")]
+    #[tool(
+        name = "sr_config",
+        description = "Read sr.yaml config (commit types, release settings, etc.)"
+    )]
     async fn config(&self) -> String {
         let repo = match GitRepo::discover() {
             Ok(r) => r,

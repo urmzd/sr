@@ -48,7 +48,13 @@ pub async fn run(args: &WorktreeArgs) -> Result<()> {
     let stashed = if has_changes {
         let output = std::process::Command::new("git")
             .args(["-C", &repo_root.to_string_lossy()])
-            .args(["stash", "push", "--include-untracked", "-m", "sr worktree: moving changes"])
+            .args([
+                "stash",
+                "push",
+                "--include-untracked",
+                "-m",
+                "sr worktree: moving changes",
+            ])
             .output()?;
         output.status.success()
     } else {
@@ -58,7 +64,13 @@ pub async fn run(args: &WorktreeArgs) -> Result<()> {
     // Create worktree
     let status = std::process::Command::new("git")
         .args(["-C", &repo_root.to_string_lossy()])
-        .args(["worktree", "add", "-b", &args.branch, &worktree_path.to_string_lossy()])
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            &args.branch,
+            &worktree_path.to_string_lossy(),
+        ])
         .status()?;
 
     if !status.success() {

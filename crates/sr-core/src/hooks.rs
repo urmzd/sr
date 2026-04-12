@@ -151,12 +151,7 @@ mod tests {
             vec!["test \"$SR_VERSION\" = 1.2.3".to_string()],
         );
         let config = HooksConfig { hooks };
-        run_event(
-            &config,
-            HookEvent::PostRelease,
-            &[("SR_VERSION", "1.2.3")],
-        )
-        .unwrap();
+        run_event(&config, HookEvent::PostRelease, &[("SR_VERSION", "1.2.3")]).unwrap();
     }
 
     #[test]

@@ -560,8 +560,16 @@ mod tests {
         assert!(!config.release.version_files_strict);
         assert!(config.release.artifacts.is_empty());
         assert!(config.release.floating_tags);
-        assert_eq!(config.release.changelog.file.as_deref(), Some("CHANGELOG.md"));
-        let refactor = config.commit.types.iter().find(|t| t.name == "refactor").unwrap();
+        assert_eq!(
+            config.release.changelog.file.as_deref(),
+            Some("CHANGELOG.md")
+        );
+        let refactor = config
+            .commit
+            .types
+            .iter()
+            .find(|t| t.name == "refactor")
+            .unwrap();
         assert_eq!(refactor.bump, Some(BumpLevel::Patch));
     }
 
@@ -655,7 +663,10 @@ mod tests {
 
         let resolved = config.resolve_package(&config.packages[0]);
         assert_eq!(resolved.release.tag_prefix, "cli-v");
-        assert_eq!(resolved.release.version_files, vec!["crates/cli/Cargo.toml"]);
+        assert_eq!(
+            resolved.release.version_files,
+            vec!["crates/cli/Cargo.toml"]
+        );
         assert_eq!(resolved.release.stage_files, vec!["crates/cli/Cargo.lock"]);
     }
 
@@ -711,7 +722,10 @@ mod tests {
     fn default_template_with_version_files() {
         let template = default_config_template(&["Cargo.toml".into(), "package.json".into()]);
         let config: Config = serde_yaml_ng::from_str(&template).unwrap();
-        assert_eq!(config.release.version_files, vec!["Cargo.toml", "package.json"]);
+        assert_eq!(
+            config.release.version_files,
+            vec!["Cargo.toml", "package.json"]
+        );
     }
 
     #[test]

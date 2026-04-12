@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use base64::Engine;
-use semver::Version;
 use crate::commit::Commit;
 use crate::error::ReleaseError;
 use crate::git::{GitRepository, TagInfo};
+use base64::Engine;
+use semver::Version;
 
 /// Git repository implementation backed by native `git` CLI commands.
 pub struct NativeGitRepository {

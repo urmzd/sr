@@ -621,8 +621,7 @@ impl GitRepo {
 /// `<data_local_dir>/sr/snapshots/<repo-hash>/`
 fn snapshot_dir_for(repo_root: &std::path::Path) -> Option<PathBuf> {
     let base = dirs::data_local_dir()?;
-    let repo_id =
-        &sha256_hex(repo_root.to_string_lossy().as_bytes())[..16];
+    let repo_id = &sha256_hex(repo_root.to_string_lossy().as_bytes())[..16];
     Some(base.join("sr").join("snapshots").join(repo_id))
 }
 

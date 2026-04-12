@@ -8,9 +8,9 @@ use sr_core::changelog::DefaultChangelogFormatter;
 use sr_core::commit::ConfiguredCommitParser;
 use sr_core::config::{Config, DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE, VersioningMode};
 use sr_core::error::ReleaseError;
-use sr_core::release::{ReleaseStrategy, TrunkReleaseStrategy};
-use sr_core::native_git::NativeGitRepository;
 use sr_core::github::GitHubProvider;
+use sr_core::native_git::NativeGitRepository;
+use sr_core::release::{ReleaseStrategy, TrunkReleaseStrategy};
 
 #[derive(Parser)]
 #[command(name = "sr", about = "Release engineering CLI", version)]
@@ -146,7 +146,8 @@ fn build_local_strategy(
     >,
 > {
     let git = NativeGitRepository::open(Path::new("."))?;
-    let parser = ConfiguredCommitParser::new(config.commit.types.clone(), config.commit.pattern.clone());
+    let parser =
+        ConfiguredCommitParser::new(config.commit.types.clone(), config.commit.pattern.clone());
     let types = config.commit.types.clone();
     let breaking_section = config.commit.breaking_section.clone();
     let misc_section = config.commit.misc_section.clone();
@@ -186,7 +187,8 @@ fn build_full_strategy(
 
     let git = git.with_http_auth(hostname.clone(), token.clone());
     let vcs = GitHubProvider::new(owner, repo, hostname, token);
-    let parser = ConfiguredCommitParser::new(config.commit.types.clone(), config.commit.pattern.clone());
+    let parser =
+        ConfiguredCommitParser::new(config.commit.types.clone(), config.commit.pattern.clone());
     let types = config.commit.types.clone();
     let breaking_section = config.commit.breaking_section.clone();
     let misc_section = config.commit.misc_section.clone();
@@ -239,7 +241,8 @@ fn load_config_for_package(package: Option<&str>) -> anyhow::Result<Config> {
         }
         None => {
             if config.release.version_files.is_empty() {
-                config.release.version_files = sr_core::version_files::detect_version_files(Path::new("."));
+                config.release.version_files =
+                    sr_core::version_files::detect_version_files(Path::new("."));
             }
             Ok(config)
         }
@@ -335,7 +338,9 @@ async fn run() -> anyhow::Result<()> {
             let branch_output = std::process::Command::new("git")
                 .args(["branch", "--show-current"])
                 .output()?;
-            let branch = String::from_utf8_lossy(&branch_output.stdout).trim().to_string();
+            let branch = String::from_utf8_lossy(&branch_output.stdout)
+                .trim()
+                .to_string();
 
             let formatter = DefaultChangelogFormatter::new(
                 config.release.changelog.template.clone(),
@@ -349,7 +354,9 @@ async fn run() -> anyhow::Result<()> {
             match format {
                 PlanFormat::Json => match plan_result {
                     Ok(plan) => {
-                        let repo_url = git.parse_remote_full().ok()
+                        let repo_url = git
+                            .parse_remote_full()
+                            .ok()
                             .map(|(h, o, r)| format!("https://{h}/{o}/{r}"));
                         let today = sr_core::release::today_string();
                         let entry = sr_core::changelog::ChangelogEntry {
@@ -359,7 +366,8 @@ async fn run() -> anyhow::Result<()> {
                             compare_url: None,
                             repo_url,
                         };
-                        let changelog = sr_core::changelog::ChangelogFormatter::format(&formatter, &[entry])?;
+                        let changelog =
+                            sr_core::changelog::ChangelogFormatter::format(&formatter, &[entry])?;
                         #[derive(serde::Serialize)]
                         struct StatusOutput<'a> {
                             branch: String,
@@ -367,13 +375,22 @@ async fn run() -> anyhow::Result<()> {
                             plan: &'a sr_core::release::ReleasePlan,
                             changelog: String,
                         }
-                        let output = StatusOutput { branch, plan: &plan, changelog };
+                        let output = StatusOutput {
+                            branch,
+                            plan: &plan,
+                            changelog,
+                        };
                         println!("{}", serde_json::to_string_pretty(&output)?);
                     }
                     Err(e) => {
-                        let msg = if matches!(&e, ReleaseError::NoCommits { .. } | ReleaseError::NoBump { .. }) {
+                        let msg = if matches!(
+                            &e,
+                            ReleaseError::NoCommits { .. } | ReleaseError::NoBump { .. }
+                        ) {
                             "no unreleased changes"
-                        } else { "error" };
+                        } else {
+                            "error"
+                        };
                         println!("{{\"branch\":\"{branch}\",\"status\":\"{msg}\"}}");
                     }
                 },
@@ -381,18 +398,25 @@ async fn run() -> anyhow::Result<()> {
                     println!("  Branch: {branch}");
                     match plan_result {
                         Ok(plan) => {
-                            let current_tag = plan.current_version.as_ref()
+                            let current_tag = plan
+                                .current_version
+                                .as_ref()
                                 .map(|v| format!("{tag_prefix}{v}"))
                                 .unwrap_or_else(|| "(initial)".to_string());
                             println!("  Current: {current_tag}");
                             println!("  Next: {} ({})", plan.tag_name, plan.bump);
                             println!("  Commits: {}", plan.commits.len());
                             for commit in &plan.commits {
-                                let scope = commit.scope.as_deref()
+                                let scope = commit
+                                    .scope
+                                    .as_deref()
                                     .map(|s| format!("({s})"))
                                     .unwrap_or_default();
                                 let breaking = if commit.breaking { " BREAKING" } else { "" };
-                                println!("    {}{scope}: {}{breaking}", commit.r#type, commit.description);
+                                println!(
+                                    "    {}{scope}: {}{breaking}",
+                                    commit.r#type, commit.description
+                                );
                             }
                         }
                         Err(e) => match &e {
@@ -403,11 +427,17 @@ async fn run() -> anyhow::Result<()> {
                         },
                     }
                     if let Ok((hostname, owner, repo_name)) = git.parse_remote_full()
-                        && let Ok(token) = std::env::var("GH_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN"))
+                        && let Ok(token) =
+                            std::env::var("GH_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN"))
                     {
                         let github = GitHubProvider::new(owner, repo_name, hostname, token);
                         if let Ok((ready, draft)) = github.count_open_prs() {
-                            println!("  Open PRs: {} ({} ready, {} draft)", ready + draft, ready, draft);
+                            println!(
+                                "  Open PRs: {} ({} ready, {} draft)",
+                                ready + draft,
+                                ready,
+                                draft
+                            );
                         }
                     }
                 }
@@ -422,14 +452,23 @@ async fn run() -> anyhow::Result<()> {
         }
 
         Commands::Release {
-            package, channel, dry_run, artifacts, force,
-            stage_files, prerelease, sign_tags, draft,
+            package,
+            channel,
+            dry_run,
+            artifacts,
+            force,
+            stage_files,
+            prerelease,
+            sign_tags,
+            draft,
         } => {
             let mut config = load_config_for_package(package.as_deref())?;
 
             let channel_name = channel.or_else(|| config.release.default_channel.clone());
             if let Some(name) = &channel_name {
-                config = config.resolve_channel(name).map_err(|e| anyhow::anyhow!("{e}"))?;
+                config = config
+                    .resolve_channel(name)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
             config.release.artifacts.extend(artifacts);
             config.release.stage_files.extend(stage_files);

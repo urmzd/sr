@@ -177,11 +177,7 @@ impl GitHubProvider {
     }
 
     /// Post a review summary on a PR.
-    pub fn post_pr_review(
-        &self,
-        pr_number: u64,
-        body: &str,
-    ) -> Result<(), ReleaseError> {
+    pub fn post_pr_review(&self, pr_number: u64, body: &str) -> Result<(), ReleaseError> {
         let url = format!(
             "{}/repos/{}/{}/pulls/{pr_number}/reviews",
             self.api_url(),
