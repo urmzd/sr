@@ -95,8 +95,11 @@ enum Commands {
         shell: clap_complete::Shell,
     },
 
-    /// Start MCP server over stdio (for AI tool integration)
-    Mcp,
+    /// MCP server
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
+    },
 
     /// Commit staged changes with a message
     Commit(commands::commit::CommitArgs),
@@ -115,6 +118,12 @@ enum Commands {
 
     /// Update sr to the latest version
     Update,
+}
+
+#[derive(Subcommand)]
+enum McpCommands {
+    /// Start MCP server over stdio
+    Serve,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -393,12 +402,12 @@ async fn run() -> anyhow::Result<()> {
                             _ => println!("  Release: error — {e}"),
                         },
                     }
-                    if let Ok((hostname, owner, repo_name)) = git.parse_remote_full() {
-                        if let Ok(token) = std::env::var("GH_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN")) {
-                            let github = GitHubProvider::new(owner, repo_name, hostname, token);
-                            if let Ok((ready, draft)) = github.count_open_prs() {
-                                println!("  Open PRs: {} ({} ready, {} draft)", ready + draft, ready, draft);
-                            }
+                    if let Ok((hostname, owner, repo_name)) = git.parse_remote_full()
+                        && let Ok(token) = std::env::var("GH_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN"))
+                    {
+                        let github = GitHubProvider::new(owner, repo_name, hostname, token);
+                        if let Ok((ready, draft)) = github.count_open_prs() {
+                            println!("  Open PRs: {} ({} ready, {} draft)", ready + draft, ready, draft);
                         }
                     }
                 }
@@ -477,7 +486,9 @@ async fn run() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Commands::Mcp => commands::mcp::run().await,
+        Commands::Mcp { command } => match command {
+            McpCommands::Serve => commands::mcp::run().await,
+        },
         Commands::Commit(args) => commands::commit::run(&args).await,
         Commands::Review(args) => commands::review::run(&args).await,
         Commands::Worktree(args) => commands::worktree::run(&args).await,

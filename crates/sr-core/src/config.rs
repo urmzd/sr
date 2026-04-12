@@ -43,7 +43,7 @@ pub const CONFIG_CANDIDATES: &[&str] = &["sr.yaml", "sr.yml", LEGACY_CONFIG_FILE
 ///   pre_commit: ["cargo fmt --check"]
 ///   pre_release: ["cargo test --workspace"]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub commit: CommitConfig,
@@ -52,17 +52,6 @@ pub struct Config {
     /// Monorepo packages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packages: Vec<PackageConfig>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            commit: CommitConfig::default(),
-            release: ReleaseConfig::default(),
-            hooks: HooksConfig::default(),
-            packages: vec![],
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
