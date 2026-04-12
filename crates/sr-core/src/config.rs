@@ -31,16 +31,11 @@ pub struct ReleaseConfig {
     pub version_files_strict: bool,
     pub artifacts: Vec<String>,
     pub floating_tags: bool,
-    pub build_command: Option<String>,
-    /// Additional files/globs to stage after `build_command` runs (e.g. `Cargo.lock`).
+    /// Additional files/globs to stage in the release commit (e.g. `Cargo.lock`).
     pub stage_files: Vec<String>,
     /// Pre-release identifier (e.g. "alpha", "beta", "rc"). When set, versions are
     /// formatted as X.Y.Z-<id>.N where N auto-increments.
     pub prerelease: Option<String>,
-    /// Shell command to run before the release starts (validation, checks).
-    pub pre_release_command: Option<String>,
-    /// Shell command to run after the release completes (notifications, deployments).
-    pub post_release_command: Option<String>,
     /// Sign annotated tags with GPG/SSH (git tag -s).
     pub sign_tags: bool,
     /// Create GitHub releases as drafts (requires manual publishing).
@@ -49,13 +44,8 @@ pub struct ReleaseConfig {
     /// Available variables: `version`, `tag_name`, `tag_prefix`.
     /// Default when None: uses the tag name (e.g. "v1.2.0").
     pub release_name_template: Option<String>,
-    /// Git hooks configuration.
+    /// Hooks configuration — pre/post hooks for every sr command.
     pub hooks: HooksConfig,
-    /// Structured lifecycle hooks for the release pipeline.
-    /// Each step runs at a specific point in the release flow.
-    /// For simple use cases, `pre_release_command` and `post_release_command` are still supported.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lifecycle: Vec<LifecycleStep>,
     /// Versioning strategy for monorepo packages.
     /// `independent` (default): each package is versioned separately.
     /// `fixed`: all packages share one version, tag, and changelog.
@@ -65,6 +55,12 @@ pub struct ReleaseConfig {
     /// (or together when `versioning: fixed`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packages: Vec<PackageConfig>,
+    /// Named release channels for trunk-based promotion (e.g. canary, rc, stable).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub channels: BTreeMap<String, ChannelConfig>,
+    /// Default channel for `sr release` when no --channel flag given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_channel: Option<String>,
     /// Internal: set when resolving a package config. Commits are filtered to this path.
     #[serde(skip)]
     pub path_filter: Option<String>,
@@ -84,18 +80,16 @@ impl Default for ReleaseConfig {
             version_files_strict: false,
             artifacts: vec![],
             floating_tags: true,
-            build_command: None,
             stage_files: vec![],
             prerelease: None,
-            pre_release_command: None,
-            post_release_command: None,
             sign_tags: false,
             draft: false,
             release_name_template: None,
-            hooks: HooksConfig::with_defaults(),
-            lifecycle: vec![],
+            hooks: HooksConfig::default(),
             versioning: VersioningMode::default(),
             packages: vec![],
+            channels: BTreeMap::new(),
+            default_channel: None,
             path_filter: None,
         }
     }
@@ -141,98 +135,82 @@ pub struct PackageConfig {
     /// Changelog override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changelog: Option<ChangelogConfig>,
-    /// Build command override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub build_command: Option<String>,
     /// Stage files override.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stage_files: Vec<String>,
 }
 
-/// A lifecycle event in the release pipeline.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// A named release channel for trunk-based promotion.
+///
+/// All channels release from the same trunk branch. Promotion flows from
+/// less stable to more stable: canary -> rc -> stable.
+///
+/// ```yaml
+/// channels:
+///   canary:
+///     prerelease: canary
+///   rc:
+///     prerelease: rc
+///     draft: true
+///   stable: {}
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ChannelConfig {
+    /// Pre-release identifier (e.g. "rc", "beta"). None = stable release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prerelease: Option<String>,
+    /// Create GitHub releases as drafts.
+    #[serde(default)]
+    pub draft: bool,
+    /// Artifact patterns for this channel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
+}
+
+/// An event in the sr lifecycle where hooks can run.
+///
+/// Every sr command has a pre/post pair. Hooks are configured under
+/// the event name in the `hooks` section of `sr.yaml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LifecycleEvent {
-    /// Before the release starts (validation, checks, linting).
+pub enum HookEvent {
+    PreCommit,
+    PostCommit,
+    PreBranch,
+    PostBranch,
+    PrePr,
+    PostPr,
+    PreReview,
+    PostReview,
     PreRelease,
-    /// After version files are bumped but before build_command runs.
-    PostBump,
-    /// After build_command completes but before git commit.
-    PostBuild,
-    /// After everything completes (notifications, deployments).
     PostRelease,
 }
 
-/// A named step in the release lifecycle pipeline.
+/// Hooks configuration.
 ///
-/// ```yaml
-/// lifecycle:
-///   - name: lint
-///     when: pre_release
-///     run: "cargo clippy -- -D warnings"
-///   - name: notify
-///     when: post_release
-///     run: "./scripts/notify-slack.sh"
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LifecycleStep {
-    /// Step name (for logging).
-    pub name: String,
-    /// When this step runs in the release pipeline.
-    pub when: LifecycleEvent,
-    /// Shell command to execute. `SR_VERSION` and `SR_TAG` env vars are set.
-    pub run: String,
-}
-
-/// A single entry in a hook's command list.
-///
-/// Can be either a simple shell command string or a structured step with
-/// file-pattern matching.
+/// Each key is a sr lifecycle event (e.g. `pre_commit`, `pre_release`)
+/// and the value is a list of shell commands to run.
 ///
 /// ```yaml
 /// hooks:
-///   commit-msg:
-///     - sr hook commit-msg          # simple command
-///   pre-commit:
-///     - step: format                # structured step
-///       patterns:
-///         - "*.rs"
-///       rules:
-///         - "rustfmt --check --edition 2024 {files}"
+///   pre_release:
+///     - "cargo test --workspace"
+///   pre_commit:
+///     - "cargo fmt --check"
+///     - "cargo clippy -- -D warnings"
+///   post_release:
+///     - "./scripts/notify-slack.sh"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum HookEntry {
-    Step {
-        step: String,
-        patterns: Vec<String>,
-        rules: Vec<String>,
-    },
-    Simple(String),
-}
 
-/// Git hooks configuration.
+/// Hooks configuration.
 ///
-/// Each key is a git hook name (e.g. `commit-msg`, `pre-commit`, `pre-push`)
-/// and the value is a list of entries — either simple shell commands or
-/// structured steps with file-pattern matching.
-///
-/// Hook scripts in `.githooks/` are generated by `sr init`.
+/// Each key is a sr lifecycle event (e.g. `pre_commit`, `pre_release`)
+/// and the value is a list of shell commands to run.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(transparent)]
 pub struct HooksConfig {
-    pub hooks: BTreeMap<String, Vec<HookEntry>>,
-}
-
-impl HooksConfig {
-    pub fn with_defaults() -> Self {
-        let mut hooks = BTreeMap::new();
-        hooks.insert(
-            "commit-msg".into(),
-            vec![HookEntry::Simple("sr hook commit-msg".into())],
-        );
-        Self { hooks }
-    }
+    pub hooks: BTreeMap<HookEvent, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,9 +278,6 @@ impl ReleaseConfig {
         if let Some(ref cl) = pkg.changelog {
             config.changelog = cl.clone();
         }
-        if let Some(ref cmd) = pkg.build_command {
-            config.build_command = Some(cmd.clone());
-        }
         if !pkg.stage_files.is_empty() {
             config.stage_files = pkg.stage_files.clone();
         }
@@ -347,6 +322,33 @@ impl ReleaseConfig {
         // Clear packages to avoid recursion
         config.packages = vec![];
         config
+    }
+
+    /// Resolve a named channel by merging its overrides onto the root config.
+    pub fn resolve_channel(&self, name: &str) -> Result<Self, ReleaseError> {
+        let channel = self.channels.get(name).ok_or_else(|| {
+            let available: Vec<&str> = self.channels.keys().map(|k| k.as_str()).collect();
+            ReleaseError::Config(format!(
+                "channel '{name}' not found. Available: {}",
+                if available.is_empty() {
+                    "(none — no channels configured)".to_string()
+                } else {
+                    available.join(", ")
+                }
+            ))
+        })?;
+
+        let mut config = self.clone();
+        if channel.prerelease.is_some() {
+            config.prerelease = channel.prerelease.clone();
+        }
+        if channel.draft {
+            config.draft = true;
+        }
+        if !channel.artifacts.is_empty() {
+            config.artifacts.extend(channel.artifacts.clone());
+        }
+        Ok(config)
     }
 
     /// Find a package by name. Returns an error if the package is not found.
@@ -452,21 +454,12 @@ artifacts: []
 # Create floating major version tags (e.g. "v3" pointing to latest v3.x.x).
 floating_tags: true
 
-# Shell command to run after version files are bumped (e.g. "cargo build --release").
-build_command:
-
-# Additional files/globs to stage after build_command runs (e.g. Cargo.lock).
+# Additional files/globs to stage in the release commit (e.g. Cargo.lock).
 stage_files: []
 
 # Pre-release identifier (e.g. "alpha", "beta", "rc").
 # When set, versions are formatted as X.Y.Z-<id>.N where N auto-increments.
 prerelease:
-
-# Shell command to run before the release starts (validation, checks).
-pre_release_command:
-
-# Shell command to run after the release completes (notifications, deployments).
-post_release_command:
 
 # Sign annotated tags with GPG/SSH (git tag -s).
 sign_tags: false
@@ -479,43 +472,20 @@ draft: false
 # Default: uses the tag name (e.g. "v1.2.0").
 release_name_template:
 
-# Git hooks configuration.
-# Each key is a git hook name. Values can be simple commands or structured steps.
-# Steps with patterns only run when staged files match the globs.
-# Rules containing {{files}} receive the matched file list.
-# Hook scripts are generated in .githooks/ by "sr init".
-hooks:
-  commit-msg:
-    - sr hook commit-msg
-  # pre-commit:
-  #   - step: format
-  #     patterns:
-  #       - "*.rs"
-  #     rules:
-  #       - "rustfmt --check --edition 2024 {{files}}"
-  #   - step: lint
-  #     patterns:
-  #       - "*.rs"
-  #     rules:
-  #       - "cargo clippy --workspace -- -D warnings"
-
-# Release lifecycle hooks — run commands at specific points in the release pipeline.
-# Runs after pre_release_command/post_release_command (both systems coexist).
-# Supported events: pre_release, post_bump, post_build, post_release
-# SR_VERSION and SR_TAG env vars are set for all lifecycle steps.
-# lifecycle:
-#   - name: lint
-#     when: pre_release
-#     run: "cargo clippy -- -D warnings"
-#   - name: verify
-#     when: post_bump
-#     run: "./scripts/verify-version.sh"
-#   - name: check
-#     when: post_build
-#     run: "./scripts/check-artifacts.sh"
-#   - name: notify
-#     when: post_release
-#     run: "./scripts/notify-slack.sh"
+# Hooks — pre/post hooks for every sr command.
+# Each key is a lifecycle event, values are shell commands.
+# Hook context is passed as JSON via stdin (event, command-specific fields).
+# Available events: pre_commit, post_commit, pre_branch, post_branch,
+#   pre_pr, post_pr, pre_review, post_review, pre_release, post_release.
+# Release hooks also receive SR_VERSION and SR_TAG env vars.
+# hooks:
+#   pre_commit:
+#     - "cargo fmt --check"
+#     - "cargo clippy -- -D warnings"
+#   pre_release:
+#     - "cargo test --workspace"
+#   post_release:
+#     - "./scripts/notify-slack.sh"
 
 # Versioning strategy for monorepo packages.
 # "independent" (default): each package gets its own version and tags.
@@ -533,7 +503,6 @@ hooks:
 #       - crates/core/Cargo.toml
 #     changelog:
 #       file: crates/core/CHANGELOG.md
-#     build_command: cargo build -p core
 #     stage_files:
 #       - crates/core/Cargo.lock
 "#
@@ -764,7 +733,7 @@ packages:
                 tag_prefix: None,
                 version_files: vec![],
                 changelog: None,
-                build_command: None,
+
                 stage_files: vec![],
             }],
             ..Default::default()
@@ -791,7 +760,6 @@ packages:
                     file: Some("crates/cli/CHANGELOG.md".into()),
                     template: None,
                 }),
-                build_command: Some("cargo build -p cli".into()),
                 stage_files: vec!["crates/cli/Cargo.lock".into()],
             }],
             ..Default::default()
@@ -803,10 +771,6 @@ packages:
         assert_eq!(
             resolved.changelog.file.as_deref(),
             Some("crates/cli/CHANGELOG.md")
-        );
-        assert_eq!(
-            resolved.build_command.as_deref(),
-            Some("cargo build -p cli")
         );
         assert_eq!(resolved.stage_files, vec!["crates/cli/Cargo.lock"]);
     }
@@ -820,7 +784,7 @@ packages:
                 tag_prefix: None,
                 version_files: vec![],
                 changelog: None,
-                build_command: None,
+
                 stage_files: vec![],
             }],
             ..Default::default()
@@ -882,16 +846,12 @@ packages:
             "version_files_strict",
             "artifacts",
             "floating_tags",
-            "build_command",
             "stage_files",
             "prerelease",
-            "pre_release_command",
-            "post_release_command",
             "sign_tags",
             "draft",
             "release_name_template",
             "hooks",
-            "lifecycle",
             "versioning",
             "packages",
         ] {
@@ -933,49 +893,17 @@ packages:
     }
 
     #[test]
-    fn lifecycle_step_roundtrip() {
-        let step = LifecycleStep {
-            name: "lint".into(),
-            when: LifecycleEvent::PreRelease,
-            run: "cargo clippy".into(),
-        };
-        let yaml = serde_yaml_ng::to_string(&step).unwrap();
-        assert!(yaml.contains("pre_release"));
-        let parsed: LifecycleStep = serde_yaml_ng::from_str(&yaml).unwrap();
-        assert_eq!(parsed, step);
-    }
-
-    #[test]
-    fn lifecycle_config_parses_from_yaml() {
-        let yaml = r#"
-lifecycle:
-  - name: test
-    when: pre_release
-    run: "cargo test"
-  - name: audit
-    when: post_bump
-    run: "cargo audit"
-  - name: verify
-    when: post_build
-    run: "./scripts/verify.sh"
-  - name: notify
-    when: post_release
-    run: "./scripts/notify.sh"
-"#;
-        let config: ReleaseConfig = serde_yaml_ng::from_str(yaml).unwrap();
-        assert_eq!(config.lifecycle.len(), 4);
-        assert_eq!(config.lifecycle[0].name, "test");
-        assert_eq!(config.lifecycle[0].when, LifecycleEvent::PreRelease);
-        assert_eq!(config.lifecycle[1].when, LifecycleEvent::PostBump);
-        assert_eq!(config.lifecycle[2].when, LifecycleEvent::PostBuild);
-        assert_eq!(config.lifecycle[3].when, LifecycleEvent::PostRelease);
-    }
-
-    #[test]
-    fn lifecycle_not_serialized_when_empty() {
-        let config = ReleaseConfig::default();
+    fn hook_event_roundtrip() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            HookEvent::PreRelease,
+            vec!["cargo test".to_string()],
+        );
+        let config = HooksConfig { hooks };
         let yaml = serde_yaml_ng::to_string(&config).unwrap();
-        assert!(!yaml.contains("lifecycle"));
+        assert!(yaml.contains("pre_release"));
+        let parsed: HooksConfig = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert!(parsed.hooks.contains_key(&HookEvent::PreRelease));
     }
 
     #[test]
@@ -1034,7 +962,7 @@ packages:
                     tag_prefix: Some("core/v".into()),
                     version_files: vec!["crates/core/Cargo.toml".into()],
                     changelog: None,
-                    build_command: None,
+    
                     stage_files: vec!["crates/core/Cargo.lock".into()],
                 },
                 PackageConfig {
@@ -1043,7 +971,7 @@ packages:
                     tag_prefix: None,
                     version_files: vec!["crates/cli/Cargo.toml".into()],
                     changelog: None,
-                    build_command: None,
+    
                     stage_files: vec![],
                 },
             ],
@@ -1088,7 +1016,7 @@ packages:
                 tag_prefix: None,
                 version_files: vec!["Cargo.toml".into()], // duplicate of root
                 changelog: None,
-                build_command: None,
+
                 stage_files: vec![],
             }],
             versioning: VersioningMode::Fixed,

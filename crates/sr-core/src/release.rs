@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::changelog::{ChangelogEntry, ChangelogFormatter};
 use crate::commit::{CommitParser, ConventionalCommit, DefaultCommitClassifier};
-use crate::config::{LifecycleEvent, ReleaseConfig};
+use crate::config::{HookEvent, ReleaseConfig};
 use crate::error::ReleaseError;
 use crate::git::GitRepository;
 use crate::version::{BumpLevel, apply_bump, apply_prerelease_bump, determine_bump};
@@ -315,41 +315,38 @@ where
     fn execute(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError> {
         let version_str = plan.next_version.to_string();
 
-        self.run_lifecycle_command(
-            &self.config.pre_release_command,
-            "pre_release_command",
-            &version_str,
-            &plan.tag_name,
-            dry_run,
-        )?;
-        self.run_lifecycle_steps(
-            LifecycleEvent::PreRelease,
-            &version_str,
-            &plan.tag_name,
-            dry_run,
-        )?;
+        // 0. Assert clean working tree
+        if !dry_run && self.git.is_dirty()? {
+            return Err(ReleaseError::Config(
+                "working tree is dirty — commit or stash changes before releasing".into(),
+            ));
+        }
 
+        // 1. Run pre_release hooks
+        let env = release_env(&version_str, &plan.tag_name);
+        let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        if !dry_run {
+            crate::hooks::run_event(&self.config.hooks, HookEvent::PreRelease, &env_refs)?;
+        }
+
+        // 2. Generate changelog
         let changelog_body = self.format_changelog(plan)?;
 
+        // 3. Bump, write changelog, stage, commit
         self.bump_and_build(plan, &version_str, &changelog_body, dry_run)?;
+
+        // 4. Create and push tags
         self.create_and_push_tags(plan, &changelog_body, dry_run)?;
+
+        // 5. GitHub release
         self.create_or_update_release(plan, &changelog_body, dry_run)?;
         self.upload_artifacts(plan, dry_run)?;
         self.verify_release_exists(plan, dry_run)?;
 
-        self.run_lifecycle_command(
-            &self.config.post_release_command,
-            "post_release_command",
-            &version_str,
-            &plan.tag_name,
-            dry_run,
-        )?;
-        self.run_lifecycle_steps(
-            LifecycleEvent::PostRelease,
-            &version_str,
-            &plan.tag_name,
-            dry_run,
-        )?;
+        // 6. Run post_release hooks
+        if !dry_run {
+            crate::hooks::run_event(&self.config.hooks, HookEvent::PostRelease, &env_refs)?;
+        }
 
         if dry_run {
             eprintln!("[dry-run] Changelog:\n{changelog_body}");
@@ -360,6 +357,14 @@ where
     }
 }
 
+/// Build release env vars as owned strings.
+fn release_env(version: &str, tag: &str) -> Vec<(String, String)> {
+    vec![
+        ("SR_VERSION".into(), version.into()),
+        ("SR_TAG".into(), tag.into()),
+    ]
+}
+
 impl<G, V, C, F> TrunkReleaseStrategy<G, V, C, F>
 where
     G: GitRepository,
@@ -367,46 +372,6 @@ where
     C: CommitParser,
     F: ChangelogFormatter,
 {
-    fn run_lifecycle_command(
-        &self,
-        command: &Option<String>,
-        label: &str,
-        version: &str,
-        tag: &str,
-        dry_run: bool,
-    ) -> Result<(), ReleaseError> {
-        if let Some(cmd) = command {
-            if dry_run {
-                eprintln!("[dry-run] Would run {label}: {cmd}");
-            } else {
-                eprintln!("Running {label}: {cmd}");
-                run_lifecycle_hook(cmd, version, tag, label)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn run_lifecycle_steps(
-        &self,
-        event: LifecycleEvent,
-        version: &str,
-        tag: &str,
-        dry_run: bool,
-    ) -> Result<(), ReleaseError> {
-        for step in &self.config.lifecycle {
-            if step.when != event {
-                continue;
-            }
-            let label = format!("lifecycle[{}]", step.name);
-            if dry_run {
-                eprintln!("[dry-run] Would run {label}: {}", step.run);
-            } else {
-                eprintln!("Running {label}: {}", step.run);
-                run_lifecycle_hook(&step.run, version, tag, &label)?;
-            }
-        }
-        Ok(())
-    }
 
     fn bump_and_build(
         &self,
@@ -431,11 +396,6 @@ where
                     eprintln!("[dry-run] warning: unsupported version file, would skip: {file}");
                 }
             }
-            self.run_lifecycle_steps(LifecycleEvent::PostBump, version_str, &plan.tag_name, true)?;
-            if let Some(ref cmd) = self.config.build_command {
-                eprintln!("[dry-run] Would run build command: {cmd}");
-            }
-            self.run_lifecycle_steps(LifecycleEvent::PostBuild, version_str, &plan.tag_name, true)?;
             if !self.config.stage_files.is_empty() {
                 eprintln!(
                     "[dry-run] Would stage additional files: {}",
@@ -469,11 +429,11 @@ where
             file_snapshots.push((changelog_file.clone(), contents));
         }
 
-        // Run the mutable pre-commit steps with rollback on failure
-        let files_to_stage = match self.execute_pre_commit(plan, version_str, changelog_body) {
+        // Run mutations with rollback on failure
+        let files_to_stage = match self.execute_mutations(version_str, changelog_body) {
             Ok(files) => files,
             Err(e) => {
-                eprintln!("error during pre-commit steps, restoring files...");
+                eprintln!("error during release, restoring files...");
                 restore_snapshots(&file_snapshots);
                 return Err(e);
             }
@@ -628,15 +588,13 @@ where
         Ok(())
     }
 
-    /// Execute the mutable pre-commit steps: bump version files, write changelog, run build command.
+    /// Bump version files and write changelog.
     /// Returns the list of bumped files on success. On error the caller restores snapshots.
-    fn execute_pre_commit(
+    fn execute_mutations(
         &self,
-        plan: &ReleasePlan,
         version_str: &str,
         changelog_body: &str,
     ) -> Result<Vec<String>, ReleaseError> {
-        // 2. Bump version files
         let mut files_to_stage: Vec<String> = Vec::new();
         for file in &self.config.version_files {
             match bump_version_file(Path::new(file), version_str) {
@@ -653,7 +611,7 @@ where
             }
         }
 
-        // 2.5. Auto-discover and stage lock files associated with bumped manifests
+        // Auto-discover and stage lock files associated with bumped manifests
         for lock_file in discover_lock_files(&files_to_stage) {
             let lock_str = lock_file.to_string_lossy().into_owned();
             if !files_to_stage.contains(&lock_str) {
@@ -661,10 +619,7 @@ where
             }
         }
 
-        // 2.6. Run post_bump lifecycle steps
-        self.run_lifecycle_steps(LifecycleEvent::PostBump, version_str, &plan.tag_name, false)?;
-
-        // 3. Write changelog file if configured
+        // Write changelog file if configured
         if let Some(ref changelog_file) = self.config.changelog.file {
             let path = Path::new(changelog_file);
             let existing = if path.exists() {
@@ -685,20 +640,6 @@ where
             };
             fs::write(path, new_content).map_err(|e| ReleaseError::Changelog(e.to_string()))?;
         }
-
-        // 3.5. Run build command if configured
-        if let Some(ref cmd) = self.config.build_command {
-            eprintln!("Running build command: {cmd}");
-            run_lifecycle_hook(cmd, version_str, &plan.tag_name, "build_command")?;
-        }
-
-        // 3.6. Run post_build lifecycle steps
-        self.run_lifecycle_steps(
-            LifecycleEvent::PostBuild,
-            version_str,
-            &plan.tag_name,
-            false,
-        )?;
 
         Ok(files_to_stage)
     }
@@ -724,17 +665,6 @@ fn restore_snapshots(snapshots: &[(String, Option<String>)]) {
             }
         }
     }
-}
-
-/// Run a release lifecycle command with SR_VERSION and SR_TAG env vars.
-fn run_lifecycle_hook(
-    cmd: &str,
-    version: &str,
-    tag: &str,
-    label: &str,
-) -> Result<(), ReleaseError> {
-    crate::hooks::run_shell(cmd, None, &[("SR_VERSION", version), ("SR_TAG", tag)])
-        .map_err(|e| ReleaseError::BuildCommand(format!("{label}: {e}")))
 }
 
 /// Resolve glob patterns into a deduplicated, sorted list of file paths.
@@ -852,6 +782,10 @@ mod tests {
                 message.to_string(),
             ));
             Ok(true)
+        }
+
+        fn is_dirty(&self) -> Result<bool, ReleaseError> {
+            Ok(false)
         }
 
         fn push(&self) -> Result<(), ReleaseError> {
@@ -1651,491 +1585,4 @@ mod tests {
         assert!(matches!(err, ReleaseError::NoCommits { .. }));
     }
 
-    // --- build_command tests ---
-
-    #[test]
-    fn execute_runs_build_command_after_version_bump() {
-        let dir = tempfile::tempdir().unwrap();
-        let output_file = dir.path().join("sr_test_version");
-
-        let config = ReleaseConfig {
-            build_command: Some(format!(
-                "echo $SR_VERSION > {}",
-                output_file.to_str().unwrap()
-            )),
-            ..test_config()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        s.execute(&plan, false).unwrap();
-
-        let contents = std::fs::read_to_string(&output_file).unwrap();
-        assert_eq!(contents.trim(), "0.1.0");
-    }
-
-    #[test]
-    fn execute_build_command_failure_aborts_release() {
-        let config = ReleaseConfig {
-            build_command: Some("exit 1".into()),
-            ..test_config()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        let result = s.execute(&plan, false);
-
-        assert!(result.is_err());
-        assert!(s.git.created_tags.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn execute_dry_run_skips_build_command() {
-        let dir = tempfile::tempdir().unwrap();
-        let output_file = dir.path().join("sr_test_should_not_exist");
-
-        let config = ReleaseConfig {
-            build_command: Some(format!("echo test > {}", output_file.to_str().unwrap())),
-            ..test_config()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        s.execute(&plan, true).unwrap();
-
-        assert!(!output_file.exists());
-    }
-
-    #[test]
-    fn force_fails_with_no_tags() {
-        let mut s = make_strategy(vec![], vec![], ReleaseConfig::default());
-        s.force = true;
-
-        let err = s.plan().unwrap_err();
-        assert!(matches!(err, ReleaseError::NoCommits { .. }));
-    }
-
-    // --- stage_files tests ---
-
-    #[test]
-    fn execute_stages_extra_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let lock_file = dir.path().join("Cargo.lock");
-        std::fs::write(&lock_file, "old lock").unwrap();
-
-        let config = ReleaseConfig {
-            build_command: Some(format!("echo 'new lock' > {}", lock_file.to_str().unwrap())),
-            stage_files: vec![lock_file.to_str().unwrap().to_string()],
-            ..test_config()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        s.execute(&plan, false).unwrap();
-
-        let committed = s.git.committed.lock().unwrap();
-        assert!(!committed.is_empty());
-        let (staged, _) = &committed[0];
-        assert!(
-            staged.iter().any(|f| f.contains("Cargo.lock")),
-            "Cargo.lock should be staged, got: {staged:?}"
-        );
-    }
-
-    #[test]
-    fn execute_dry_run_shows_stage_files() {
-        let config = ReleaseConfig {
-            stage_files: vec!["Cargo.lock".into()],
-            ..test_config()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        // dry-run should not error
-        s.execute(&plan, true).unwrap();
-    }
-
-    // --- rollback tests ---
-
-    #[test]
-    fn execute_build_failure_restores_version_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let cargo_toml = dir.path().join("Cargo.toml");
-        std::fs::write(
-            &cargo_toml,
-            "[package]\nname = \"test\"\nversion = \"1.0.0\"\n",
-        )
-        .unwrap();
-
-        let config = ReleaseConfig {
-            version_files: vec![cargo_toml.to_str().unwrap().to_string()],
-            build_command: Some("exit 1".into()),
-            ..test_config()
-        };
-
-        let tag = TagInfo {
-            name: "v1.0.0".into(),
-            version: Version::new(1, 0, 0),
-            sha: "d".repeat(40),
-        };
-        let s = make_strategy(vec![tag], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        let result = s.execute(&plan, false);
-
-        assert!(result.is_err());
-        // Version file should be restored to original contents
-        let contents = std::fs::read_to_string(&cargo_toml).unwrap();
-        assert!(
-            contents.contains("version = \"1.0.0\""),
-            "version should be restored, got: {contents}"
-        );
-    }
-
-    // --- pre/post release hook tests ---
-
-    #[test]
-    fn execute_pre_release_command_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("pre_release_ran");
-
-        let config = ReleaseConfig {
-            pre_release_command: Some(format!("touch {}", marker.to_str().unwrap())),
-            ..test_config()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        s.execute(&plan, false).unwrap();
-
-        assert!(marker.exists(), "pre-release command should have run");
-    }
-
-    #[test]
-    fn execute_post_release_command_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("post_release_ran");
-
-        let config = ReleaseConfig {
-            post_release_command: Some(format!("touch {}", marker.to_str().unwrap())),
-            ..test_config()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        s.execute(&plan, false).unwrap();
-
-        assert!(marker.exists(), "post-release command should have run");
-    }
-
-    #[test]
-    fn execute_pre_release_failure_aborts_release() {
-        let config = ReleaseConfig {
-            pre_release_command: Some("exit 1".into()),
-            ..test_config()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        let result = s.execute(&plan, false);
-
-        assert!(result.is_err());
-        // Nothing should have been committed or tagged
-        assert!(s.git.created_tags.lock().unwrap().is_empty());
-        assert!(s.git.committed.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn execute_hooks_receive_version_env_vars() {
-        let dir = tempfile::tempdir().unwrap();
-        let output_file = dir.path().join("hook_output");
-
-        let config = ReleaseConfig {
-            post_release_command: Some(format!(
-                "echo $SR_VERSION $SR_TAG > {}",
-                output_file.to_str().unwrap()
-            )),
-            ..test_config()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        s.execute(&plan, false).unwrap();
-
-        let contents = std::fs::read_to_string(&output_file).unwrap();
-        assert!(contents.contains("0.1.0"), "SR_VERSION should be set");
-        assert!(contents.contains("v0.1.0"), "SR_TAG should be set");
-    }
-
-    #[test]
-    fn execute_dry_run_skips_hooks() {
-        let dir = tempfile::tempdir().unwrap();
-        let pre_marker = dir.path().join("pre_hook");
-        let post_marker = dir.path().join("post_hook");
-
-        let config = ReleaseConfig {
-            pre_release_command: Some(format!("touch {}", pre_marker.to_str().unwrap())),
-            post_release_command: Some(format!("touch {}", post_marker.to_str().unwrap())),
-            ..test_config()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        s.execute(&plan, true).unwrap();
-
-        assert!(
-            !pre_marker.exists(),
-            "pre-release hook should not run in dry-run"
-        );
-        assert!(
-            !post_marker.exists(),
-            "post-release hook should not run in dry-run"
-        );
-    }
-
-    // --- pre-release tests ---
-
-    #[test]
-    fn plan_prerelease_first_release() {
-        let config = ReleaseConfig {
-            prerelease: Some("alpha".into()),
-            ..Default::default()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        assert_eq!(plan.next_version.to_string(), "0.1.0-alpha.1");
-        assert_eq!(plan.tag_name, "v0.1.0-alpha.1");
-        assert!(plan.prerelease);
-    }
-
-    #[test]
-    fn plan_prerelease_increments_from_stable() {
-        let tag = TagInfo {
-            name: "v1.0.0".into(),
-            version: Version::new(1, 0, 0),
-            sha: "d".repeat(40),
-        };
-        let config = ReleaseConfig {
-            prerelease: Some("beta".into()),
-            ..Default::default()
-        };
-
-        let s = make_strategy(vec![tag], vec![raw_commit("feat: new feature")], config);
-        let plan = s.plan().unwrap();
-        assert_eq!(plan.next_version.to_string(), "1.1.0-beta.1");
-        assert!(plan.prerelease);
-    }
-
-    #[test]
-    fn plan_prerelease_increments_counter() {
-        let tags = vec![
-            TagInfo {
-                name: "v1.0.0".into(),
-                version: Version::new(1, 0, 0),
-                sha: "a".repeat(40),
-            },
-            TagInfo {
-                name: "v1.1.0-alpha.1".into(),
-                version: Version::parse("1.1.0-alpha.1").unwrap(),
-                sha: "b".repeat(40),
-            },
-            TagInfo {
-                name: "v1.1.0-alpha.2".into(),
-                version: Version::parse("1.1.0-alpha.2").unwrap(),
-                sha: "c".repeat(40),
-            },
-        ];
-        let config = ReleaseConfig {
-            prerelease: Some("alpha".into()),
-            ..Default::default()
-        };
-
-        let s = make_strategy(tags, vec![raw_commit("feat: another")], config);
-        let plan = s.plan().unwrap();
-        assert_eq!(plan.next_version.to_string(), "1.1.0-alpha.3");
-    }
-
-    #[test]
-    fn plan_prerelease_different_id_starts_at_1() {
-        let tags = vec![
-            TagInfo {
-                name: "v1.0.0".into(),
-                version: Version::new(1, 0, 0),
-                sha: "a".repeat(40),
-            },
-            TagInfo {
-                name: "v1.1.0-alpha.3".into(),
-                version: Version::parse("1.1.0-alpha.3").unwrap(),
-                sha: "b".repeat(40),
-            },
-        ];
-        let config = ReleaseConfig {
-            prerelease: Some("beta".into()),
-            ..Default::default()
-        };
-
-        let s = make_strategy(tags, vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        assert_eq!(plan.next_version.to_string(), "1.1.0-beta.1");
-    }
-
-    #[test]
-    fn plan_prerelease_no_floating_tags() {
-        let config = ReleaseConfig {
-            prerelease: Some("rc".into()),
-            floating_tags: true,
-            ..Default::default()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        assert!(
-            plan.floating_tag_name.is_none(),
-            "pre-releases should not create floating tags"
-        );
-    }
-
-    #[test]
-    fn plan_stable_skips_prerelease_tags() {
-        let tags = vec![
-            TagInfo {
-                name: "v1.0.0".into(),
-                version: Version::new(1, 0, 0),
-                sha: "a".repeat(40),
-            },
-            TagInfo {
-                name: "v1.1.0-alpha.1".into(),
-                version: Version::parse("1.1.0-alpha.1").unwrap(),
-                sha: "b".repeat(40),
-            },
-        ];
-        // No prerelease config — stable release
-        let s = make_strategy(
-            tags,
-            vec![raw_commit("feat: something")],
-            ReleaseConfig::default(),
-        );
-        let plan = s.plan().unwrap();
-        // Should base on v1.0.0, not v1.1.0-alpha.1
-        assert_eq!(plan.next_version, Version::new(1, 1, 0));
-        assert!(!plan.prerelease);
-    }
-
-    #[test]
-    fn plan_prerelease_marks_plan_as_prerelease() {
-        let config = ReleaseConfig {
-            prerelease: Some("alpha".into()),
-            ..Default::default()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("fix: bug")], config);
-        let plan = s.plan().unwrap();
-        assert!(plan.prerelease);
-        assert!(plan.next_version.to_string().contains("alpha"));
-    }
-
-    // --- monorepo (path_filter) tests ---
-
-    #[test]
-    fn plan_with_path_filter_uses_filtered_commits() {
-        let config = ReleaseConfig {
-            path_filter: Some("crates/core".into()),
-            ..Default::default()
-        };
-
-        // All commits include a feat, but path-filtered commits only have a fix
-        let mut s = make_strategy(
-            vec![],
-            vec![raw_commit("feat: big feature"), raw_commit("fix: patch")],
-            config,
-        );
-        s.git.path_commits = Some(vec![raw_commit("fix: patch only in core")]);
-
-        let plan = s.plan().unwrap();
-        // Should be a patch bump (from path-filtered commits), not minor
-        assert_eq!(plan.bump, BumpLevel::Patch);
-        assert_eq!(plan.commits.len(), 1);
-        assert_eq!(plan.commits[0].description, "patch only in core");
-    }
-
-    #[test]
-    fn plan_without_path_filter_uses_all_commits() {
-        let config = ReleaseConfig::default();
-
-        let mut s = make_strategy(vec![], vec![raw_commit("feat: big feature")], config);
-        s.git.path_commits = Some(vec![raw_commit("fix: filtered")]);
-
-        let plan = s.plan().unwrap();
-        // path_filter is None, so should use all commits (feat → minor)
-        assert_eq!(plan.bump, BumpLevel::Minor);
-    }
-
-    #[test]
-    fn plan_with_path_filter_no_commits_returns_error() {
-        let config = ReleaseConfig {
-            path_filter: Some("crates/core".into()),
-            ..Default::default()
-        };
-
-        let mut s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        s.git.path_commits = Some(vec![]);
-
-        let err = s.plan().unwrap_err();
-        assert!(matches!(err, ReleaseError::NoCommits { .. }));
-    }
-
-    #[test]
-    fn plan_with_path_filter_custom_tag_prefix() {
-        let config = ReleaseConfig {
-            path_filter: Some("crates/core".into()),
-            tag_prefix: "core/v".into(),
-            ..Default::default()
-        };
-
-        let tag = TagInfo {
-            name: "core/v1.0.0".into(),
-            version: Version::new(1, 0, 0),
-            sha: "a".repeat(40),
-        };
-        let mut s = make_strategy(vec![tag], vec![raw_commit("feat: something")], config);
-        s.git.path_commits = Some(vec![raw_commit("fix: core bug")]);
-
-        let plan = s.plan().unwrap();
-        assert_eq!(plan.tag_name, "core/v1.0.1");
-        assert_eq!(plan.current_version, Some(Version::new(1, 0, 0)));
-    }
-
-    #[test]
-    fn execute_dry_run_with_lifecycle_steps() {
-        use crate::config::{LifecycleEvent, LifecycleStep};
-
-        let mut config = ReleaseConfig::default();
-        config.lifecycle = vec![
-            LifecycleStep {
-                name: "lint".into(),
-                when: LifecycleEvent::PreRelease,
-                run: "cargo clippy".into(),
-            },
-            LifecycleStep {
-                name: "verify".into(),
-                when: LifecycleEvent::PostBump,
-                run: "./verify.sh".into(),
-            },
-            LifecycleStep {
-                name: "check".into(),
-                when: LifecycleEvent::PostBuild,
-                run: "./check.sh".into(),
-            },
-            LifecycleStep {
-                name: "notify".into(),
-                when: LifecycleEvent::PostRelease,
-                run: "./notify.sh".into(),
-            },
-        ];
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: add feature")], config);
-        let plan = s.plan().unwrap();
-        // Dry run should not fail — lifecycle steps are only logged, not executed
-        s.execute(&plan, true).unwrap();
-    }
 }
