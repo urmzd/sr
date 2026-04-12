@@ -1,10 +1,12 @@
+pub mod ai;
 pub mod changelog;
 pub mod commit;
 pub mod config;
 pub mod error;
 pub mod git;
-pub mod hook_cache;
+pub mod github;
 pub mod hooks;
+pub mod native_git;
 pub mod release;
 pub mod version;
 pub mod version_files;
