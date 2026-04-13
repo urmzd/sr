@@ -122,8 +122,11 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum McpCommands {
-    /// Start MCP server over stdio
+    /// Start MCP server over stdio (called by AI tools, not users)
+    #[command(hide = true)]
     Serve,
+    /// Create .mcp.json in the current project for agentspec discovery
+    Init,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -527,6 +530,7 @@ async fn run() -> anyhow::Result<()> {
 
         Commands::Mcp { command } => match command {
             McpCommands::Serve => commands::mcp::run().await,
+            McpCommands::Init => commands::mcp::config(),
         },
         Commands::Commit(args) => commands::commit::run(&args).await,
         Commands::Review(args) => commands::review::run(&args).await,

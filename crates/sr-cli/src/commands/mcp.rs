@@ -346,14 +346,29 @@ impl SrMcpServer {
     }
 }
 
-/// Run the MCP server over stdio.
-pub async fn run() -> Result<()> {
-    eprintln!("sr mcp server running on stdio");
-    eprintln!("tools: sr_status, sr_diff, sr_log, sr_stage, sr_commit, sr_branch, sr_config");
-    eprintln!();
-    eprintln!("register: agentspec mcp add sr --command sr --args \"mcp serve\"");
-    eprintln!("press ctrl+c to stop");
+/// Create or update `.mcp.json` in the current project root.
+/// This file declares sr's MCP server for agentspec discovery.
+pub fn config() -> Result<()> {
+    let repo = GitRepo::discover()?;
+    let mcp_path = repo.root().join(".mcp.json");
 
+    let config = serde_json::json!({
+        "mcpServers": {
+            "sr": {
+                "command": "sr",
+                "args": ["mcp", "serve"]
+            }
+        }
+    });
+
+    let content = serde_json::to_string_pretty(&config)?;
+    std::fs::write(&mcp_path, &content)?;
+    println!("{}", mcp_path.display());
+    Ok(())
+}
+
+/// Run the MCP server over stdio (called by AI tools, not users).
+pub async fn run() -> Result<()> {
     let server = SrMcpServer;
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
