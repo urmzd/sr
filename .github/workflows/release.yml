@@ -211,9 +211,4 @@ jobs:
           }
           publish sr-core
           sleep 30
-          publish sr-git
-          publish sr-github
-          sleep 30
-          publish sr-ai
-          sleep 30
           publish sr-cli
