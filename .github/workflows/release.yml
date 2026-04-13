@@ -135,10 +135,9 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
-          path: sr/artifacts
+          path: artifacts
 
       - name: Prepare release assets
-        working-directory: sr
         run: |
           mkdir -p release-assets
           for dir in artifacts/sr-*/; do
@@ -155,7 +154,7 @@ jobs:
         run: |
           set -uo pipefail
           set +e
-          JSON=$(./target/release/sr release ${{ inputs.force && '--force' || '' }} --artifacts "release-assets/*" | tail -1)
+          JSON=$(./target/release/sr release ${{ inputs.force && '--force' || '' }} --artifacts "../release-assets/*" | tail -1)
           RC=${PIPESTATUS[0]}
           set -e
           if [ $RC -eq 0 ]; then

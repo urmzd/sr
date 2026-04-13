@@ -3,6 +3,10 @@
 *.pdb
 .env
 
+# CI build artifacts
+artifacts/
+release-assets/
+
 # Editor / IDE
 .idea/
 .vscode/
