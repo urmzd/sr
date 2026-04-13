@@ -22,6 +22,27 @@ inputs:
   git-user-email:
     description: "Git user email for tag creation"
     default: "sr[bot]@urmzd.com"
+  artifacts:
+    description: "Glob patterns for artifact files to upload (space-separated, passed as --artifacts)"
+    default: ""
+  package:
+    description: "Target a specific package in a monorepo"
+    default: ""
+  channel:
+    description: "Release channel (e.g. canary, rc, stable)"
+    default: ""
+  prerelease:
+    description: "Pre-release identifier (e.g. alpha, beta, rc)"
+    default: ""
+  stage-files:
+    description: "Additional file globs to stage in the release commit (space-separated)"
+    default: ""
+  sign-tags:
+    description: "Sign tags with GPG/SSH"
+    default: "false"
+  draft:
+    description: "Create GitHub release as a draft"
+    default: "false"
   sha256:
     description: "Expected SHA256 checksum of the sr binary"
     default: ""
@@ -123,9 +144,34 @@ runs:
           if [ "${{ inputs.force }}" = "true" ]; then
             CMD="$CMD --force"
           fi
+          if [ -n "${{ inputs.artifacts }}" ]; then
+            for glob in ${{ inputs.artifacts }}; do
+              CMD="$CMD --artifacts \"$glob\""
+            done
+          fi
+          if [ -n "${{ inputs.package }}" ]; then
+            CMD="$CMD --package ${{ inputs.package }}"
+          fi
+          if [ -n "${{ inputs.channel }}" ]; then
+            CMD="$CMD --channel ${{ inputs.channel }}"
+          fi
+          if [ -n "${{ inputs.prerelease }}" ]; then
+            CMD="$CMD --prerelease ${{ inputs.prerelease }}"
+          fi
+          if [ -n "${{ inputs.stage-files }}" ]; then
+            for glob in ${{ inputs.stage-files }}; do
+              CMD="$CMD --stage-files \"$glob\""
+            done
+          fi
+          if [ "${{ inputs.sign-tags }}" = "true" ]; then
+            CMD="$CMD --sign-tags"
+          fi
+          if [ "${{ inputs.draft }}" = "true" ]; then
+            CMD="$CMD --draft"
+          fi
         fi
         set +e
-        JSON_OUTPUT=$(sr $CMD | tail -1)
+        JSON_OUTPUT=$(eval sr $CMD | tail -1)
         EXIT_CODE=${PIPESTATUS[0]}
         set -e
 
