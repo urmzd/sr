@@ -41,9 +41,6 @@ pub trait GitRepository: Send + Sync {
     /// Returns Ok(false) if nothing to commit.
     fn stage_and_commit(&self, paths: &[&str], message: &str) -> Result<bool, ReleaseError>;
 
-    /// Check if the working tree has uncommitted changes.
-    fn is_dirty(&self) -> Result<bool, ReleaseError>;
-
     /// Push current branch to origin.
     fn push(&self) -> Result<(), ReleaseError>;
 

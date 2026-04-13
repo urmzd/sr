@@ -321,13 +321,6 @@ where
     fn execute(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError> {
         let version_str = plan.next_version.to_string();
 
-        // 0. Assert clean working tree
-        if !dry_run && self.git.is_dirty()? {
-            return Err(ReleaseError::Config(
-                "working tree is dirty — commit or stash changes before releasing".into(),
-            ));
-        }
-
         // 1. Run pre_release hooks
         let env = release_env(&version_str, &plan.tag_name);
         let env_refs: Vec<(&str, &str)> =
@@ -793,10 +786,6 @@ mod tests {
                 message.to_string(),
             ));
             Ok(true)
-        }
-
-        fn is_dirty(&self) -> Result<bool, ReleaseError> {
-            Ok(false)
         }
 
         fn push(&self) -> Result<(), ReleaseError> {

@@ -229,11 +229,6 @@ impl GitRepository for NativeGitRepository {
         }
     }
 
-    fn is_dirty(&self) -> Result<bool, ReleaseError> {
-        let output = self.git(&["status", "--porcelain"])?;
-        Ok(!output.is_empty())
-    }
-
     fn push(&self) -> Result<(), ReleaseError> {
         self.git(&["push", "origin", "HEAD"])?;
         Ok(())
