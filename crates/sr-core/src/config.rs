@@ -465,47 +465,6 @@ release:
     )
 }
 
-/// Merge new default fields into an existing config YAML string.
-pub fn merge_config_yaml(existing_yaml: &str) -> Result<String, ReleaseError> {
-    let mut existing: serde_yaml_ng::Value = serde_yaml_ng::from_str(existing_yaml)
-        .map_err(|e| ReleaseError::Config(format!("failed to parse existing config: {e}")))?;
-
-    let default_config = Config::default();
-    let default_yaml = serde_yaml_ng::to_string(&default_config)
-        .map_err(|e| ReleaseError::Config(e.to_string()))?;
-    let defaults: serde_yaml_ng::Value =
-        serde_yaml_ng::from_str(&default_yaml).map_err(|e| ReleaseError::Config(e.to_string()))?;
-
-    deep_merge_value(&mut existing, &defaults);
-
-    let merged =
-        serde_yaml_ng::to_string(&existing).map_err(|e| ReleaseError::Config(e.to_string()))?;
-
-    Ok(format!(
-        "# sr configuration — merged with new defaults\n\
-         # Run 'sr init --force' for a fully-commented template.\n\n\
-         {merged}"
-    ))
-}
-
-fn deep_merge_value(base: &mut serde_yaml_ng::Value, defaults: &serde_yaml_ng::Value) {
-    use serde_yaml_ng::Value;
-    if let (Value::Mapping(base_map), Value::Mapping(default_map)) = (base, defaults) {
-        for (key, default_val) in default_map {
-            match base_map.get_mut(key) {
-                Some(existing_val) => {
-                    if matches!(default_val, Value::Mapping(_)) {
-                        deep_merge_value(existing_val, default_val);
-                    }
-                }
-                None => {
-                    base_map.insert(key.clone(), default_val.clone());
-                }
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Serde for BumpLevel
 // ---------------------------------------------------------------------------

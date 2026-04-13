@@ -78,15 +78,11 @@ enum Commands {
         resolved: bool,
     },
 
-    /// Create a default configuration file
+    /// Create default configuration files (sr.yaml + .mcp.json)
     Init {
-        /// Overwrite the config file if it already exists
+        /// Overwrite config files if they already exist
         #[arg(long)]
         force: bool,
-
-        /// Merge new default fields into existing config without overwriting customizations
-        #[arg(long, conflicts_with = "force")]
-        merge: bool,
     },
 
     /// Generate shell completions
@@ -112,8 +108,6 @@ enum Commands {
 enum McpCommands {
     /// Start MCP server over stdio
     Serve,
-    /// Create .mcp.json in the current project for agentspec discovery
-    Init,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -270,130 +264,19 @@ fn self_update() -> anyhow::Result<()> {
 }
 
 fn print_migration_guide() {
-    let guide = r#"
-sr 4.x Migration Guide
-======================
-
-sr is now an AI-managed release tool. Most commands from 3.x (commit, pr,
-review, worktree, rebase, branch, ask, explain) have been removed. The CLI
-focuses on release engineering; AI-powered workflows (commits, PRs, reviews)
-are handled by your AI assistant via the MCP server (`sr mcp serve`).
-
-Remaining commands: release, status, config, init, mcp, completions, update
-
-
-1. Remove git hooks
--------------------
-
-sr 3.x installed git hooks (commit-msg, pre-commit) that called `sr hook ...`.
-These no longer exist. Remove them:
-
-    rm .git/hooks/commit-msg .git/hooks/pre-commit
-
-If you use a hook manager (husky, lefthook, pre-commit), remove any sr entries:
-
-    # .husky/commit-msg  — delete the file or remove the `sr hook commit-msg` line
-    # .pre-commit-config.yaml — remove sr-related hooks
-
-Also remove the old `hooks` section from sr.yaml if it referenced git hook names:
-
-    # 3.x — REMOVE this
-    hooks:
-      commit-msg: [sr hook commit-msg]
-      pre-commit: [sr hook pre-commit]
-
-
-2. Update sr.yaml
------------------
-
-The flat 3.x config is now grouped by concern. Run `sr init --merge` to add
-new fields automatically, or restructure manually:
-
-    # 3.x (flat — no longer valid)
-    branches: [main]
-    tag_prefix: "v"
-    commit_pattern: '...'
-    types: [...]
-    build_command: "cargo build --release"
-    pre_release_command: "cargo test"
-
-    # 4.x (grouped)
-    commit:
-      pattern: '...'
-      types: [...]
-
-    release:
-      branches: [main]
-      tag_prefix: "v"
-      version_files: [Cargo.toml]
-
-    hooks:
-      pre_release: ["cargo test"]
-      post_release: ["./notify.sh"]
-
-Key changes:
-  - `branches`, `tag_prefix`           → nested under `release:`
-  - `commit_pattern`, `types`          → nested under `commit:`
-  - `build_command`                    → REMOVED (use hooks.pre_release)
-  - `pre_release_command`              → hooks.pre_release
-  - `post_release_command`             → hooks.post_release
-  - `lifecycle`                        → REMOVED (use hooks)
-  - `hooks:` with git hook names       → REMOVED (use lifecycle hooks above)
-  - `breaking_section`                 → commit.breaking_section
-
-Quick migration:
-
-    sr init --merge   # adds new fields, preserves your customizations
-    sr config         # review the result
-    sr status         # verify everything resolves correctly
-
-
-3. Commands removed or moved
-----------------------------
-
-  3.x command       What to do now
-  ─────────────     ──────────────────────────────────────────────────
-  sr ask            Use your AI assistant (Claude Code, Copilot, etc.)
-  sr explain        Use your AI assistant with `git show <rev>`
-  sr commit         Use your AI assistant or `sr mcp serve` for MCP
-  sr rebase         Use your AI assistant or git rebase directly
-  sr branch         Use your AI assistant or git worktree directly
-  sr worktree       Use your AI assistant or git worktree directly
-  sr pr             Use your AI assistant with gh CLI
-  sr review         Use your AI assistant with gh CLI
-  sr plan           `sr status`
-  sr version        `sr status` or `sr status --format json | jq .next_version`
-  sr changelog      Generated automatically by `sr release`
-
-
-4. CI/CD migration
-------------------
-
-Update scripts that called removed commands:
-
-    # 3.x
-    VERSION=$(sr version --short)
-    sr changelog --write
-
-    # 4.x
-    VERSION=$(sr status --format json | jq -r '.next_version')
-    # changelog is written automatically by `sr release`
-
-For more details, see: docs/migration-3x-4x.md
-"#;
-    print!("{guide}");
+    print!("{}", include_str!("../../../docs/migration-3x-4x.md"));
 }
 
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { force, merge } => {
+        Commands::Init { force } => {
             let path = Path::new(DEFAULT_CONFIG_FILE);
 
-            if path.exists() && !force && !merge {
+            if path.exists() && !force {
                 anyhow::bail!(
-                    "{DEFAULT_CONFIG_FILE} already exists (use --force to overwrite, or --merge to add new fields)"
+                    "{DEFAULT_CONFIG_FILE} already exists (use --force to overwrite)"
                 );
             }
 
@@ -404,16 +287,11 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
 
-            if merge && path.exists() {
-                let existing = std::fs::read_to_string(path)?;
-                let merged = sr_core::config::merge_config_yaml(&existing)?;
-                std::fs::write(path, merged)?;
-                eprintln!("merged new defaults into {DEFAULT_CONFIG_FILE}");
-            } else {
-                let template = sr_core::config::default_config_template(&detected);
-                std::fs::write(path, template)?;
-                eprintln!("wrote {DEFAULT_CONFIG_FILE}");
-            }
+            let template = sr_core::config::default_config_template(&detected);
+            std::fs::write(path, template)?;
+            eprintln!("wrote {DEFAULT_CONFIG_FILE}");
+
+            commands::mcp::write_mcp_json(force)?;
 
             Ok(())
         }
@@ -632,7 +510,6 @@ async fn run() -> anyhow::Result<()> {
 
         Commands::Mcp { command } => match command {
             McpCommands::Serve => commands::mcp::run().await,
-            McpCommands::Init => commands::mcp::config(),
         },
         Commands::Update => self_update(),
         Commands::Migrate => {

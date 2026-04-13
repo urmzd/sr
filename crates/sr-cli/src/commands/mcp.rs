@@ -551,11 +551,16 @@ impl SrMcpServer {
     }
 }
 
-/// Create or update `.mcp.json` in the current project root.
+/// Write `.mcp.json` in the current project root.
 /// This file declares sr's MCP server for agentspec discovery.
-pub fn config() -> Result<()> {
+pub fn write_mcp_json(force: bool) -> Result<()> {
     let repo = GitRepo::discover()?;
     let mcp_path = repo.root().join(".mcp.json");
+
+    if mcp_path.exists() && !force {
+        eprintln!(".mcp.json already exists (use --force to overwrite)");
+        return Ok(());
+    }
 
     let config = serde_json::json!({
         "mcpServers": {
@@ -568,7 +573,7 @@ pub fn config() -> Result<()> {
 
     let content = serde_json::to_string_pretty(&config)?;
     std::fs::write(&mcp_path, &content)?;
-    println!("{}", mcp_path.display());
+    eprintln!("wrote .mcp.json");
     Ok(())
 }
 

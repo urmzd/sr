@@ -2,6 +2,56 @@
 
 sr 4.0 restructures the CLI around a clean trunk-based workflow pipeline: `worktree` → `commit` → `pr` → `review` → `release`. Several commands were removed, folded, or redesigned.
 
+## Step 1: Remove git hooks
+
+sr 3.x installed git hooks that called `sr hook run ...`. The `sr hook` subcommand **no longer exists** in v4. Any hooks left in place will fail with an error on every commit or push. You **must** remove them before using v4.
+
+### Remove hooks from `.git/hooks/`
+
+```bash
+rm -f .git/hooks/commit-msg .git/hooks/pre-commit .git/hooks/pre-push
+```
+
+### Remove `.githooks/` directory (if present)
+
+If your repo used a `.githooks/` directory with `core.hooksPath`:
+
+```bash
+rm -rf .githooks/
+git config --unset core.hooksPath
+```
+
+### Remove sr entries from hook managers
+
+If you use husky, lefthook, or pre-commit, remove any lines that reference `sr hook`:
+
+```yaml
+# .husky/commit-msg  — delete the file or remove the `sr hook commit-msg` line
+# .pre-commit-config.yaml — remove sr-related hooks
+# .lefthook.yml — remove sr hook entries
+```
+
+### Remove old `hooks` section from sr.yaml
+
+If your `sr.yaml` has hooks with git hook names, remove the entire section:
+
+```yaml
+# 3.x — REMOVE this block
+hooks:
+  commit-msg: [sr hook commit-msg]
+  pre-commit: [sr hook pre-commit]
+```
+
+The new v4 `hooks:` section uses lifecycle event names (`pre_commit`, `pre_release`, etc.) — see [Config restructured](#config-restructured) below.
+
+### Remove `.sr-hooks-hash`
+
+sr 3.x tracked hook file hashes to know when to regenerate them. This file is no longer used:
+
+```bash
+rm -f .githooks/.sr-hooks-hash
+```
+
 ## Breaking changes
 
 ### Commands removed
@@ -10,6 +60,7 @@ sr 4.0 restructures the CLI around a clean trunk-based workflow pipeline: `workt
 |-------------|------------|
 | `sr ask` | Removed. Use Claude Code, Copilot Chat, or any AI assistant for freeform questions. |
 | `sr explain` | Removed. Use `git show <rev>` with your AI assistant. |
+| `sr mcp init` | Removed. `sr init` now creates both `sr.yaml` and `.mcp.json`. |
 
 ### Commands folded
 
@@ -94,6 +145,7 @@ sr pr -M "focus on the API"  # with context
 | `sr pr --base <branch>` | Removed. Auto-detected from `sr.yaml` `branches` config (first entry). |
 | `sr review --staged` | Removed. Review now targets GitHub PRs. |
 | `sr review --base <ref>` | Removed. Review now targets GitHub PRs. |
+| `sr init --merge` | Removed. Use `sr init --force` to regenerate config. |
 
 ### Flags added
 
