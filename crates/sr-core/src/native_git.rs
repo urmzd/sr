@@ -230,7 +230,7 @@ impl GitRepository for NativeGitRepository {
     }
 
     fn is_dirty(&self) -> Result<bool, ReleaseError> {
-        let output = self.git(&["status", "--porcelain"])?;
+        let output = self.git(&["status", "--porcelain", "-uno"])?;
         Ok(!output.is_empty())
     }
 
