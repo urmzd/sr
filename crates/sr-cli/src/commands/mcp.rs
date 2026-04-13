@@ -88,7 +88,13 @@ fn parse_unified_diff(raw: &str) -> Vec<(String, Vec<Hunk>)> {
         if line.starts_with("diff --git ") {
             // Flush previous hunk
             if let Some((os, ol, ns, nl)) = hunk_header.take() {
-                hunks.push(Hunk { old_start: os, old_lines: ol, new_start: ns, new_lines: nl, changes: std::mem::take(&mut changes) });
+                hunks.push(Hunk {
+                    old_start: os,
+                    old_lines: ol,
+                    new_start: ns,
+                    new_lines: nl,
+                    changes: std::mem::take(&mut changes),
+                });
             }
             // Flush previous file
             if let Some(path) = current_path.take() {
@@ -103,7 +109,13 @@ fn parse_unified_diff(raw: &str) -> Vec<(String, Vec<Hunk>)> {
         if line.starts_with("@@ ") {
             // Flush previous hunk
             if let Some((os, ol, ns, nl)) = hunk_header.take() {
-                hunks.push(Hunk { old_start: os, old_lines: ol, new_start: ns, new_lines: nl, changes: std::mem::take(&mut changes) });
+                hunks.push(Hunk {
+                    old_start: os,
+                    old_lines: ol,
+                    new_start: ns,
+                    new_lines: nl,
+                    changes: std::mem::take(&mut changes),
+                });
             }
             if let Some(header) = line.strip_prefix("@@ ") {
                 let parts: Vec<&str> = header.splitn(3, ' ').collect();
@@ -118,10 +130,15 @@ fn parse_unified_diff(raw: &str) -> Vec<(String, Vec<Hunk>)> {
             continue;
         }
 
-        if line.starts_with("index ") || line.starts_with("--- ") || line.starts_with("+++ ")
-            || line.starts_with("old mode") || line.starts_with("new mode")
-            || line.starts_with("new file") || line.starts_with("deleted file")
-            || line.starts_with("similarity") || line.starts_with("rename ")
+        if line.starts_with("index ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+            || line.starts_with("old mode")
+            || line.starts_with("new mode")
+            || line.starts_with("new file")
+            || line.starts_with("deleted file")
+            || line.starts_with("similarity")
+            || line.starts_with("rename ")
             || line.starts_with("Binary ")
         {
             continue;
@@ -129,13 +146,25 @@ fn parse_unified_diff(raw: &str) -> Vec<(String, Vec<Hunk>)> {
 
         if hunk_header.is_some() {
             if let Some(content) = line.strip_prefix('+') {
-                changes.push(Change { kind: "add", line: new_cursor, content: content.to_string() });
+                changes.push(Change {
+                    kind: "add",
+                    line: new_cursor,
+                    content: content.to_string(),
+                });
                 new_cursor += 1;
             } else if let Some(content) = line.strip_prefix('-') {
-                changes.push(Change { kind: "delete", line: old_cursor, content: content.to_string() });
+                changes.push(Change {
+                    kind: "delete",
+                    line: old_cursor,
+                    content: content.to_string(),
+                });
                 old_cursor += 1;
             } else if let Some(content) = line.strip_prefix(' ') {
-                changes.push(Change { kind: "context", line: new_cursor, content: content.to_string() });
+                changes.push(Change {
+                    kind: "context",
+                    line: new_cursor,
+                    content: content.to_string(),
+                });
                 old_cursor += 1;
                 new_cursor += 1;
             }
@@ -144,7 +173,13 @@ fn parse_unified_diff(raw: &str) -> Vec<(String, Vec<Hunk>)> {
 
     // Flush final hunk and file
     if let Some((os, ol, ns, nl)) = hunk_header {
-        hunks.push(Hunk { old_start: os, old_lines: ol, new_start: ns, new_lines: nl, changes });
+        hunks.push(Hunk {
+            old_start: os,
+            old_lines: ol,
+            new_start: ns,
+            new_lines: nl,
+            changes,
+        });
     }
     if let Some(path) = current_path {
         files.push((path, hunks));
@@ -299,17 +334,23 @@ impl SrMcpServer {
                 Vec::new()
             } else if let Some(h) = hunk_map.get(path.as_str()) {
                 // Re-serialize the parsed hunks (they're borrowed, need to clone)
-                h.iter().map(|hunk| Hunk {
-                    old_start: hunk.old_start,
-                    old_lines: hunk.old_lines,
-                    new_start: hunk.new_start,
-                    new_lines: hunk.new_lines,
-                    changes: hunk.changes.iter().map(|c| Change {
-                        kind: c.kind,
-                        line: c.line,
-                        content: c.content.clone(),
-                    }).collect(),
-                }).collect()
+                h.iter()
+                    .map(|hunk| Hunk {
+                        old_start: hunk.old_start,
+                        old_lines: hunk.old_lines,
+                        new_start: hunk.new_start,
+                        new_lines: hunk.new_lines,
+                        changes: hunk
+                            .changes
+                            .iter()
+                            .map(|c| Change {
+                                kind: c.kind,
+                                line: c.line,
+                                content: c.content.clone(),
+                            })
+                            .collect(),
+                    })
+                    .collect()
             } else {
                 Vec::new()
             };

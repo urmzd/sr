@@ -315,7 +315,11 @@ impl GitRepo {
     }
 
     /// Return per-file numstat: `(additions, deletions, path)`.
-    pub fn diff_numstat(&self, staged: bool, files: &[String]) -> Result<Vec<(usize, usize, String)>> {
+    pub fn diff_numstat(
+        &self,
+        staged: bool,
+        files: &[String],
+    ) -> Result<Vec<(usize, usize, String)>> {
         let mut args: Vec<&str> = vec!["diff", "--numstat"];
         if staged {
             args.push("--cached");
