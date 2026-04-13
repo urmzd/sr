@@ -59,7 +59,7 @@ The installer automatically adds `~/.local/bin` to your `PATH` in your shell pro
 ### GitHub Action (recommended)
 
 ```yaml
-- uses: urmzd/sr@v4
+- uses: urmzd/sr@v5
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -81,13 +81,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v4
+      - uses: urmzd/sr@v5
 ```
 
 Dry-run on pull requests:
 
 ```yaml
-      - uses: urmzd/sr@v4
+      - uses: urmzd/sr@v5
         with:
           dry-run: "true"
 ```
@@ -95,7 +95,7 @@ Dry-run on pull requests:
 Use outputs in subsequent steps:
 
 ```yaml
-      - uses: urmzd/sr@v4
+      - uses: urmzd/sr@v5
         id: sr
       - if: steps.sr.outputs.released == 'true'
         run: echo "Released ${{ steps.sr.outputs.version }}"
@@ -104,7 +104,7 @@ Use outputs in subsequent steps:
 Verify the downloaded sr binary with a SHA256 checksum:
 
 ```yaml
-      - uses: urmzd/sr@v4
+      - uses: urmzd/sr@v5
         with:
           sha256: "abc123..."
 ```
@@ -140,7 +140,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v4
+      - uses: urmzd/sr@v5
         with:
           force: ${{ github.event.inputs.force || 'false' }}
 ```
@@ -154,6 +154,13 @@ jobs:
 | `github-token` | GitHub token for creating releases | `${{ github.token }}` |
 | `git-user-name` | Git user name for tag creation | `sr[bot]` |
 | `git-user-email` | Git user email for tag creation | `sr[bot]@urmzd.com` |
+| `artifacts` | Glob patterns for artifact files to upload (space-separated) | `""` |
+| `package` | Target a specific monorepo package | `""` |
+| `channel` | Release channel (e.g. canary, rc, stable) | `""` |
+| `prerelease` | Pre-release identifier (e.g. alpha, beta, rc) | `""` |
+| `stage-files` | Additional file globs to stage in the release commit (space-separated) | `""` |
+| `sign-tags` | Sign tags with GPG/SSH | `false` |
+| `draft` | Create GitHub release as a draft | `false` |
 | `sha256` | Expected SHA256 checksum of the sr binary (hex string) | `""` |
 
 #### Outputs
@@ -285,7 +292,7 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - uses: urmzd/sr@v4
+      - uses: urmzd/sr@v5
         with:
           github-token: ${{ steps.app-token.outputs.token }}
 ```
@@ -332,14 +339,6 @@ hooks:
 
 | Event | When it runs |
 |-------|-------------|
-| `pre_commit` | Before creating commits |
-| `post_commit` | After commits complete |
-| `pre_branch` | Before creating a branch/worktree |
-| `post_branch` | After branch/worktree creation |
-| `pre_pr` | Before creating a PR |
-| `post_pr` | After PR creation |
-| `pre_review` | Before running a review |
-| `post_review` | After review completion |
 | `pre_release` | Before `sr release` starts (validation, tests) |
 | `post_release` | After `sr release` completes (notifications, deploys) |
 
@@ -354,7 +353,7 @@ Release hooks receive `SR_VERSION` and `SR_TAG` environment variables.
 Use the action outputs to run steps conditionally:
 
 ```yaml
-- uses: urmzd/sr@v4
+- uses: urmzd/sr@v5
   id: sr
 - if: steps.sr.outputs.released == 'true'
   run: ./deploy.sh ${{ steps.sr.outputs.version }}
@@ -412,7 +411,7 @@ All diagnostic messages go to stderr, so stdout is always clean JSON (or empty o
 | `sr mcp serve` | Start MCP server over stdio |
 | `sr completions` | Generate shell completions (bash, zsh, fish, powershell, elvish) |
 | `sr update` | Update sr to the latest version |
-| `sr migrate` | Show migration guide from sr 3.x to 4.x |
+| `sr migrate` | Show migration guide to sr 5.x |
 
 ### Common flags
 
@@ -864,9 +863,9 @@ Ensure your manifest files are listed in `release.version_files` and match a [su
 
 Set `release.sign_tags: true` in `sr.yaml` or pass `--sign-tags`. You must have a GPG or SSH signing key configured in git (`git config user.signingkey`).
 
-### Migrating from v3.x
+### Migrating from v3.x or v4.x
 
-Run `sr migrate` to see the full migration guide, or read [docs/migration-3x-4x.md](docs/migration-3x-4x.md).
+Run `sr migrate` to see the full migration guide, or read [docs/migration.md](docs/migration.md).
 
 ## Architecture
 

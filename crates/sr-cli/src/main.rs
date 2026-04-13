@@ -100,7 +100,7 @@ enum Commands {
     /// Update sr to the latest version
     Update,
 
-    /// Show migration guide from sr 3.x to 4.x
+    /// Show migration guide to sr 5.x
     Migrate,
 }
 
@@ -264,7 +264,7 @@ fn self_update() -> anyhow::Result<()> {
 }
 
 fn print_migration_guide() {
-    print!("{}", include_str!("../../../docs/migration-3x-4x.md"));
+    print!("{}", include_str!("../../../docs/migration.md"));
 }
 
 async fn run() -> anyhow::Result<()> {
