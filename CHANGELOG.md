@@ -1,5 +1,24 @@
 # Changelog
 
+## 6.0.0 (2026-04-14)
+
+### Breaking Changes
+
+- **mcp**: add breaking flag, PR tools, and worktree management ([bdbd033](https://github.com/urmzd/sr/commit/bdbd03336109344c62d7e2ba7ca6c769e455cda6))
+
+### Bug Fixes
+
+- **cli**: move migration doc into crate for cargo publish ([1eefece](https://github.com/urmzd/sr/commit/1eefece5bc82eaf6a7b1ce4d34001425ff085988))
+
+### Documentation
+
+- **migration**: add action spec comparison tables across v3/v4/v5 ([77abdd1](https://github.com/urmzd/sr/commit/77abdd15ced56dd7ab81b131e2f7fa441cadc483))
+- rewrite migration guide with v3→v4→v5 progression ([92b0d14](https://github.com/urmzd/sr/commit/92b0d145e9a02032868100058db5a55ef0f48b14))
+- update migration guide and README for v5 ([3d6896e](https://github.com/urmzd/sr/commit/3d6896eb23beabe619af63aa638ffc31e4ef346b))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v5.1.0...v6.0.0)
+
+
 ## 5.1.0 (2026-04-13)
 
 ### Features
