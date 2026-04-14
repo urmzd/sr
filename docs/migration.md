@@ -100,7 +100,7 @@ instead of git hook names.
 | `sr-core` | All release logic, git, GitHub, config |
 | `sr-cli` | CLI dispatch only |
 
-### GitHub Action
+### GitHub Action: v3 → v4
 
 Update `@v3` → `@v4`:
 
@@ -110,6 +110,27 @@ Update `@v3` → `@v4`:
 # After
 - uses: urmzd/sr@v4
 ```
+
+**Inputs removed in v4:**
+
+| v3 input | What happened |
+|----------|---------------|
+| `command` | Removed. v3 accepted any subcommand (`release`, `plan`, `commit`, `pr`, etc.). v4 always runs `sr release` or `sr status`. |
+| `force` | Removed in v4 (restored in v5). |
+| `config` | Removed. sr always reads `sr.yaml` from the repo root. |
+| `artifacts` | Removed in v4 (restored in v5). v3 accepted newline/comma-separated globs. |
+| `build-command` | Removed. Use `hooks.pre_release` in `sr.yaml` instead. |
+
+**Execution model changes:**
+
+| Aspect | v3 | v4 |
+|--------|----|----|
+| Command dispatch | Configurable — any sr subcommand via `command` input | Fixed — always `sr release` or `sr status --format json` |
+| Arg passing | Array-based (`sr "${ARGS[@]}"`) | Simple string (`sr $CMD`) |
+| Artifact handling | Parsed from newline/comma input, each passed as `--artifacts` | Not supported |
+| Build command | Written to temp script, passed as `--build-command` | Removed |
+| Logging | `::group::` blocks with verbose echo | Minimal, no grouping |
+| Exit code 2 | Sets all outputs to empty strings | Only sets `released=false` |
 
 ---
 
@@ -155,22 +176,7 @@ files, changelog, stage_files) — it never runs `git add -A`. Unrelated files i
 the working tree (downloaded CI artifacts, build outputs) are harmless and were
 causing false failures.
 
-### Action inputs expanded
-
-The v5 action exposes all `sr release` CLI flags as inputs:
-
-| New input | Description |
-|-----------|-------------|
-| `artifacts` | Glob patterns for artifact files to upload (space-separated) |
-| `package` | Target a specific monorepo package |
-| `channel` | Release channel (e.g. canary, rc, stable) |
-| `prerelease` | Pre-release identifier (e.g. alpha, beta, rc) |
-| `stage-files` | Additional files to stage in release commit (space-separated) |
-| `sign-tags` | Sign tags with GPG/SSH |
-| `draft` | Create GitHub release as a draft |
-
-The v4 `command` input was removed. The v5 action always runs `sr release`
-(or `sr status` with `dry-run: true`).
+### GitHub Action: v4 → v5
 
 Update `@v4` → `@v5`:
 
@@ -187,6 +193,55 @@ Update `@v4` → `@v5`:
     github-token: ${{ steps.app-token.outputs.token }}
     artifacts: "release-assets/*"
 ```
+
+**Inputs restored from v3:**
+
+| Input | v3 | v4 | v5 |
+|-------|:---:|:---:|:---:|
+| `force` | `false` | Removed | `false` — adds `--force` |
+| `artifacts` | Newline/comma-separated | Removed | Space-separated, each passed as `--artifacts "glob"` |
+
+**New inputs in v5:**
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `package` | `""` | Target a specific monorepo package |
+| `channel` | `""` | Release channel (e.g. canary, rc, stable) |
+| `prerelease` | `""` | Pre-release identifier (e.g. alpha, beta, rc) |
+| `stage-files` | `""` | Additional file globs to stage in release commit (space-separated) |
+| `sign-tags` | `false` | Sign tags with GPG/SSH |
+| `draft` | `false` | Create GitHub release as a draft |
+
+**Execution model changes:**
+
+| Aspect | v4 | v5 |
+|--------|----|----|
+| Arg passing | Simple string (`sr $CMD`) | `eval sr $CMD` (supports quoted globs) |
+| Dirty tree check | sr refuses if working tree is dirty | Removed — unrelated files are harmless |
+| CLI flag coverage | Only `--dry-run` | All `sr release` flags exposed as inputs |
+
+**Inputs unchanged across all versions:**
+
+| Input | Default |
+|-------|---------|
+| `dry-run` | `false` |
+| `github-token` | `${{ github.token }}` |
+| `git-user-name` | `sr[bot]` |
+| `git-user-email` | `sr[bot]@urmzd.com` |
+| `sha256` | `""` |
+
+**Outputs unchanged across all versions:**
+
+| Output | Description |
+|--------|-------------|
+| `version` | Released version |
+| `previous-version` | Previous version |
+| `tag` | Git tag created |
+| `bump` | Bump level (major/minor/patch) |
+| `floating-tag` | Floating major tag (e.g. `v3`) |
+| `commit-count` | Commits included |
+| `released` | `true`/`false` |
+| `json` | Full release metadata as JSON |
 
 ### `sr init` improvements
 
@@ -211,6 +266,18 @@ Follow both sections above in order:
 2. **Restructure sr.yaml** — move flat fields into `commit:`, `release:`, `hooks:` sections
 3. **Update action** — change `@v3` to `@v5`
 4. **Update scripts** — replace `sr version`, `sr changelog`, `sr plan` with `sr status`
+
+### Action input migration: v3 → v5
+
+| v3 input | v5 equivalent |
+|----------|---------------|
+| `command: release` | Default (no input needed) |
+| `command: plan` | `dry-run: "true"` |
+| `command: <other>` | Removed — use CLI or MCP tools |
+| `artifacts: "dist/*\nbin/*"` | `artifacts: "dist/* bin/*"` (space-separated) |
+| `build-command: "make"` | Removed — use `hooks.pre_release` in sr.yaml |
+| `config: custom.yaml` | Removed — always reads `sr.yaml` |
+| `force: true` | `force: "true"` (same) |
 
 ### CI/CD script migration
 
