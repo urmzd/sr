@@ -527,11 +527,11 @@ fn run() -> anyhow::Result<()> {
             }
 
             // CLI overrides for package config (apply to root package)
-            if !artifacts.is_empty() || !stage_files.is_empty() {
-                if let Some(pkg) = config.packages.first_mut() {
-                    pkg.artifacts.extend(artifacts);
-                    pkg.stage_files.extend(stage_files);
-                }
+            if (!artifacts.is_empty() || !stage_files.is_empty())
+                && let Some(pkg) = config.packages.first_mut()
+            {
+                pkg.artifacts.extend(artifacts);
+                pkg.stage_files.extend(stage_files);
             }
 
             let plan =

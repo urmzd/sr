@@ -347,12 +347,11 @@ where
         let env = release_env(&version_str, &plan.tag_name);
         let env_refs: Vec<(&str, &str)> =
             env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        if !dry_run {
-            if let Some(pkg) = self.active_package() {
-                if let Some(ref hooks) = pkg.hooks {
-                    crate::hooks::run_pre_release(hooks, &env_refs)?;
-                }
-            }
+        if !dry_run
+            && let Some(pkg) = self.active_package()
+            && let Some(ref hooks) = pkg.hooks
+        {
+            crate::hooks::run_pre_release(hooks, &env_refs)?;
         }
 
         // 2. Generate changelog
@@ -370,12 +369,11 @@ where
         self.verify_release_exists(plan, dry_run)?;
 
         // 6. Run post_release hooks
-        if !dry_run {
-            if let Some(pkg) = self.active_package() {
-                if let Some(ref hooks) = pkg.hooks {
-                    crate::hooks::run_post_release(hooks, &env_refs)?;
-                }
-            }
+        if !dry_run
+            && let Some(pkg) = self.active_package()
+            && let Some(ref hooks) = pkg.hooks
+        {
+            crate::hooks::run_post_release(hooks, &env_refs)?;
         }
 
         if dry_run {

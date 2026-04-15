@@ -94,19 +94,11 @@ impl Default for GitConfig {
 // ---------------------------------------------------------------------------
 
 /// How commits are classified by semver bump level.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CommitConfig {
     /// Commit types grouped by bump level.
     pub types: CommitTypesConfig,
-}
-
-impl Default for CommitConfig {
-    fn default() -> Self {
-        Self {
-            types: CommitTypesConfig::default(),
-        }
-    }
 }
 
 /// Commit type names grouped by the semver bump level they trigger.
