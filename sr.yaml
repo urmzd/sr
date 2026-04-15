@@ -1,57 +1,27 @@
 # sr configuration
 # Full reference: https://github.com/urmzd/sr#configuration
 
-# How commits are parsed and classified.
 commit:
-  # Regex for parsing conventional commits.
-  pattern: '^(?P<type>\w+)(?:\((?P<scope>[^)]+)\))?(?P<breaking>!)?:\s+(?P<description>.+)'
-
-  breaking_section: Breaking Changes
-  misc_section: Miscellaneous
-
   types:
-    - name: feat
-      bump: minor
-      section: Features
-    - name: fix
-      bump: patch
-      section: Bug Fixes
-    - name: perf
-      bump: patch
-      section: Performance
-    - name: docs
-      section: Documentation
-    - name: refactor
-      bump: patch
-      section: Refactoring
-    - name: revert
-      section: Reverts
-    - name: chore
-    - name: ci
-    - name: test
-    - name: build
-    - name: style
+    minor: [feat]
+    patch: [fix, perf, refactor]
+    none: [docs, revert, chore, ci, test, build, style]
 
-# How releases are cut.
-release:
-  branches:
-    - main
+git:
   tag_prefix: "v"
-  changelog:
-    file: CHANGELOG.md
-  version_files:
-    - Cargo.toml
-  version_files_strict: false
-  artifacts: []
-  floating_tags: true
-  stage_files: []
+  floating_tag: true
   sign_tags: false
-  draft: false
 
-# Lifecycle hooks.
-hooks:
-  pre_commit:
-    - "rustfmt --check --edition 2024 $(git diff --cached --name-only --diff-filter=ACM -- '*.rs')"
-    - "cargo clippy --workspace -- -D warnings"
-  pre_release:
-    - "cargo test --workspace"
+channels:
+  branch: main
+
+changelog:
+  file: CHANGELOG.md
+
+packages:
+  - path: "."
+    version_files: [Cargo.toml]
+    version_files_strict: false
+    hooks:
+      pre_release:
+        - "cargo test --workspace"
