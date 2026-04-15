@@ -75,7 +75,7 @@ jobs:
         working-directory: sr
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross auditable build --release --target ${{ matrix.target }} -p sr-cli
+            cross build --release --target ${{ matrix.target }} -p sr-cli
           else
             cargo auditable build --release --target ${{ matrix.target }} -p sr-cli
           fi
