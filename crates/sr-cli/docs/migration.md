@@ -8,6 +8,7 @@
 | **4.x** | Config restructure + MCP | Nested config, MCP server, AI backends removed (commands kept as thin wrappers) |
 | **5.x** | Release-only CLI | CLI commands stripped to release engineering; all git/PR/review workflows move to MCP tools |
 | **6.x** | MCP-first workflows | PR, worktree, and breaking-commit tools added to MCP server; `sr init` improved |
+| **7.x** | Config redesign | Entire config structure rewritten; 6 top-level sections; MCP server removed; agentspec removed; file snapshot/rollback removed |
 
 ---
 
@@ -305,25 +306,377 @@ date. The `.sr/` directory is automatically gitignored by `sr init`.
 
 ---
 
-## Migrating from 3.x directly to 6.x
+## Migrating from 6.x to 7.x
 
-Follow the 3.x→4.x, 4.x→5.x, and 5.x→6.x sections above in order, or use
-this quick checklist:
+v7 is a **breaking release** — the entire `sr.yaml` config structure was redesigned.
+The old config had everything under `commit` and `release` top-level sections. The
+new config has 6 top-level sections: `git`, `commit`, `changelog`, `channels`, `vcs`,
+`packages`.
+
+### Breaking changes summary
+
+| Area | What changed |
+|------|-------------|
+| `commit.pattern` | Removed — regex is derived automatically from type names |
+| `commit.types` | Changed from flat list `[{name, bump, section}]` to grouped by bump level `{minor: [], patch: [], none: []}` |
+| `commit.breaking_section` / `commit.misc_section` | Removed — now configured via `changelog.groups` |
+| `release.changelog` | Moved from under `release` to top-level `changelog` section |
+| `release.branches` | Removed — channels now specify which branch to release from |
+| `release.tag_prefix`, `sign_tags`, `floating_tags` | Moved to `git` section; `floating_tags` renamed to `floating_tag`; new `v0_protection` field added |
+| `release.draft`, `prerelease` | Moved into channel config (`channels.content[].draft`, `channels.content[].prerelease`) |
+| `release.release_name_template` | Moved to `vcs.github.release_name_template` |
+| `release.channels` (map) | Replaced by top-level `channels` (object with `default` + `content` array) |
+| `release.versioning` | Replaced by `packages[].independent` (bool) |
+| `release.version_files`, `artifacts`, `stage_files` | Moved to package config (`packages[].version_files`, etc.) |
+| `hooks` (top-level) | Removed — only package-level `packages[].hooks.pre_release` / `post_release` |
+| `packages[].name` | Removed — package name is now derived from `path` |
+| Per-type fallback `pattern` | Removed |
+| MCP server | Removed (`sr mcp serve` command gone, delete `.mcp.json`) |
+| agentspec dependencies | Removed |
+| File snapshot/rollback | Removed (unnecessary complexity) |
+
+### Before / After config comparison
+
+**v6 `sr.yaml`:**
+
+```yaml
+commit:
+  pattern: '^(?P<type>\w+)(?:\((?P<scope>[^)]+)\))?(?P<breaking>!)?:\s+(?P<description>.+)'
+  breaking_section: Breaking Changes
+  misc_section: Miscellaneous
+  types:
+    - name: feat
+      bump: minor
+      section: Features
+    - name: fix
+      bump: patch
+      section: Bug Fixes
+    - name: perf
+      bump: patch
+      section: Performance
+    - name: docs
+      section: Documentation
+    - name: refactor
+      bump: patch
+      section: Refactoring
+    - name: revert
+      section: Reverts
+    - name: chore
+    - name: ci
+    - name: test
+    - name: build
+    - name: style
+
+release:
+  branches: [main]
+  tag_prefix: "v"
+  floating_tags: true
+  sign_tags: false
+  changelog:
+    file: CHANGELOG.md
+  version_files:
+    - Cargo.toml
+  stage_files:
+    - Cargo.lock
+  artifacts:
+    - "target/release/sr-*"
+  draft: false
+  channels:
+    canary:
+      prerelease: canary
+    stable: {}
+  default_channel: stable
+
+hooks:
+  pre_release:
+    - cargo build --release
+  post_release:
+    - cargo publish
+```
+
+**v7 `sr.yaml`:**
+
+```yaml
+git:
+  tag_prefix: "v"
+  floating_tag: true
+  sign_tags: false
+  v0_protection: true
+
+commit:
+  types:
+    minor:
+      - feat
+    patch:
+      - fix
+      - perf
+      - refactor
+    none:
+      - docs
+      - revert
+      - chore
+      - ci
+      - test
+      - build
+      - style
+
+changelog:
+  file: CHANGELOG.md
+  groups:
+    - name: breaking
+      content:
+        - breaking
+    - name: features
+      content:
+        - feat
+    - name: bug-fixes
+      content:
+        - fix
+    - name: performance
+      content:
+        - perf
+    - name: misc
+      content:
+        - chore
+        - ci
+        - test
+        - build
+        - style
+
+channels:
+  default: stable
+  branch: main
+  content:
+    - name: canary
+      prerelease: canary
+    - name: stable
+
+vcs:
+  github:
+    release_name_template: "{{ tag_name }}"
+
+packages:
+  - path: .
+    version_files:
+      - Cargo.toml
+    stage_files:
+      - Cargo.lock
+    artifacts:
+      - "target/release/sr-*"
+    hooks:
+      pre_release:
+        - cargo build --release
+      post_release:
+        - cargo publish
+```
+
+### Field-by-field migration guide
+
+| v6 field | v7 equivalent |
+|----------|---------------|
+| `commit.pattern` | Removed — derived from type names automatically |
+| `commit.breaking_section` | `changelog.groups[].name` where `content: [breaking]` |
+| `commit.misc_section` | `changelog.groups[].name` for catch-all types |
+| `commit.types[].name` | Key in `commit.types.minor[]`, `commit.types.patch[]`, or `commit.types.none[]` |
+| `commit.types[].bump: minor` | Move type name to `commit.types.minor[]` |
+| `commit.types[].bump: patch` | Move type name to `commit.types.patch[]` |
+| `commit.types[].bump: null` | Move type name to `commit.types.none[]` |
+| `commit.types[].section` | `changelog.groups[].name` with the type in `content` |
+| `commit.types[].pattern` | Removed — no per-type fallback patterns |
+| `release.branches` | `channels.content[].branch` (each channel specifies its branch) |
+| `release.tag_prefix` | `git.tag_prefix` |
+| `release.floating_tags` | `git.floating_tag` |
+| `release.sign_tags` | `git.sign_tags` |
+| `release.changelog.file` | `changelog.file` |
+| `release.changelog.template` | `changelog.template` (now a file path, not inline string) |
+| `release.version_files` | `packages[].version_files` |
+| `release.artifacts` | `packages[].artifacts` |
+| `release.stage_files` | `packages[].stage_files` |
+| `release.draft` | `channels.content[].draft` |
+| `release.prerelease` | `channels.content[].prerelease` |
+| `release.release_name_template` | `vcs.github.release_name_template` |
+| `release.channels` (map) | `channels.content` (array) |
+| `release.default_channel` | `channels.default` |
+| `release.versioning: independent` | `packages[].independent: true` (default) |
+| `release.versioning: fixed` | `packages[].independent: false` |
+| `hooks.pre_release` | `packages[].hooks.pre_release` |
+| `hooks.post_release` | `packages[].hooks.post_release` |
+| `packages[].name` | Removed — derived from `path` |
+
+### Step-by-step migration
+
+1. **Replace `commit` section** — convert the flat types list to the grouped format:
+   ```yaml
+   # Before
+   commit:
+     types:
+       - name: feat
+         bump: minor
+       - name: fix
+         bump: patch
+       - name: chore
+
+   # After
+   commit:
+     types:
+       minor: [feat]
+       patch: [fix]
+       none: [chore]
+   ```
+
+2. **Move `release.changelog` to top-level `changelog`** — and replace `breaking_section`/`misc_section` with `groups`:
+   ```yaml
+   # Before
+   release:
+     changelog:
+       file: CHANGELOG.md
+   commit:
+     breaking_section: "Breaking Changes"
+
+   # After
+   changelog:
+     file: CHANGELOG.md
+     groups:
+       - name: breaking
+         content: [breaking]
+       - name: features
+         content: [feat]
+       - name: bug-fixes
+         content: [fix]
+       - name: misc
+         content: [chore, ci, test, build, style]
+   ```
+
+3. **Move git settings to `git` section:**
+   ```yaml
+   # Before
+   release:
+     tag_prefix: "v"
+     floating_tags: true
+     sign_tags: false
+
+   # After
+   git:
+     tag_prefix: "v"
+     floating_tag: true   # renamed: floating_tags → floating_tag
+     sign_tags: false
+     v0_protection: true  # new field
+   ```
+
+4. **Convert `release.channels` map to `channels` array:**
+   ```yaml
+   # Before
+   release:
+     branches: [main]
+     channels:
+       stable: {}
+       canary:
+         prerelease: canary
+     default_channel: stable
+
+   # After
+   channels:
+     default: stable
+     branch: main              # single trunk branch
+     content:
+       - name: stable
+       - name: canary
+         prerelease: canary
+   ```
+
+5. **Move `release.version_files`, `artifacts`, `stage_files`, and `hooks` under `packages`:**
+   ```yaml
+   # Before
+   release:
+     version_files: [Cargo.toml]
+     artifacts: ["target/release/sr-*"]
+     stage_files: [Cargo.lock]
+   hooks:
+     pre_release: [cargo build --release]
+     post_release: [cargo publish]
+
+   # After
+   packages:
+     - path: .
+       version_files: [Cargo.toml]
+       artifacts: ["target/release/sr-*"]
+       stage_files: [Cargo.lock]
+       hooks:
+         pre_release: [cargo build --release]
+         post_release: [cargo publish]
+   ```
+
+6. **Move `release.release_name_template` to `vcs`:**
+   ```yaml
+   # Before
+   release:
+     release_name_template: "{{ tag_name }}"
+
+   # After
+   vcs:
+     github:
+       release_name_template: "{{ tag_name }}"
+   ```
+
+7. **Remove `packages[].name`** — the name is now derived from `path` automatically.
+
+8. **Delete `.mcp.json`** — the MCP server has been removed:
+   ```bash
+   rm .mcp.json
+   ```
+
+9. **Update the action** — change `@v6` to `@v7`:
+   ```yaml
+   # Before
+   - uses: urmzd/sr@v6
+
+   # After
+   - uses: urmzd/sr@v7
+   ```
+
+### MCP server removed
+
+The MCP server (`sr mcp serve`) and `.mcp.json` have been removed entirely.
+
+| Removed | What to do |
+|---------|------------|
+| `sr mcp serve` | Delete `.mcp.json`; use the `sr` agent skill instead |
+| `.mcp.json` | Delete from project root |
+
+### GitHub Action: v6 → v7
+
+The action inputs and outputs are unchanged. Only the version tag changes:
+
+```yaml
+# Before
+- uses: urmzd/sr@v6
+
+# After
+- uses: urmzd/sr@v7
+```
+
+---
+
+## Migrating from 3.x directly to 7.x
+
+Follow the 3.x→4.x, 4.x→5.x, 5.x→6.x, and 6.x→7.x sections above in order,
+or use this quick checklist:
 
 1. **Remove git hooks** — delete `.githooks/`, unset `core.hooksPath`
-2. **Restructure sr.yaml** — move flat fields into `commit:`, `release:`, `hooks:` sections
-3. **Update action** — change `@v3` to `@v6`
-4. **Update scripts** — replace `sr version`, `sr changelog`, `sr plan` with `sr status`
+2. **Restructure sr.yaml** — rewrite config using the new 6-section format
+3. **Delete `.mcp.json`** — MCP server was removed in v7
+4. **Update action** — change `@v3` to `@v7`
+5. **Update scripts** — replace `sr version`, `sr changelog`, `sr plan` with `sr status`
 
-### Action input migration: v3 → v6
+### Action input migration: v3 → v7
 
-| v3 input | v6 equivalent |
+| v3 input | v7 equivalent |
 |----------|---------------|
 | `command: release` | Default (no input needed) |
 | `command: plan` | `dry-run: "true"` |
-| `command: <other>` | Removed — use CLI or MCP tools |
+| `command: <other>` | Removed — use CLI or agent skills |
 | `artifacts: "dist/*\nbin/*"` | `artifacts: "dist/* bin/*"` (space-separated) |
-| `build-command: "make"` | Removed — use `hooks.pre_release` in sr.yaml |
+| `build-command: "make"` | Removed — use `packages[].hooks.pre_release` in sr.yaml |
 | `config: custom.yaml` | Removed — always reads `sr.yaml` |
 | `force: true` | `force: "true"` (same) |
 
@@ -335,7 +688,7 @@ VERSION=$(sr version --short)
 sr changelog --write
 sr plan --format json
 
-# 6.x
+# 7.x
 VERSION=$(sr status --format json | jq -r '.next_version')
 # Changelog is written automatically by sr release
 sr status --format json

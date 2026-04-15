@@ -72,3 +72,28 @@ jobs:
           workspaces: sr
       - run: cargo test --workspace
         working-directory: sr
+
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: sr
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit cargo-deny
+      - run: cargo audit
+        working-directory: sr
+      - run: cargo deny check
+        working-directory: sr
+
+  embed:
+    name: Embed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: urmzd/fsrc@v4
+        with:
+          files: README.md
+          commit-dry: "true"
+          commit-push: "false"

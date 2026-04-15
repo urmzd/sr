@@ -1,12 +1,10 @@
-mod commands;
-
 use std::path::Path;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use sr_core::changelog::DefaultChangelogFormatter;
-use sr_core::commit::ConfiguredCommitParser;
-use sr_core::config::{Config, DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE, VersioningMode};
+use sr_core::commit::TypedCommitParser;
+use sr_core::config::{Config, DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE};
 use sr_core::error::ReleaseError;
 use sr_core::github::GitHubProvider;
 use sr_core::native_git::NativeGitRepository;
@@ -78,7 +76,7 @@ enum Commands {
         resolved: bool,
     },
 
-    /// Create default configuration files (sr.yaml + .mcp.json)
+    /// Create default configuration files (sr.yaml)
     Init {
         /// Overwrite config files if they already exist
         #[arg(long)]
@@ -91,23 +89,11 @@ enum Commands {
         shell: clap_complete::Shell,
     },
 
-    /// MCP server
-    Mcp {
-        #[command(subcommand)]
-        command: McpCommands,
-    },
-
     /// Update sr to the latest version
     Update,
 
     /// Show migration guide
     Migrate,
-}
-
-#[derive(Subcommand)]
-enum McpCommands {
-    /// Start MCP server over stdio
-    Serve,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -121,25 +107,22 @@ use sr_core::release::NoopVcsProvider;
 fn build_local_strategy(
     config: Config,
     force: bool,
+    prerelease_id: Option<String>,
+    draft: bool,
 ) -> anyhow::Result<
     TrunkReleaseStrategy<
         NativeGitRepository,
         NoopVcsProvider,
-        ConfiguredCommitParser,
+        TypedCommitParser,
         DefaultChangelogFormatter,
     >,
 > {
     let git = NativeGitRepository::open(Path::new("."))?;
-    let parser =
-        ConfiguredCommitParser::new(config.commit.types.clone(), config.commit.pattern.clone());
-    let types = config.commit.types.clone();
-    let breaking_section = config.commit.breaking_section.clone();
-    let misc_section = config.commit.misc_section.clone();
+    let commit_types = config.commit.types.into_commit_types();
+    let parser = TypedCommitParser::from_types(&commit_types);
     let formatter = DefaultChangelogFormatter::new(
-        config.release.changelog.template.clone(),
-        types,
-        breaking_section,
-        misc_section,
+        config.changelog.template.clone(),
+        config.changelog.groups.clone(),
     );
     Ok(TrunkReleaseStrategy {
         git,
@@ -148,17 +131,21 @@ fn build_local_strategy(
         formatter,
         config,
         force,
+        prerelease_id,
+        draft,
     })
 }
 
 fn build_full_strategy(
     config: Config,
     force: bool,
+    prerelease_id: Option<String>,
+    draft: bool,
 ) -> anyhow::Result<
     TrunkReleaseStrategy<
         NativeGitRepository,
         GitHubProvider,
-        ConfiguredCommitParser,
+        TypedCommitParser,
         DefaultChangelogFormatter,
     >,
 > {
@@ -171,16 +158,11 @@ fn build_full_strategy(
 
     let git = git.with_http_auth(hostname.clone(), token.clone());
     let vcs = GitHubProvider::new(owner, repo, hostname, token);
-    let parser =
-        ConfiguredCommitParser::new(config.commit.types.clone(), config.commit.pattern.clone());
-    let types = config.commit.types.clone();
-    let breaking_section = config.commit.breaking_section.clone();
-    let misc_section = config.commit.misc_section.clone();
+    let commit_types = config.commit.types.into_commit_types();
+    let parser = TypedCommitParser::from_types(&commit_types);
     let formatter = DefaultChangelogFormatter::new(
-        config.release.changelog.template.clone(),
-        types,
-        breaking_section,
-        misc_section,
+        config.changelog.template.clone(),
+        config.changelog.groups.clone(),
     );
 
     Ok(TrunkReleaseStrategy {
@@ -190,6 +172,8 @@ fn build_full_strategy(
         formatter,
         config,
         force,
+        prerelease_id,
+        draft,
     })
 }
 
@@ -204,33 +188,9 @@ fn is_no_release_error(err: &anyhow::Error) -> bool {
     }
 }
 
-fn load_config_for_package(package: Option<&str>) -> anyhow::Result<Config> {
+fn load_config() -> anyhow::Result<Config> {
     let config_path = resolve_config_path();
-    let mut config = Config::load(&config_path)?;
-
-    if config.release.versioning == VersioningMode::Fixed && !config.packages.is_empty() {
-        if let Some(name) = package {
-            anyhow::bail!(
-                "--package '{name}' is not supported with `versioning: fixed` — \
-                 all packages are released together"
-            );
-        }
-        return Ok(config.resolve_fixed());
-    }
-
-    match package {
-        Some(name) => {
-            let pkg = config.find_package(name)?;
-            Ok(config.resolve_package(pkg))
-        }
-        None => {
-            if config.release.version_files.is_empty() {
-                config.release.version_files =
-                    sr_core::version_files::detect_version_files(Path::new("."));
-            }
-            Ok(config)
-        }
-    }
+    Config::load(&config_path).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn resolve_config_path() -> std::path::PathBuf {
@@ -249,17 +209,110 @@ fn resolve_config_path() -> std::path::PathBuf {
 }
 
 fn self_update() -> anyhow::Result<()> {
-    eprintln!("current version: {}", env!("CARGO_PKG_VERSION"));
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
 
-    match agentspec_update::self_update("urmzd/sr", env!("CARGO_PKG_VERSION"), "sr")? {
-        agentspec_update::UpdateResult::AlreadyUpToDate => {
-            eprintln!("already up to date");
-        }
-        agentspec_update::UpdateResult::Updated { from, to } => {
-            eprintln!("updated: {from} → {to}");
+    let current_version = env!("CARGO_PKG_VERSION");
+    eprintln!("current version: {current_version}");
+
+    let mut req = ureq::get("https://api.github.com/repos/urmzd/sr/releases/latest")
+        .header("Accept", "application/vnd.github+json");
+    if let Ok(token) = std::env::var("GH_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN")) {
+        req = req.header("Authorization", format!("token {token}"));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Asset {
+        name: String,
+        browser_download_url: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Release {
+        tag_name: String,
+        assets: Vec<Asset>,
+    }
+
+    let release: Release = req
+        .call()
+        .map_err(|e| anyhow::anyhow!("failed to fetch latest release: {e}"))?
+        .into_body()
+        .read_json()?;
+    let latest = release.tag_name.trim_start_matches('v');
+
+    if latest == current_version {
+        eprintln!("already up to date");
+        return Ok(());
+    }
+
+    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "x86_64-unknown-linux-musl",
+        ("linux", "aarch64") => "aarch64-unknown-linux-musl",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+        (os, arch) => anyhow::bail!("unsupported platform: {os}/{arch}"),
+    };
+
+    let asset_name = format!("sr-{target}");
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == asset_name)
+        .ok_or_else(|| anyhow::anyhow!("no asset found for {asset_name}"))?;
+
+    let expected_sha256 = release
+        .assets
+        .iter()
+        .find(|a| a.name == format!("{asset_name}.sha256"))
+        .and_then(|a| {
+            let body = ureq::get(&a.browser_download_url).call().ok()?.into_body();
+            let mut buf = Vec::new();
+            body.into_reader().read_to_end(&mut buf).ok()?;
+            let s = String::from_utf8(buf).ok()?;
+            Some(s.split_whitespace().next()?.to_string())
+        });
+
+    eprintln!("downloading sr {latest} for {target}...");
+
+    let body = ureq::get(&asset.browser_download_url)
+        .call()
+        .map_err(|e| anyhow::anyhow!("download failed: {e}"))?
+        .into_body();
+    let mut bytes = Vec::new();
+    body.into_reader().read_to_end(&mut bytes)?;
+
+    if let Some(expected) = &expected_sha256 {
+        let actual: String = Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        if actual != *expected {
+            anyhow::bail!("SHA256 mismatch: expected {expected}, got {actual}");
         }
     }
 
+    let exe = std::env::current_exe()?;
+    let backup = exe.with_extension("old");
+    let tmp = exe.with_extension("new");
+
+    std::fs::write(&tmp, &bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    }
+    if exe.exists() {
+        std::fs::rename(&exe, &backup)?;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &exe) {
+        if backup.exists() {
+            let _ = std::fs::rename(&backup, &exe);
+        }
+        return Err(e.into());
+    }
+    let _ = std::fs::remove_file(&backup);
+
+    eprintln!("updated: {current_version} → {latest}");
     Ok(())
 }
 
@@ -267,12 +320,11 @@ fn print_migration_guide() {
     print!("{}", include_str!("../docs/migration.md"));
 }
 
-async fn run() -> anyhow::Result<()> {
+fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Init { force } => {
-            // sr.yaml
             let path = Path::new(DEFAULT_CONFIG_FILE);
             if !path.exists() || force {
                 let detected = sr_core::version_files::detect_version_files(Path::new("."));
@@ -290,10 +342,6 @@ async fn run() -> anyhow::Result<()> {
                 );
             }
 
-            // .mcp.json
-            commands::mcp::write_mcp_json(force)?;
-
-            // .gitignore — ensure .sr/ is listed
             let gitignore = Path::new(".gitignore");
             let needs_entry = if gitignore.exists() {
                 let content = std::fs::read_to_string(gitignore)?;
@@ -333,9 +381,9 @@ async fn run() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Commands::Status { package, format } => {
-            let config = load_config_for_package(package.as_deref())?;
-            let tag_prefix = config.release.tag_prefix.clone();
+        Commands::Status { package: _, format } => {
+            let config = load_config()?;
+            let tag_prefix = config.git.tag_prefix.clone();
 
             let git = NativeGitRepository::open(Path::new("."))?;
             let branch_output = std::process::Command::new("git")
@@ -346,12 +394,10 @@ async fn run() -> anyhow::Result<()> {
                 .to_string();
 
             let formatter = DefaultChangelogFormatter::new(
-                config.release.changelog.template.clone(),
-                config.commit.types.clone(),
-                config.commit.breaking_section.clone(),
-                config.commit.misc_section.clone(),
+                config.changelog.template.clone(),
+                config.changelog.groups.clone(),
             );
-            let strategy = build_local_strategy(config, false)?;
+            let strategy = build_local_strategy(config, false, None, false)?;
             let plan_result = strategy.plan();
 
             match format {
@@ -455,7 +501,7 @@ async fn run() -> anyhow::Result<()> {
         }
 
         Commands::Release {
-            package,
+            package: _,
             channel,
             dry_run,
             artifacts,
@@ -465,44 +511,49 @@ async fn run() -> anyhow::Result<()> {
             sign_tags,
             draft,
         } => {
-            let mut config = load_config_for_package(package.as_deref())?;
+            let mut config = load_config()?;
 
-            let channel_name = channel.or_else(|| config.release.default_channel.clone());
-            if let Some(name) = &channel_name {
-                config = config
-                    .resolve_channel(name)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-            }
-            config.release.artifacts.extend(artifacts);
-            config.release.stage_files.extend(stage_files);
-            if prerelease.is_some() {
-                config.release.prerelease = prerelease;
-            }
+            // Resolve channel
+            let channel_name = channel.unwrap_or_else(|| config.channels.default.clone());
+            let resolved_channel = config.resolve_channel(&channel_name)?.clone();
+
+            // Channel provides prerelease/draft, CLI flags override
+            let prerelease_id = prerelease.or(resolved_channel.prerelease);
+            let draft = draft || resolved_channel.draft;
+
+            // CLI overrides for git config
             if sign_tags {
-                config.release.sign_tags = true;
-            }
-            if draft {
-                config.release.draft = true;
+                config.git.sign_tags = true;
             }
 
-            let plan = match build_full_strategy(config.clone(), force) {
-                Ok(strategy) => {
-                    let plan = strategy.plan()?;
-                    strategy.execute(&plan, dry_run)?;
-                    plan
-                }
-                Err(e) => {
-                    if dry_run {
-                        eprintln!("warning: {e} (continuing dry-run without GitHub)");
-                        let strategy = build_local_strategy(config, force)?;
+            // CLI overrides for package config (apply to root package)
+            if (!artifacts.is_empty() || !stage_files.is_empty())
+                && let Some(pkg) = config.packages.first_mut()
+            {
+                pkg.artifacts.extend(artifacts);
+                pkg.stage_files.extend(stage_files);
+            }
+
+            let plan =
+                match build_full_strategy(config.clone(), force, prerelease_id.clone(), draft) {
+                    Ok(strategy) => {
                         let plan = strategy.plan()?;
                         strategy.execute(&plan, dry_run)?;
                         plan
-                    } else {
-                        return Err(e);
                     }
-                }
-            };
+                    Err(e) => {
+                        if dry_run {
+                            eprintln!("warning: {e} (continuing dry-run without GitHub)");
+                            let strategy =
+                                build_local_strategy(config, force, prerelease_id, draft)?;
+                            let plan = strategy.plan()?;
+                            strategy.execute(&plan, dry_run)?;
+                            plan
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
             #[derive(serde::Serialize)]
             struct ReleaseOutput {
                 version: String,
@@ -528,9 +579,6 @@ async fn run() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Commands::Mcp { command } => match command {
-            McpCommands::Serve => commands::mcp::run().await,
-        },
         Commands::Update => self_update(),
         Commands::Migrate => {
             print_migration_guide();
@@ -539,9 +587,8 @@ async fn run() -> anyhow::Result<()> {
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    match run().await {
+fn main() -> ExitCode {
+    match run() {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
             if is_no_release_error(&e) {

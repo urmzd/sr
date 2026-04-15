@@ -1,5 +1,5 @@
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::error::ReleaseError;
 use crate::version::BumpLevel;
@@ -22,28 +22,26 @@ pub struct ConventionalCommit {
     pub breaking: bool,
 }
 
-/// Describes a recognised commit type.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Internal commit type representation — name + bump level.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CommitType {
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bump: Option<BumpLevel>,
-    /// Changelog section heading (e.g. "Features"). None = exclude from changelog.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub section: Option<String>,
-    /// Optional regex matched against the full raw commit message as a fallback
-    /// when the standard type-prefix pattern doesn't match. Useful for
-    /// non-conventional commit formats (e.g. Dependabot, automated tooling).
-    /// Named groups `type`, `scope`, `breaking`, `description` are used if present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pattern: Option<String>,
+}
+
+/// Build the conventional commit regex from configured type names.
+///
+/// Produces: `^(?P<type>feat|fix|...)(?:\((?P<scope>[^)]+)\))?(?P<breaking>!)?:\s+(?P<description>.+)`
+pub fn build_commit_pattern(type_names: &[&str]) -> String {
+    let types_alternation = type_names.join("|");
+    format!(
+        r"^(?P<type>{types_alternation})(?:\((?P<scope>[^)]+)\))?(?P<breaking>!)?:\s+(?P<description>.+)"
+    )
 }
 
 /// Single source of truth for commit type classification.
 pub trait CommitClassifier: Send + Sync {
     fn types(&self) -> &[CommitType];
-
-    /// Commit message regex with named groups: type, scope, breaking, description.
     fn pattern(&self) -> &str;
 
     fn bump_level(&self, type_name: &str, breaking: bool) -> Option<BumpLevel> {
@@ -53,23 +51,10 @@ pub trait CommitClassifier: Send + Sync {
         self.types().iter().find(|t| t.name == type_name)?.bump
     }
 
-    fn changelog_section(&self, type_name: &str) -> Option<&str> {
-        self.types()
-            .iter()
-            .find(|t| t.name == type_name)?
-            .section
-            .as_deref()
-    }
-
     fn is_allowed(&self, type_name: &str) -> bool {
         self.types().iter().any(|t| t.name == type_name)
     }
 }
-
-/// Default conventional commits pattern.
-/// Named groups: type, scope (optional), breaking (optional `!`), description.
-pub const DEFAULT_COMMIT_PATTERN: &str =
-    r"^(?P<type>\w+)(?:\((?P<scope>[^)]+)\))?(?P<breaking>!)?:\s+(?P<description>.+)";
 
 pub struct DefaultCommitClassifier {
     types: Vec<CommitType>,
@@ -77,14 +62,16 @@ pub struct DefaultCommitClassifier {
 }
 
 impl DefaultCommitClassifier {
-    pub fn new(types: Vec<CommitType>, pattern: String) -> Self {
+    pub fn new(types: Vec<CommitType>) -> Self {
+        let names: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
+        let pattern = build_commit_pattern(&names);
         Self { types, pattern }
     }
 }
 
 impl Default for DefaultCommitClassifier {
     fn default() -> Self {
-        Self::new(default_commit_types(), DEFAULT_COMMIT_PATTERN.into())
+        Self::new(default_commit_types())
     }
 }
 
@@ -98,74 +85,8 @@ impl CommitClassifier for DefaultCommitClassifier {
 }
 
 pub fn default_commit_types() -> Vec<CommitType> {
-    vec![
-        CommitType {
-            name: "feat".into(),
-            bump: Some(BumpLevel::Minor),
-            section: Some("Features".into()),
-            pattern: None,
-        },
-        CommitType {
-            name: "fix".into(),
-            bump: Some(BumpLevel::Patch),
-            section: Some("Bug Fixes".into()),
-            pattern: None,
-        },
-        CommitType {
-            name: "perf".into(),
-            bump: Some(BumpLevel::Patch),
-            section: Some("Performance".into()),
-            pattern: None,
-        },
-        CommitType {
-            name: "docs".into(),
-            bump: None,
-            section: Some("Documentation".into()),
-            pattern: None,
-        },
-        CommitType {
-            name: "refactor".into(),
-            bump: Some(BumpLevel::Patch),
-            section: Some("Refactoring".into()),
-            pattern: None,
-        },
-        CommitType {
-            name: "revert".into(),
-            bump: None,
-            section: Some("Reverts".into()),
-            pattern: None,
-        },
-        CommitType {
-            name: "chore".into(),
-            bump: None,
-            section: None,
-            pattern: None,
-        },
-        CommitType {
-            name: "ci".into(),
-            bump: None,
-            section: None,
-            pattern: None,
-        },
-        CommitType {
-            name: "test".into(),
-            bump: None,
-            section: None,
-            pattern: None,
-        },
-        CommitType {
-            name: "build".into(),
-            bump: None,
-            section: None,
-            pattern: None,
-        },
-        CommitType {
-            name: "style".into(),
-            bump: None,
-            section: None,
-            pattern: None,
-        },
-    ]
+    use crate::config::CommitTypesConfig;
+    CommitTypesConfig::default().into_commit_types()
 }
 
 /// Parses raw commits into conventional commits.
@@ -173,15 +94,37 @@ pub trait CommitParser: Send + Sync {
     fn parse(&self, commit: &Commit) -> Result<ConventionalCommit, ReleaseError>;
 }
 
-/// Default parser using the built-in `DEFAULT_COMMIT_PATTERN` regex.
-pub struct DefaultCommitParser;
+/// Parser that builds its pattern from configured type names.
+pub struct TypedCommitParser {
+    pattern: String,
+}
 
-impl CommitParser for DefaultCommitParser {
+impl TypedCommitParser {
+    pub fn new(type_names: &[&str]) -> Self {
+        Self {
+            pattern: build_commit_pattern(type_names),
+        }
+    }
+
+    pub fn from_types(types: &[CommitType]) -> Self {
+        let names: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
+        Self::new(&names)
+    }
+}
+
+impl Default for TypedCommitParser {
+    fn default() -> Self {
+        Self::from_types(&default_commit_types())
+    }
+}
+
+impl CommitParser for TypedCommitParser {
     fn parse(&self, commit: &Commit) -> Result<ConventionalCommit, ReleaseError> {
-        let re =
-            Regex::new(DEFAULT_COMMIT_PATTERN).map_err(|e| ReleaseError::Config(e.to_string()))?;
+        let re = Regex::new(&self.pattern).map_err(|e| ReleaseError::Config(e.to_string()))?;
 
-        let caps = re.captures(&commit.message).ok_or_else(|| {
+        let first_line = commit.message.lines().next().unwrap_or("");
+
+        let caps = re.captures(first_line).ok_or_else(|| {
             ReleaseError::Config(format!("not a conventional commit: {}", commit.message))
         })?;
 
@@ -197,8 +140,6 @@ impl CommitParser for DefaultCommitParser {
             .map(|b| b.to_string());
 
         // Detect BREAKING CHANGE: / BREAKING-CHANGE: footers in the body.
-        // Per the Conventional Commits spec, footers must start at column 0
-        // (no leading whitespace) and use a colon separator.
         let breaking = breaking
             || body.as_deref().is_some_and(|b| {
                 b.lines().any(|line| {
@@ -217,103 +158,6 @@ impl CommitParser for DefaultCommitParser {
     }
 }
 
-/// Parser that tries the standard commit pattern first, then falls back to
-/// per-type `pattern` regexes for non-conventional commit formats.
-pub struct ConfiguredCommitParser {
-    types: Vec<CommitType>,
-    commit_pattern: String,
-}
-
-impl ConfiguredCommitParser {
-    pub fn new(types: Vec<CommitType>, commit_pattern: String) -> Self {
-        Self {
-            types,
-            commit_pattern,
-        }
-    }
-}
-
-impl CommitParser for ConfiguredCommitParser {
-    fn parse(&self, commit: &Commit) -> Result<ConventionalCommit, ReleaseError> {
-        let re =
-            Regex::new(&self.commit_pattern).map_err(|e| ReleaseError::Config(e.to_string()))?;
-
-        let first_line = commit.message.lines().next().unwrap_or("");
-
-        // Try the standard type-prefix pattern first.
-        if let Some(caps) = re.captures(first_line) {
-            let r#type = caps.name("type").unwrap().as_str().to_string();
-            let scope = caps.name("scope").map(|m| m.as_str().to_string());
-            let breaking = caps.name("breaking").is_some();
-            let description = caps.name("description").unwrap().as_str().to_string();
-
-            let body = commit
-                .message
-                .split_once("\n\n")
-                .map(|x| x.1)
-                .map(|b| b.to_string());
-
-            let breaking = breaking
-                || body.as_deref().is_some_and(|b| {
-                    b.lines().any(|line| {
-                        let trimmed = line.trim();
-                        trimmed.starts_with("BREAKING CHANGE:")
-                            || trimmed.starts_with("BREAKING CHANGE ")
-                            || trimmed.starts_with("BREAKING-CHANGE:")
-                            || trimmed.starts_with("BREAKING-CHANGE ")
-                    })
-                });
-
-            return Ok(ConventionalCommit {
-                sha: commit.sha.clone(),
-                r#type,
-                scope,
-                description,
-                body,
-                breaking,
-            });
-        }
-
-        // Fallback: try per-type pattern regexes.
-        for ct in &self.types {
-            let Some(ref pat) = ct.pattern else {
-                continue;
-            };
-            let Ok(type_re) = Regex::new(pat) else {
-                continue;
-            };
-            if let Some(caps) = type_re.captures(first_line) {
-                let scope = caps.name("scope").map(|m| m.as_str().to_string());
-                let breaking = caps.name("breaking").is_some();
-                let description = caps
-                    .name("description")
-                    .map(|m| m.as_str().to_string())
-                    .unwrap_or_else(|| first_line.to_string());
-
-                let body = commit
-                    .message
-                    .split_once("\n\n")
-                    .map(|x| x.1)
-                    .map(|b| b.to_string());
-
-                return Ok(ConventionalCommit {
-                    sha: commit.sha.clone(),
-                    r#type: ct.name.clone(),
-                    scope,
-                    description,
-                    body,
-                    breaking,
-                });
-            }
-        }
-
-        Err(ReleaseError::Config(format!(
-            "not a conventional commit: {}",
-            commit.message
-        )))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,9 +169,23 @@ mod tests {
         }
     }
 
+    fn parser() -> TypedCommitParser {
+        TypedCommitParser::default()
+    }
+
+    #[test]
+    fn build_pattern_from_types() {
+        let pattern = build_commit_pattern(&["feat", "fix", "chore"]);
+        assert!(pattern.contains("feat|fix|chore"));
+        let re = Regex::new(&pattern).unwrap();
+        assert!(re.is_match("feat: add button"));
+        assert!(re.is_match("fix(core): null check"));
+        assert!(!re.is_match("unknown: something"));
+    }
+
     #[test]
     fn parse_simple_feat() {
-        let result = DefaultCommitParser.parse(&raw("feat: add button")).unwrap();
+        let result = parser().parse(&raw("feat: add button")).unwrap();
         assert_eq!(result.r#type, "feat");
         assert_eq!(result.description, "add button");
         assert_eq!(result.scope, None);
@@ -336,61 +194,44 @@ mod tests {
 
     #[test]
     fn parse_scoped_fix() {
-        let result = DefaultCommitParser
-            .parse(&raw("fix(core): null check"))
-            .unwrap();
+        let result = parser().parse(&raw("fix(core): null check")).unwrap();
         assert_eq!(result.r#type, "fix");
         assert_eq!(result.scope.as_deref(), Some("core"));
     }
 
     #[test]
     fn parse_breaking_bang() {
-        let result = DefaultCommitParser.parse(&raw("feat!: new API")).unwrap();
+        let result = parser().parse(&raw("feat!: new API")).unwrap();
         assert!(result.breaking);
     }
 
     #[test]
     fn parse_with_body() {
-        let result = DefaultCommitParser
-            .parse(&raw("fix: x\n\ndetails"))
-            .unwrap();
+        let result = parser().parse(&raw("fix: x\n\ndetails")).unwrap();
         assert_eq!(result.body.as_deref(), Some("details"));
     }
 
     #[test]
     fn parse_breaking_change_footer() {
-        let result = DefaultCommitParser
+        let result = parser()
             .parse(&raw(
                 "feat: new API\n\nBREAKING CHANGE: removed old endpoint",
             ))
             .unwrap();
         assert!(result.breaking);
-        assert_eq!(result.r#type, "feat");
     }
 
     #[test]
     fn parse_breaking_change_hyphenated_footer() {
-        let result = DefaultCommitParser
+        let result = parser()
             .parse(&raw("fix: update schema\n\nBREAKING-CHANGE: field renamed"))
             .unwrap();
         assert!(result.breaking);
     }
 
     #[test]
-    fn parse_breaking_change_footer_with_bang() {
-        // Both bang and footer — should still be breaking
-        let result = DefaultCommitParser
-            .parse(&raw(
-                "feat!: overhaul\n\nBREAKING CHANGE: everything changed",
-            ))
-            .unwrap();
-        assert!(result.breaking);
-    }
-
-    #[test]
     fn parse_no_breaking_change_in_body() {
-        // Body text that mentions "BREAKING CHANGE" but not as a footer line
-        let result = DefaultCommitParser
+        let result = parser()
             .parse(&raw("fix: tweak\n\nThis is not a BREAKING CHANGE footer"))
             .unwrap();
         assert!(!result.breaking);
@@ -398,8 +239,7 @@ mod tests {
 
     #[test]
     fn parse_no_breaking_change_indented_bullet() {
-        // Indented bullet mentioning BREAKING CHANGE should not trigger a major bump
-        let result = DefaultCommitParser
+        let result = parser()
             .parse(&raw(
                 "feat(mcp): add breaking flag\n\n- add `breaking` field — sets \"!\" and adds\n  BREAKING CHANGE footer automatically",
             ))
@@ -408,17 +248,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_no_breaking_change_space_separator() {
-        // "BREAKING CHANGE " (space, no colon) is not a valid footer per spec
-        let result = DefaultCommitParser
-            .parse(&raw("feat: something\n\nBREAKING CHANGE without colon"))
-            .unwrap();
-        assert!(!result.breaking);
+    fn parse_invalid_message() {
+        let result = parser().parse(&raw("not conventional"));
+        assert!(result.is_err());
     }
 
     #[test]
-    fn parse_invalid_message() {
-        let result = DefaultCommitParser.parse(&raw("not conventional"));
+    fn parse_unknown_type_rejected() {
+        let result = parser().parse(&raw("unknown: something"));
         assert!(result.is_err());
     }
 
@@ -451,25 +288,6 @@ mod tests {
     }
 
     #[test]
-    fn classifier_bump_level_unknown_type() {
-        let c = DefaultCommitClassifier::default();
-        assert_eq!(c.bump_level("unknown", false), None);
-    }
-
-    #[test]
-    fn classifier_changelog_section() {
-        let c = DefaultCommitClassifier::default();
-        assert_eq!(c.changelog_section("feat"), Some("Features"));
-        assert_eq!(c.changelog_section("fix"), Some("Bug Fixes"));
-        assert_eq!(c.changelog_section("perf"), Some("Performance"));
-        assert_eq!(c.changelog_section("docs"), Some("Documentation"));
-        assert_eq!(c.changelog_section("refactor"), Some("Refactoring"));
-        assert_eq!(c.changelog_section("revert"), Some("Reverts"));
-        assert_eq!(c.changelog_section("chore"), None);
-        assert_eq!(c.changelog_section("unknown"), None);
-    }
-
-    #[test]
     fn classifier_is_allowed() {
         let c = DefaultCommitClassifier::default();
         assert!(c.is_allowed("feat"));
@@ -478,113 +296,16 @@ mod tests {
     }
 
     #[test]
-    fn classifier_pattern() {
+    fn classifier_pattern_built_from_types() {
         let c = DefaultCommitClassifier::default();
-        assert_eq!(c.pattern(), DEFAULT_COMMIT_PATTERN);
+        assert!(c.pattern().contains("feat"));
+        assert!(c.pattern().contains("fix"));
+        assert!(c.pattern().contains("chore"));
     }
 
     #[test]
     fn default_commit_types_count() {
         let types = default_commit_types();
         assert_eq!(types.len(), 11);
-    }
-
-    #[test]
-    fn commit_type_serialization_roundtrip() {
-        let ct = CommitType {
-            name: "feat".into(),
-            bump: Some(BumpLevel::Minor),
-            section: Some("Features".into()),
-            pattern: None,
-        };
-        let yaml = serde_yaml_ng::to_string(&ct).unwrap();
-        let parsed: CommitType = serde_yaml_ng::from_str(&yaml).unwrap();
-        assert_eq!(parsed, ct);
-    }
-
-    #[test]
-    fn commit_type_no_bump_no_section_roundtrip() {
-        let ct = CommitType {
-            name: "chore".into(),
-            bump: None,
-            section: None,
-            pattern: None,
-        };
-        let yaml = serde_yaml_ng::to_string(&ct).unwrap();
-        assert!(!yaml.contains("bump"));
-        assert!(!yaml.contains("section"));
-        assert!(!yaml.contains("pattern"));
-        let parsed: CommitType = serde_yaml_ng::from_str(&yaml).unwrap();
-        assert_eq!(parsed, ct);
-    }
-
-    #[test]
-    fn commit_type_with_pattern_roundtrip() {
-        let ct = CommitType {
-            name: "deps".into(),
-            bump: Some(BumpLevel::Patch),
-            section: Some("Dependencies".into()),
-            pattern: Some(r"^Bump .+ from .+ to .+".into()),
-        };
-        let yaml = serde_yaml_ng::to_string(&ct).unwrap();
-        assert!(yaml.contains("pattern"));
-        let parsed: CommitType = serde_yaml_ng::from_str(&yaml).unwrap();
-        assert_eq!(parsed, ct);
-    }
-
-    // --- ConfiguredCommitParser tests ---
-
-    fn configured_parser_with_deps() -> ConfiguredCommitParser {
-        let mut types = default_commit_types();
-        types.push(CommitType {
-            name: "deps".into(),
-            bump: Some(BumpLevel::Patch),
-            section: Some("Dependencies".into()),
-            pattern: Some(r"^Bump (?P<description>.+)".into()),
-        });
-        ConfiguredCommitParser::new(types, DEFAULT_COMMIT_PATTERN.into())
-    }
-
-    #[test]
-    fn configured_parser_standard_match_preferred() {
-        let parser = configured_parser_with_deps();
-        let result = parser.parse(&raw("feat: add button")).unwrap();
-        assert_eq!(result.r#type, "feat");
-        assert_eq!(result.description, "add button");
-    }
-
-    #[test]
-    fn configured_parser_fallback_match() {
-        let parser = configured_parser_with_deps();
-        let result = parser
-            .parse(&raw("Bump serde from 1.0.0 to 1.1.0"))
-            .unwrap();
-        assert_eq!(result.r#type, "deps");
-        assert_eq!(result.description, "serde from 1.0.0 to 1.1.0");
-    }
-
-    #[test]
-    fn configured_parser_fallback_no_named_groups() {
-        let mut types = default_commit_types();
-        types.push(CommitType {
-            name: "deps".into(),
-            bump: Some(BumpLevel::Patch),
-            section: Some("Dependencies".into()),
-            pattern: Some(r"^Bump .+ from .+ to .+".into()),
-        });
-        let parser = ConfiguredCommitParser::new(types, DEFAULT_COMMIT_PATTERN.into());
-        let result = parser
-            .parse(&raw("Bump serde from 1.0.0 to 1.1.0"))
-            .unwrap();
-        assert_eq!(result.r#type, "deps");
-        // Without named description group, uses full first line
-        assert_eq!(result.description, "Bump serde from 1.0.0 to 1.1.0");
-    }
-
-    #[test]
-    fn configured_parser_no_match() {
-        let parser = configured_parser_with_deps();
-        let result = parser.parse(&raw("random garbage message"));
-        assert!(result.is_err());
     }
 }

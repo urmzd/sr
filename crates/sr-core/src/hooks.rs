@@ -1,46 +1,36 @@
 //! Hook execution for sr lifecycle events.
 //!
-//! Runs configured shell commands at sr lifecycle boundaries (pre/post for
-//! each command). Hook context is passed as JSON via stdin so commands can
-//! act on structured data (event name, version, files, etc).
+//! Runs configured shell commands at sr lifecycle boundaries.
+//! Hook context is passed as JSON via stdin so commands can
+//! act on structured data.
 
-use crate::config::{HookEvent, HooksConfig};
+use crate::config::HooksConfig;
 use crate::error::ReleaseError;
 
 /// Context passed to hook commands as JSON on stdin.
 #[derive(Debug, serde::Serialize)]
 pub struct HookContext<'a> {
-    /// The lifecycle event being fired.
     pub event: &'a str,
-    /// Environment variables set for this hook (flattened as key-value pairs).
     #[serde(flatten)]
     pub env: std::collections::BTreeMap<&'a str, &'a str>,
 }
 
-/// Run all commands for a lifecycle event.
-///
-/// Each command receives:
-/// - JSON context on stdin (event name + env vars as structured data)
-/// - Environment variables (e.g. SR_VERSION, SR_TAG for release hooks)
-pub fn run_event(
-    config: &HooksConfig,
-    event: HookEvent,
+/// Run a list of shell commands with environment variables.
+pub fn run_commands(
+    label: &str,
+    commands: &[String],
     env: &[(&str, &str)],
 ) -> Result<(), ReleaseError> {
-    let commands = match config.hooks.get(&event) {
-        Some(cmds) if !cmds.is_empty() => cmds,
-        _ => return Ok(()),
-    };
+    if commands.is_empty() {
+        return Ok(());
+    }
 
-    let label = format!("{event:?}");
-
-    // Build JSON context for stdin
     let mut env_map = std::collections::BTreeMap::new();
     for &(k, v) in env {
         env_map.insert(k, v);
     }
     let context = HookContext {
-        event: &label,
+        event: label,
         env: env_map,
     };
     let json = serde_json::to_string(&context)
@@ -54,9 +44,18 @@ pub fn run_event(
     Ok(())
 }
 
+/// Run pre_release hooks from a HooksConfig.
+pub fn run_pre_release(config: &HooksConfig, env: &[(&str, &str)]) -> Result<(), ReleaseError> {
+    run_commands("pre_release", &config.pre_release, env)
+}
+
+/// Run post_release hooks from a HooksConfig.
+pub fn run_post_release(config: &HooksConfig, env: &[(&str, &str)]) -> Result<(), ReleaseError> {
+    run_commands("post_release", &config.post_release, env)
+}
+
 /// Run a shell command (`sh -c`), optionally piping data to stdin and/or
-/// injecting environment variables. Returns an error if the command exits
-/// non-zero.
+/// injecting environment variables.
 pub fn run_shell(
     cmd: &str,
     stdin_data: Option<&str>,
@@ -118,52 +117,40 @@ mod tests {
     }
 
     #[test]
-    fn run_event_empty_config() {
-        let config = HooksConfig::default();
-        run_event(&config, HookEvent::PreRelease, &[]).unwrap();
+    fn run_commands_empty() {
+        run_commands("test", &[], &[]).unwrap();
     }
 
     #[test]
-    fn run_event_simple_command() {
-        use std::collections::BTreeMap;
-        let mut hooks = BTreeMap::new();
-        hooks.insert(HookEvent::PreRelease, vec!["true".to_string()]);
-        let config = HooksConfig { hooks };
-        run_event(&config, HookEvent::PreRelease, &[]).unwrap();
+    fn run_commands_success() {
+        run_commands("test", &["true".into()], &[]).unwrap();
     }
 
     #[test]
-    fn run_event_failure_aborts() {
-        use std::collections::BTreeMap;
-        let mut hooks = BTreeMap::new();
-        hooks.insert(HookEvent::PreRelease, vec!["false".to_string()]);
-        let config = HooksConfig { hooks };
-        let result = run_event(&config, HookEvent::PreRelease, &[]);
+    fn run_commands_failure_aborts() {
+        let result = run_commands("test", &["false".into()], &[]);
         assert!(result.is_err());
     }
 
     #[test]
-    fn run_event_passes_env() {
-        use std::collections::BTreeMap;
-        let mut hooks = BTreeMap::new();
-        hooks.insert(
-            HookEvent::PostRelease,
-            vec!["test \"$SR_VERSION\" = 1.2.3".to_string()],
-        );
-        let config = HooksConfig { hooks };
-        run_event(&config, HookEvent::PostRelease, &[("SR_VERSION", "1.2.3")]).unwrap();
+    fn run_commands_passes_env() {
+        run_commands(
+            "test",
+            &["test \"$SR_VERSION\" = 1.2.3".into()],
+            &[("SR_VERSION", "1.2.3")],
+        )
+        .unwrap();
     }
 
     #[test]
-    fn run_event_passes_json_stdin() {
-        use std::collections::BTreeMap;
-        let mut hooks = BTreeMap::new();
-        // Read stdin JSON and verify it contains the event name
-        hooks.insert(
-            HookEvent::PreCommit,
-            vec!["cat | grep -q PreCommit".to_string()],
-        );
-        let config = HooksConfig { hooks };
-        run_event(&config, HookEvent::PreCommit, &[]).unwrap();
+    fn run_pre_release_empty() {
+        let config = HooksConfig::default();
+        run_pre_release(&config, &[]).unwrap();
+    }
+
+    #[test]
+    fn run_post_release_empty() {
+        let config = HooksConfig::default();
+        run_post_release(&config, &[]).unwrap();
     }
 }

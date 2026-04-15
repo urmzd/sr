@@ -14,9 +14,6 @@ homepage = "https://github.com/urmzd/sr"
 # Internal crates
 sr-core = { path = "crates/sr-core", version = "6.0.1" }
 
-agentspec-ui = "0.6.0"
-agentspec-update = "0.6.0"
-
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_yaml_ng = "0.10"
@@ -53,16 +50,6 @@ glob = "0.3"
 
 # Hashing
 sha2 = "0.10"
-
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-
-# Terminal UI
-crossterm = "0.28"
-indicatif = "0.17"
-
-# Async traits
-async-trait = "0.1"
 
 # Directories
 dirs = "6"

@@ -26,22 +26,22 @@ inputs:
     description: "Glob patterns for artifact files to upload (space-separated, passed as --artifacts)"
     default: ""
   package:
-    description: "Target a specific package in a monorepo"
+    description: "Target a specific package in a monorepo (matched by path)"
     default: ""
   channel:
-    description: "Release channel (e.g. canary, rc, stable)"
+    description: "Release channel name (e.g. canary, rc, stable) — must match a channel defined in sr.yaml"
     default: ""
   prerelease:
-    description: "Pre-release identifier (e.g. alpha, beta, rc)"
+    description: "Pre-release identifier override (e.g. alpha, beta, rc). Overrides the channel's prerelease setting"
     default: ""
   stage-files:
     description: "Additional file globs to stage in the release commit (space-separated)"
     default: ""
   sign-tags:
-    description: "Sign tags with GPG/SSH"
+    description: "Sign tags with GPG/SSH. Overrides git.sign_tags in sr.yaml"
     default: "false"
   draft:
-    description: "Create GitHub release as a draft"
+    description: "Create GitHub release as a draft. Overrides the channel's draft setting"
     default: "false"
   sha256:
     description: "Expected SHA256 checksum of the sr binary"
