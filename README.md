@@ -22,15 +22,15 @@ Most release tools require Node.js, a pile of plugins, and still only handle the
 
 - **Automated releases** — bumps versions, generates changelogs, tags, and publishes GitHub releases
 - **Release channels** — named channels (canary, rc, stable) for trunk-based promotion
-- **MCP server** — exposes git operations as tools for AI assistants (Claude Code, Gemini CLI, etc.)
-- **Single static binary** — no runtime, no package manager
+- **Agent skill** — ships as a portable [Agent Skill](https://agentskills.io) for Claude Code, Gemini CLI, Cursor, and other AI tools
+- **Single static binary** — no runtime, no package manager, no async runtime
 - **Language-agnostic** — works with any project that uses git tags for versioning
 - **Zero-config defaults** — conventional commits + semver + GitHub releases out of the box
 
 ## Quick Start
 
 ```bash
-# Initialize config (creates sr.yaml + .mcp.json)
+# Initialize config (creates sr.yaml)
 sr init
 
 # Check status — version, unreleased commits, PRs
@@ -59,7 +59,7 @@ The installer automatically adds `~/.local/bin` to your `PATH` in your shell pro
 ### GitHub Action (recommended)
 
 ```yaml
-- uses: urmzd/sr@v5
+- uses: urmzd/sr@v6
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -81,13 +81,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v5
+      - uses: urmzd/sr@v6
 ```
 
 Dry-run on pull requests:
 
 ```yaml
-      - uses: urmzd/sr@v5
+      - uses: urmzd/sr@v6
         with:
           dry-run: "true"
 ```
@@ -95,7 +95,7 @@ Dry-run on pull requests:
 Use outputs in subsequent steps:
 
 ```yaml
-      - uses: urmzd/sr@v5
+      - uses: urmzd/sr@v6
         id: sr
       - if: steps.sr.outputs.released == 'true'
         run: echo "Released ${{ steps.sr.outputs.version }}"
@@ -104,7 +104,7 @@ Use outputs in subsequent steps:
 Verify the downloaded sr binary with a SHA256 checksum:
 
 ```yaml
-      - uses: urmzd/sr@v5
+      - uses: urmzd/sr@v6
         with:
           sha256: "abc123..."
 ```
@@ -140,7 +140,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v5
+      - uses: urmzd/sr@v6
         with:
           force: ${{ github.event.inputs.force || 'false' }}
 ```
@@ -292,33 +292,10 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - uses: urmzd/sr@v5
+      - uses: urmzd/sr@v6
         with:
           github-token: ${{ steps.app-token.outputs.token }}
 ```
-
-## MCP Server
-
-sr ships an MCP (Model Context Protocol) server that exposes git operations as tools for AI assistants. This lets Claude Code, Gemini CLI, and other MCP-compatible tools interact with your repository through sr.
-
-```bash
-sr init          # creates sr.yaml + .mcp.json
-sr mcp serve     # start the MCP server (called by AI tools, not users)
-```
-
-`sr init` writes `.mcp.json` which declares the server for automatic discovery. AI assistants that support MCP will detect and connect to it.
-
-**Available MCP tools:**
-
-| Tool | Description |
-|------|-------------|
-| `sr_status` | Repository status with file fingerprints |
-| `sr_diff` | Structured diff: per-file stats + line-level changes as JSON |
-| `sr_log` | Commit log (recent N or range) |
-| `sr_stage` | Stage files for commit |
-| `sr_commit` | Create a conventional commit |
-| `sr_branch` | Get current branch or create a new one |
-| `sr_config` | Read sr.yaml config |
 
 ## Lifecycle Hooks
 
@@ -353,7 +330,7 @@ Release hooks receive `SR_VERSION` and `SR_TAG` environment variables.
 Use the action outputs to run steps conditionally:
 
 ```yaml
-- uses: urmzd/sr@v5
+- uses: urmzd/sr@v6
   id: sr
 - if: steps.sr.outputs.released == 'true'
   run: ./deploy.sh ${{ steps.sr.outputs.version }}
@@ -407,8 +384,7 @@ All diagnostic messages go to stderr, so stdout is always clean JSON (or empty o
 | `sr release` | Execute a release (tag + GitHub release) |
 | `sr status` | Show branch, version, unreleased commits, and open PRs |
 | `sr config` | Validate and display resolved configuration |
-| `sr init` | Create default config files (`sr.yaml` + `.mcp.json`) |
-| `sr mcp serve` | Start MCP server over stdio |
+| `sr init` | Create default config file (`sr.yaml`) |
 | `sr completions` | Generate shell completions (bash, zsh, fish, powershell, elvish) |
 | `sr update` | Update sr to the latest version |
 | `sr migrate` | Show migration guide to sr 5.x |
@@ -457,7 +433,7 @@ Force mode will error if:
 
 `sr` looks for `sr.yaml` in the repository root. All fields are optional and have sensible defaults.
 
-Running `sr init` generates a fully-commented `sr.yaml` with every available option documented inline, along with a `.mcp.json` for MCP server discovery.
+Running `sr init` generates a fully-commented `sr.yaml` with every available option documented inline.
 
 ### Configuration reference
 
@@ -863,7 +839,7 @@ Ensure your manifest files are listed in `release.version_files` and match a [su
 
 Set `release.sign_tags: true` in `sr.yaml` or pass `--sign-tags`. You must have a GPG or SSH signing key configured in git (`git config user.signingkey`).
 
-### Migrating from v3.x or v4.x
+### Migrating from v3.x, v4.x, or v5.x
 
 Run `sr migrate` to see the full migration guide, or read [docs/migration.md](docs/migration.md).
 
@@ -894,7 +870,7 @@ Run `sr migrate` to see the full migration guide, or read [docs/migration.md](do
 2. **Conventional commits as source of truth** — commit messages drive versioning.
 3. **Zero-config** — works out of the box with reasonable defaults.
 4. **Language-agnostic** — sr knows about git and semver, not about cargo or npm.
-5. **MCP-native** — AI assistants interact with sr through the MCP server, not baked-in AI backends.
+5. **Skills-native** — AI assistants use sr through portable [Agent Skills](https://agentskills.io), not baked-in AI backends or protocol servers.
 
 ## Development
 

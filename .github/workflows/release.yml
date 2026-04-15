@@ -68,13 +68,16 @@ jobs:
         if: matrix.cross
         run: cargo install cross --locked
 
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable
+
       - name: Build
         working-directory: sr
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p sr-cli
+            cross auditable build --release --target ${{ matrix.target }} -p sr-cli
           else
-            cargo build --release --target ${{ matrix.target }} -p sr-cli
+            cargo auditable build --release --target ${{ matrix.target }} -p sr-cli
           fi
         shell: bash
 

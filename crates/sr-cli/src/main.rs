@@ -1,5 +1,3 @@
-mod commands;
-
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -78,7 +76,7 @@ enum Commands {
         resolved: bool,
     },
 
-    /// Create default configuration files (sr.yaml + .mcp.json)
+    /// Create default configuration files (sr.yaml)
     Init {
         /// Overwrite config files if they already exist
         #[arg(long)]
@@ -91,23 +89,11 @@ enum Commands {
         shell: clap_complete::Shell,
     },
 
-    /// MCP server
-    Mcp {
-        #[command(subcommand)]
-        command: McpCommands,
-    },
-
     /// Update sr to the latest version
     Update,
 
     /// Show migration guide
     Migrate,
-}
-
-#[derive(Subcommand)]
-enum McpCommands {
-    /// Start MCP server over stdio
-    Serve,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -249,17 +235,112 @@ fn resolve_config_path() -> std::path::PathBuf {
 }
 
 fn self_update() -> anyhow::Result<()> {
-    eprintln!("current version: {}", env!("CARGO_PKG_VERSION"));
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
 
-    match agentspec_update::self_update("urmzd/sr", env!("CARGO_PKG_VERSION"), "sr")? {
-        agentspec_update::UpdateResult::AlreadyUpToDate => {
-            eprintln!("already up to date");
-        }
-        agentspec_update::UpdateResult::Updated { from, to } => {
-            eprintln!("updated: {from} → {to}");
+    let current_version = env!("CARGO_PKG_VERSION");
+    eprintln!("current version: {current_version}");
+
+    // Fetch latest release
+    let mut req = ureq::get("https://api.github.com/repos/urmzd/sr/releases/latest")
+        .header("Accept", "application/vnd.github+json");
+    if let Ok(token) = std::env::var("GH_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN")) {
+        req = req.header("Authorization", format!("token {token}"));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Asset {
+        name: String,
+        browser_download_url: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Release {
+        tag_name: String,
+        assets: Vec<Asset>,
+    }
+
+    let release: Release = req
+        .call()
+        .map_err(|e| anyhow::anyhow!("failed to fetch latest release: {e}"))?
+        .into_body()
+        .read_json()?;
+    let latest = release.tag_name.trim_start_matches('v');
+
+    if latest == current_version {
+        eprintln!("already up to date");
+        return Ok(());
+    }
+
+    // Detect platform
+    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "x86_64-unknown-linux-musl",
+        ("linux", "aarch64") => "aarch64-unknown-linux-musl",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+        (os, arch) => anyhow::bail!("unsupported platform: {os}/{arch}"),
+    };
+
+    let asset_name = format!("sr-{target}");
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == asset_name)
+        .ok_or_else(|| anyhow::anyhow!("no asset found for {asset_name}"))?;
+
+    // Check for .sha256 sidecar
+    let expected_sha256 = release
+        .assets
+        .iter()
+        .find(|a| a.name == format!("{asset_name}.sha256"))
+        .and_then(|a| {
+            let body = ureq::get(&a.browser_download_url).call().ok()?.into_body();
+            let mut buf = Vec::new();
+            body.into_reader().read_to_end(&mut buf).ok()?;
+            let s = String::from_utf8(buf).ok()?;
+            Some(s.split_whitespace().next()?.to_string())
+        });
+
+    eprintln!("downloading sr {latest} for {target}...");
+
+    let body = ureq::get(&asset.browser_download_url)
+        .call()
+        .map_err(|e| anyhow::anyhow!("download failed: {e}"))?
+        .into_body();
+    let mut bytes = Vec::new();
+    body.into_reader().read_to_end(&mut bytes)?;
+
+    // Verify checksum
+    if let Some(expected) = &expected_sha256 {
+        let actual: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        if actual != *expected {
+            anyhow::bail!("SHA256 mismatch: expected {expected}, got {actual}");
         }
     }
 
+    // Atomic replace
+    let exe = std::env::current_exe()?;
+    let backup = exe.with_extension("old");
+    let tmp = exe.with_extension("new");
+
+    std::fs::write(&tmp, &bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    }
+    if exe.exists() {
+        std::fs::rename(&exe, &backup)?;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &exe) {
+        if backup.exists() {
+            let _ = std::fs::rename(&backup, &exe);
+        }
+        return Err(e.into());
+    }
+    let _ = std::fs::remove_file(&backup);
+
+    eprintln!("updated: {current_version} → {latest}");
     Ok(())
 }
 
@@ -267,7 +348,7 @@ fn print_migration_guide() {
     print!("{}", include_str!("../docs/migration.md"));
 }
 
-async fn run() -> anyhow::Result<()> {
+fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -289,9 +370,6 @@ async fn run() -> anyhow::Result<()> {
                     "{DEFAULT_CONFIG_FILE} already exists (skipping, use --force to overwrite)"
                 );
             }
-
-            // .mcp.json
-            commands::mcp::write_mcp_json(force)?;
 
             // .gitignore — ensure .sr/ is listed
             let gitignore = Path::new(".gitignore");
@@ -528,9 +606,6 @@ async fn run() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Commands::Mcp { command } => match command {
-            McpCommands::Serve => commands::mcp::run().await,
-        },
         Commands::Update => self_update(),
         Commands::Migrate => {
             print_migration_guide();
@@ -539,9 +614,8 @@ async fn run() -> anyhow::Result<()> {
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    match run().await {
+fn main() -> ExitCode {
+    match run() {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
             if is_no_release_error(&e) {
