@@ -1,5 +1,19 @@
 # Changelog
 
+## 7.0.0 (2026-04-15)
+
+### Breaking
+
+- sr v7 — config restructure, security audit, dep cleanup (#19) ([138ec5a](https://github.com/urmzd/sr/commit/138ec5a2a9c8d2327e57a4c8deb4682c71b4f756))
+
+### Bug Fixes
+
+- **config**: migrate sr.yaml to v7 schema (#21) ([88efebf](https://github.com/urmzd/sr/commit/88efebf185eda21deceef15fa9e94cd4d74e7c59))
+- **ci**: drop cargo-auditable from cross builds (#20) ([c9cd34f](https://github.com/urmzd/sr/commit/c9cd34ff9047733f39e7b4dd823c8ef4c84debbf))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v6.0.1...v7.0.0)
+
+
 ## 6.0.1 (2026-04-14)
 
 ### Bug Fixes
