@@ -120,8 +120,7 @@ impl Default for TypedCommitParser {
 
 impl CommitParser for TypedCommitParser {
     fn parse(&self, commit: &Commit) -> Result<ConventionalCommit, ReleaseError> {
-        let re =
-            Regex::new(&self.pattern).map_err(|e| ReleaseError::Config(e.to_string()))?;
+        let re = Regex::new(&self.pattern).map_err(|e| ReleaseError::Config(e.to_string()))?;
 
         let first_line = commit.message.lines().next().unwrap_or("");
 
@@ -215,7 +214,9 @@ mod tests {
     #[test]
     fn parse_breaking_change_footer() {
         let result = parser()
-            .parse(&raw("feat: new API\n\nBREAKING CHANGE: removed old endpoint"))
+            .parse(&raw(
+                "feat: new API\n\nBREAKING CHANGE: removed old endpoint",
+            ))
             .unwrap();
         assert!(result.breaking);
     }

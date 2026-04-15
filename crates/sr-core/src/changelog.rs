@@ -129,9 +129,7 @@ impl ChangelogFormatter for DefaultChangelogFormatter {
                         let mut c = w.chars();
                         match c.next() {
                             None => String::new(),
-                            Some(f) => {
-                                f.to_uppercase().to_string() + c.as_str()
-                            }
+                            Some(f) => f.to_uppercase().to_string() + c.as_str(),
                         }
                     })
                     .collect::<Vec<_>>()

@@ -534,30 +534,26 @@ fn run() -> anyhow::Result<()> {
                 }
             }
 
-            let plan = match build_full_strategy(
-                config.clone(),
-                force,
-                prerelease_id.clone(),
-                draft,
-            ) {
-                Ok(strategy) => {
-                    let plan = strategy.plan()?;
-                    strategy.execute(&plan, dry_run)?;
-                    plan
-                }
-                Err(e) => {
-                    if dry_run {
-                        eprintln!("warning: {e} (continuing dry-run without GitHub)");
-                        let strategy =
-                            build_local_strategy(config, force, prerelease_id, draft)?;
+            let plan =
+                match build_full_strategy(config.clone(), force, prerelease_id.clone(), draft) {
+                    Ok(strategy) => {
                         let plan = strategy.plan()?;
                         strategy.execute(&plan, dry_run)?;
                         plan
-                    } else {
-                        return Err(e);
                     }
-                }
-            };
+                    Err(e) => {
+                        if dry_run {
+                            eprintln!("warning: {e} (continuing dry-run without GitHub)");
+                            let strategy =
+                                build_local_strategy(config, force, prerelease_id, draft)?;
+                            let plan = strategy.plan()?;
+                            strategy.execute(&plan, dry_run)?;
+                            plan
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
             #[derive(serde::Serialize)]
             struct ReleaseOutput {
                 version: String,

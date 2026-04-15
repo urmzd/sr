@@ -269,8 +269,7 @@ where
             .filter_map(|c| self.parser.parse(c).ok())
             .collect();
 
-        let classifier =
-            DefaultCommitClassifier::new(self.config.commit.types.into_commit_types());
+        let classifier = DefaultCommitClassifier::new(self.config.commit.types.into_commit_types());
         let tag_for_err = tag_info
             .map(|i| i.name.clone())
             .unwrap_or_else(|| "(none)".into());
@@ -442,8 +441,13 @@ where
             return Ok(());
         }
 
-        let files_to_stage =
-            self.execute_mutations(version_str, changelog_body, &version_files, &changelog_file, version_files_strict)?;
+        let files_to_stage = self.execute_mutations(
+            version_str,
+            changelog_body,
+            &version_files,
+            &changelog_file,
+            version_files_strict,
+        )?;
 
         // Resolve stage_files globs and collect all paths to stage
         let mut paths_to_stage: Vec<String> = Vec::new();
@@ -941,11 +945,7 @@ mod tests {
         }
     }
 
-    fn make_strategy(
-        tags: Vec<TagInfo>,
-        commits: Vec<Commit>,
-        config: Config,
-    ) -> TestStrategy {
+    fn make_strategy(tags: Vec<TagInfo>, commits: Vec<Commit>, config: Config) -> TestStrategy {
         TrunkReleaseStrategy {
             git: FakeGit::new(tags, commits),
             vcs: FakeVcs::new(),

@@ -440,8 +440,12 @@ impl Config {
             .iter()
             .find(|ch| ch.name == name)
             .ok_or_else(|| {
-                let available: Vec<&str> =
-                    self.channels.content.iter().map(|c| c.name.as_str()).collect();
+                let available: Vec<&str> = self
+                    .channels
+                    .content
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect();
                 ReleaseError::Config(format!(
                     "channel '{name}' not found. Available: {}",
                     if available.is_empty() {
@@ -480,13 +484,7 @@ impl Config {
     pub fn find_package_by_name(&self, name: &str) -> Result<&PackageConfig, ReleaseError> {
         self.packages
             .iter()
-            .find(|p| {
-                p.path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&p.path)
-                    == name
-            })
+            .find(|p| p.path.rsplit('/').next().unwrap_or(&p.path) == name)
             .ok_or_else(|| {
                 let available: Vec<&str> = self
                     .packages
@@ -671,10 +669,7 @@ mod tests {
         assert_eq!(config.commit.types.minor, vec!["feat"]);
         assert!(config.commit.types.patch.contains(&"fix".to_string()));
         assert!(config.commit.types.none.contains(&"chore".to_string()));
-        assert_eq!(
-            config.changelog.file.as_deref(),
-            Some("CHANGELOG.md")
-        );
+        assert_eq!(config.changelog.file.as_deref(), Some("CHANGELOG.md"));
         assert!(!config.changelog.groups.is_empty());
         assert_eq!(config.channels.default, "stable");
         assert_eq!(config.channels.content.len(), 1);
