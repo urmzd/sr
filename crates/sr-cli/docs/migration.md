@@ -8,6 +8,7 @@
 | **4.x** | Config restructure + MCP | Nested config, MCP server, AI backends removed (commands kept as thin wrappers) |
 | **5.x** | Release-only CLI | CLI commands stripped to release engineering; all git/PR/review workflows move to MCP tools |
 | **6.x** | MCP-first workflows | PR, worktree, and breaking-commit tools added to MCP server; `sr init` improved |
+| **7.x** | Skills-native | MCP server removed; AI integration via portable Agent Skills; tokio/async runtime dropped for smaller binary |
 
 ---
 
@@ -305,23 +306,71 @@ date. The `.sr/` directory is automatically gitignored by `sr init`.
 
 ---
 
-## Migrating from 3.x directly to 6.x
+## Migrating from 6.x to 7.x
 
-Follow the 3.x→4.x, 4.x→5.x, and 5.x→6.x sections above in order, or use
-this quick checklist:
+### MCP server removed
+
+The MCP server (`sr mcp serve`) and `.mcp.json` have been removed. AI assistants
+now interact with sr through portable [Agent Skills](https://agentskills.io)
+instead of the MCP protocol.
+
+**What to do:**
+
+1. **Delete `.mcp.json`** from your project root
+2. **Install the sr skill** — available in `skills/sr/SKILL.md` for Claude Code,
+   Gemini CLI, Cursor, and other skills-compatible tools
+3. **Update action** — change `@v6` to `@v7`
+
+```bash
+# Remove .mcp.json
+rm .mcp.json
+
+# If using agentspec:
+agentspec manage add urmzd/sr --all-tools
+```
+
+**Removed commands:**
+
+| Removed | Replacement |
+|---------|-------------|
+| `sr mcp serve` | Install the `sr` agent skill |
+| `.mcp.json` | Delete — no longer needed |
+
+**Binary size reduction:** Removing the MCP server and its async runtime (tokio,
+rmcp) significantly reduces the binary size.
+
+### GitHub Action: v6 → v7
+
+Update `@v6` → `@v7`. All inputs and outputs are unchanged:
+
+```yaml
+# Before
+- uses: urmzd/sr@v6
+
+# After
+- uses: urmzd/sr@v7
+```
+
+---
+
+## Migrating from 3.x directly to 7.x
+
+Follow the 3.x→4.x, 4.x→5.x, 5.x→6.x, and 6.x→7.x sections above in order,
+or use this quick checklist:
 
 1. **Remove git hooks** — delete `.githooks/`, unset `core.hooksPath`
 2. **Restructure sr.yaml** — move flat fields into `commit:`, `release:`, `hooks:` sections
-3. **Update action** — change `@v3` to `@v6`
-4. **Update scripts** — replace `sr version`, `sr changelog`, `sr plan` with `sr status`
+3. **Delete `.mcp.json`** — MCP server was removed in v7
+4. **Update action** — change `@v3` to `@v7`
+5. **Update scripts** — replace `sr version`, `sr changelog`, `sr plan` with `sr status`
 
-### Action input migration: v3 → v6
+### Action input migration: v3 → v7
 
-| v3 input | v6 equivalent |
+| v3 input | v7 equivalent |
 |----------|---------------|
 | `command: release` | Default (no input needed) |
 | `command: plan` | `dry-run: "true"` |
-| `command: <other>` | Removed — use CLI or MCP tools |
+| `command: <other>` | Removed — use CLI or agent skills |
 | `artifacts: "dist/*\nbin/*"` | `artifacts: "dist/* bin/*"` (space-separated) |
 | `build-command: "make"` | Removed — use `hooks.pre_release` in sr.yaml |
 | `config: custom.yaml` | Removed — always reads `sr.yaml` |
@@ -335,7 +384,7 @@ VERSION=$(sr version --short)
 sr changelog --write
 sr plan --format json
 
-# 6.x
+# 7.x
 VERSION=$(sr status --format json | jq -r '.next_version')
 # Changelog is written automatically by sr release
 sr status --format json
