@@ -1,9 +1,8 @@
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::commit::{CommitType, DEFAULT_COMMIT_PATTERN, default_commit_types};
+use crate::commit::CommitType;
 use crate::error::ReleaseError;
 use crate::version::BumpLevel;
 use crate::version_files::detect_version_files;
@@ -21,202 +20,176 @@ pub const CONFIG_CANDIDATES: &[&str] = &["sr.yaml", "sr.yml", LEGACY_CONFIG_FILE
 // Top-level config
 // ---------------------------------------------------------------------------
 
-/// Root configuration. Three top-level concerns:
-/// - `commit` — how commits are parsed
-/// - `release` — how releases are cut
-/// - `hooks` — what runs at each lifecycle event
-///
-/// ```yaml
-/// commit:
-///   types: [...]
-///   pattern: '...'
-///
-/// release:
-///   branches: [main]
-///   tag_prefix: "v"
-///   version_files: [Cargo.toml]
-///   channels:
-///     canary: { prerelease: canary }
-///     stable: {}
-///
-/// hooks:
-///   pre_commit: ["cargo fmt --check"]
-///   pre_release: ["cargo test --workspace"]
-/// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Root configuration. Six top-level concerns:
+/// - `git` — tag prefix, floating tags, signing
+/// - `commit` — type→bump classification
+/// - `changelog` — file, template, groups
+/// - `channels` — branch→release mapping
+/// - `vcs` — provider-specific config
+/// - `packages` — version files, artifacts, hooks
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub git: GitConfig,
     pub commit: CommitConfig,
-    pub release: ReleaseConfig,
-    pub hooks: HooksConfig,
-    /// Monorepo packages.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changelog: ChangelogConfig,
+    pub channels: ChannelsConfig,
+    pub vcs: VcsConfig,
+    #[serde(default = "default_packages")]
     pub packages: Vec<PackageConfig>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            git: GitConfig::default(),
+            commit: CommitConfig::default(),
+            changelog: ChangelogConfig::default(),
+            channels: ChannelsConfig::default(),
+            vcs: VcsConfig::default(),
+            packages: default_packages(),
+        }
+    }
+}
+
+fn default_packages() -> Vec<PackageConfig> {
+    vec![PackageConfig {
+        path: ".".into(),
+        ..Default::default()
+    }]
+}
+
+// ---------------------------------------------------------------------------
+// Git config
+// ---------------------------------------------------------------------------
+
+/// Git-level settings — tags and signing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitConfig {
+    /// Prefix for git tags (e.g. "v" → "v1.2.0").
+    pub tag_prefix: String,
+    /// Create floating major version tags (e.g. "v3" → latest v3.x.x).
+    pub floating_tag: bool,
+    /// Sign tags with GPG/SSH.
+    pub sign_tags: bool,
+    /// Prevent breaking changes from bumping 0.x.y to 1.0.0.
+    /// When true, major bumps at v0 are downshifted to minor.
+    pub v0_protection: bool,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            tag_prefix: "v".into(),
+            floating_tag: true,
+            sign_tags: false,
+            v0_protection: true,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Commit config
 // ---------------------------------------------------------------------------
 
-/// How commits are parsed and classified.
+/// How commits are classified by semver bump level.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CommitConfig {
-    /// Regex for parsing conventional commits.
-    pub pattern: String,
-    /// Changelog section heading for breaking changes.
-    pub breaking_section: String,
-    /// Fallback changelog section for unrecognised commit types.
-    pub misc_section: String,
-    /// Commit type definitions.
-    pub types: Vec<CommitType>,
+    /// Commit types grouped by bump level.
+    pub types: CommitTypesConfig,
 }
 
 impl Default for CommitConfig {
     fn default() -> Self {
         Self {
-            pattern: DEFAULT_COMMIT_PATTERN.into(),
-            breaking_section: "Breaking Changes".into(),
-            misc_section: "Miscellaneous".into(),
-            types: default_commit_types(),
+            types: CommitTypesConfig::default(),
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Release config
-// ---------------------------------------------------------------------------
-
-/// How releases are cut — versioning, changelog, tags, artifacts.
+/// Commit type names grouped by the semver bump level they trigger.
+/// Breaking changes always bump major regardless of configured level.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ReleaseConfig {
-    /// Branches that trigger releases.
-    pub branches: Vec<String>,
-    /// Prefix for git tags (e.g. "v" → "v1.2.0").
-    pub tag_prefix: String,
-    /// Changelog configuration.
-    pub changelog: ChangelogConfig,
-    /// Manifest files to bump (auto-detected if empty).
-    pub version_files: Vec<String>,
-    /// Fail on unsupported version file formats.
-    pub version_files_strict: bool,
-    /// Glob patterns for release artifacts.
-    pub artifacts: Vec<String>,
-    /// Create floating major version tags (e.g. "v3" → latest v3.x.x).
-    pub floating_tags: bool,
-    /// Additional files to stage in the release commit.
-    pub stage_files: Vec<String>,
-    /// Pre-release identifier (e.g. "alpha", "rc").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prerelease: Option<String>,
-    /// Sign tags with GPG/SSH.
-    pub sign_tags: bool,
-    /// Create GitHub releases as drafts.
-    pub draft: bool,
-    /// Minijinja template for release name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release_name_template: Option<String>,
-    /// Versioning strategy for monorepo packages.
-    #[serde(default)]
-    pub versioning: VersioningMode,
-    /// Named release channels for trunk-based promotion.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub channels: BTreeMap<String, ChannelConfig>,
-    /// Default channel when no --channel flag given.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_channel: Option<String>,
-    /// Internal: commits filtered to this path (set by resolve_package).
-    #[serde(skip)]
-    pub path_filter: Option<String>,
+pub struct CommitTypesConfig {
+    /// Types that trigger a minor version bump.
+    pub minor: Vec<String>,
+    /// Types that trigger a patch version bump.
+    pub patch: Vec<String>,
+    /// Types that do not trigger a release on their own.
+    pub none: Vec<String>,
 }
 
-impl Default for ReleaseConfig {
+impl Default for CommitTypesConfig {
     fn default() -> Self {
         Self {
-            branches: vec!["main".into()],
-            tag_prefix: "v".into(),
-            changelog: ChangelogConfig::default(),
-            version_files: vec![],
-            version_files_strict: false,
-            artifacts: vec![],
-            floating_tags: true,
-            stage_files: vec![],
-            prerelease: None,
-            sign_tags: false,
-            draft: false,
-            release_name_template: None,
-            versioning: VersioningMode::default(),
-            channels: BTreeMap::new(),
-            default_channel: None,
-            path_filter: None,
+            minor: vec!["feat".into()],
+            patch: vec!["fix".into(), "perf".into(), "refactor".into()],
+            none: vec![
+                "docs".into(),
+                "revert".into(),
+                "chore".into(),
+                "ci".into(),
+                "test".into(),
+                "build".into(),
+                "style".into(),
+            ],
         }
     }
 }
 
+impl CommitTypesConfig {
+    /// All type names across all bump levels.
+    pub fn all_type_names(&self) -> Vec<&str> {
+        self.minor
+            .iter()
+            .chain(self.patch.iter())
+            .chain(self.none.iter())
+            .map(|s| s.as_str())
+            .collect()
+    }
+
+    /// Convert to internal `Vec<CommitType>` representation.
+    pub fn into_commit_types(&self) -> Vec<CommitType> {
+        let mut types = Vec::new();
+        for name in &self.minor {
+            types.push(CommitType {
+                name: name.clone(),
+                bump: Some(BumpLevel::Minor),
+            });
+        }
+        for name in &self.patch {
+            types.push(CommitType {
+                name: name.clone(),
+                bump: Some(BumpLevel::Patch),
+            });
+        }
+        for name in &self.none {
+            types.push(CommitType {
+                name: name.clone(),
+                bump: None,
+            });
+        }
+        types
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Supporting types
+// Changelog config
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum VersioningMode {
-    #[default]
-    Independent,
-    Fixed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageConfig {
-    pub name: String,
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tag_prefix: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub version_files: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub changelog: Option<ChangelogConfig>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stage_files: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct ChannelConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prerelease: Option<String>,
-    #[serde(default)]
-    pub draft: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HookEvent {
-    PreCommit,
-    PostCommit,
-    PreBranch,
-    PostBranch,
-    PrePr,
-    PostPr,
-    PreReview,
-    PostReview,
-    PreRelease,
-    PostRelease,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(transparent)]
-pub struct HooksConfig {
-    pub hooks: BTreeMap<HookEvent, Vec<String>>,
-}
-
+/// Changelog generation — file, template, and commit grouping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChangelogConfig {
+    /// Path to the changelog file. None = skip changelog generation.
     pub file: Option<String>,
+    /// Jinja template — path to file or inline string. None = built-in default.
     pub template: Option<String>,
+    /// Ordered groups for organizing commits in the changelog.
+    pub groups: Vec<ChangelogGroup>,
 }
 
 impl Default for ChangelogConfig {
@@ -224,8 +197,177 @@ impl Default for ChangelogConfig {
         Self {
             file: Some("CHANGELOG.md".into()),
             template: None,
+            groups: default_changelog_groups(),
         }
     }
+}
+
+/// A named group of commit types for changelog rendering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangelogGroup {
+    /// Machine-readable name (e.g. "breaking", "features").
+    pub name: String,
+    /// Commit types included in this group (e.g. ["feat"]).
+    pub content: Vec<String>,
+}
+
+pub fn default_changelog_groups() -> Vec<ChangelogGroup> {
+    vec![
+        ChangelogGroup {
+            name: "breaking".into(),
+            content: vec!["breaking".into()],
+        },
+        ChangelogGroup {
+            name: "features".into(),
+            content: vec!["feat".into()],
+        },
+        ChangelogGroup {
+            name: "bug-fixes".into(),
+            content: vec!["fix".into()],
+        },
+        ChangelogGroup {
+            name: "performance".into(),
+            content: vec!["perf".into()],
+        },
+        ChangelogGroup {
+            name: "refactoring".into(),
+            content: vec!["refactor".into()],
+        },
+        ChangelogGroup {
+            name: "misc".into(),
+            content: vec![
+                "docs".into(),
+                "revert".into(),
+                "chore".into(),
+                "ci".into(),
+                "test".into(),
+                "build".into(),
+                "style".into(),
+            ],
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Channels config
+// ---------------------------------------------------------------------------
+
+/// Release channels for trunk-based promotion.
+/// All channels release from the same branch — channels control the release
+/// strategy (stable vs prerelease vs draft), not the branch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChannelsConfig {
+    /// Default channel when no --channel flag given.
+    pub default: String,
+    /// The trunk branch that triggers releases.
+    pub branch: String,
+    /// Channel definitions.
+    pub content: Vec<ChannelConfig>,
+}
+
+impl Default for ChannelsConfig {
+    fn default() -> Self {
+        Self {
+            default: "stable".into(),
+            branch: "main".into(),
+            content: vec![ChannelConfig {
+                name: "stable".into(),
+                prerelease: None,
+                draft: false,
+            }],
+        }
+    }
+}
+
+/// A named release channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelConfig {
+    /// Channel name (e.g. "stable", "rc", "canary").
+    pub name: String,
+    /// Pre-release identifier (e.g. "rc", "canary"). None = stable release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prerelease: Option<String>,
+    /// Create GitHub release as a draft.
+    #[serde(default)]
+    pub draft: bool,
+}
+
+// ---------------------------------------------------------------------------
+// VCS config
+// ---------------------------------------------------------------------------
+
+/// VCS provider-specific configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct VcsConfig {
+    pub github: GitHubConfig,
+}
+
+/// GitHub-specific release settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct GitHubConfig {
+    /// Minijinja template for the GitHub release name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_name_template: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Package config
+// ---------------------------------------------------------------------------
+
+/// A releasable package — version files, artifacts, build/publish hooks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PackageConfig {
+    /// Directory path relative to repo root.
+    pub path: String,
+    /// Whether this package versions independently in a monorepo.
+    pub independent: bool,
+    /// Tag prefix override (default: derived from git.tag_prefix or "{dir}/v").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag_prefix: Option<String>,
+    /// Manifest files to bump.
+    pub version_files: Vec<String>,
+    /// Fail on unsupported version file formats.
+    pub version_files_strict: bool,
+    /// Additional files to stage in the release commit.
+    pub stage_files: Vec<String>,
+    /// Glob patterns for artifact files to upload to the release.
+    pub artifacts: Vec<String>,
+    /// Changelog config override for this package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changelog: Option<ChangelogConfig>,
+    /// Package-level lifecycle hooks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HooksConfig>,
+}
+
+impl Default for PackageConfig {
+    fn default() -> Self {
+        Self {
+            path: ".".into(),
+            independent: false,
+            tag_prefix: None,
+            version_files: vec![],
+            version_files_strict: false,
+            stage_files: vec![],
+            artifacts: vec![],
+            changelog: None,
+            hooks: None,
+        }
+    }
+}
+
+/// Package lifecycle hooks — shell commands at release events.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct HooksConfig {
+    /// Runs after version bump, before commit (build with bumped versions).
+    pub pre_release: Vec<String>,
+    /// Runs after tag + GitHub release (publish to registries).
+    pub post_release: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -252,102 +394,105 @@ impl Config {
         }
         let contents =
             std::fs::read_to_string(path).map_err(|e| ReleaseError::Config(e.to_string()))?;
-        serde_yaml_ng::from_str(&contents).map_err(|e| ReleaseError::Config(e.to_string()))
-    }
-
-    /// Resolve a package into a full config by merging package overrides.
-    pub fn resolve_package(&self, pkg: &PackageConfig) -> Self {
-        let mut config = self.clone();
-        config.release.tag_prefix = pkg
-            .tag_prefix
-            .clone()
-            .unwrap_or_else(|| format!("{}/v", pkg.name));
-        config.release.path_filter = Some(pkg.path.clone());
-        if !pkg.version_files.is_empty() {
-            config.release.version_files = pkg.version_files.clone();
-        } else if config.release.version_files.is_empty() {
-            let detected = detect_version_files(Path::new(&pkg.path));
-            if !detected.is_empty() {
-                config.release.version_files = detected
-                    .into_iter()
-                    .map(|f| format!("{}/{f}", pkg.path))
-                    .collect();
-            }
-        }
-        if let Some(ref cl) = pkg.changelog {
-            config.release.changelog = cl.clone();
-        }
-        if !pkg.stage_files.is_empty() {
-            config.release.stage_files = pkg.stage_files.clone();
-        }
-        config.packages = vec![];
-        config
-    }
-
-    /// Resolve all packages for fixed versioning mode.
-    pub fn resolve_fixed(&self) -> Self {
-        let mut config = self.clone();
-        config.release.path_filter = None;
-
-        let mut version_files: Vec<String> = config.release.version_files.clone();
-        for pkg in &self.packages {
-            if !pkg.version_files.is_empty() {
-                version_files.extend(pkg.version_files.clone());
-            } else {
-                let detected = detect_version_files(Path::new(&pkg.path));
-                version_files.extend(detected.into_iter().map(|f| format!("{}/{f}", pkg.path)));
-            }
-        }
-        version_files.sort();
-        version_files.dedup();
-        config.release.version_files = version_files;
-
-        let mut stage_files = config.release.stage_files.clone();
-        for pkg in &self.packages {
-            stage_files.extend(pkg.stage_files.clone());
-        }
-        stage_files.sort();
-        stage_files.dedup();
-        config.release.stage_files = stage_files;
-
-        config.packages = vec![];
-        config
-    }
-
-    /// Resolve a named release channel.
-    pub fn resolve_channel(&self, name: &str) -> Result<Self, ReleaseError> {
-        let channel = self.release.channels.get(name).ok_or_else(|| {
-            let available: Vec<&str> = self.release.channels.keys().map(|k| k.as_str()).collect();
-            ReleaseError::Config(format!(
-                "channel '{name}' not found. Available: {}",
-                if available.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    available.join(", ")
-                }
-            ))
-        })?;
-
-        let mut config = self.clone();
-        if channel.prerelease.is_some() {
-            config.release.prerelease = channel.prerelease.clone();
-        }
-        if channel.draft {
-            config.release.draft = true;
-        }
-        if !channel.artifacts.is_empty() {
-            config.release.artifacts.extend(channel.artifacts.clone());
-        }
+        let config: Self =
+            serde_yaml_ng::from_str(&contents).map_err(|e| ReleaseError::Config(e.to_string()))?;
+        config.validate()?;
         Ok(config)
     }
 
-    /// Find a package by name.
-    pub fn find_package(&self, name: &str) -> Result<&PackageConfig, ReleaseError> {
+    /// Validate config consistency.
+    fn validate(&self) -> Result<(), ReleaseError> {
+        // Check for duplicate type names across bump levels.
+        let mut seen = std::collections::HashSet::new();
+        for name in self.commit.types.all_type_names() {
+            if !seen.insert(name) {
+                return Err(ReleaseError::Config(format!(
+                    "duplicate commit type: {name}"
+                )));
+            }
+        }
+
+        // Need at least one type with a bump level.
+        if self.commit.types.minor.is_empty() && self.commit.types.patch.is_empty() {
+            return Err(ReleaseError::Config(
+                "commit.types must have at least one minor or patch type".into(),
+            ));
+        }
+
+        // Check for duplicate channel names.
+        let mut channel_names = std::collections::HashSet::new();
+        for ch in &self.channels.content {
+            if !channel_names.insert(&ch.name) {
+                return Err(ReleaseError::Config(format!(
+                    "duplicate channel name: {}",
+                    ch.name
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Resolve a named release channel, returning the channel config.
+    pub fn resolve_channel(&self, name: &str) -> Result<&ChannelConfig, ReleaseError> {
+        self.channels
+            .content
+            .iter()
+            .find(|ch| ch.name == name)
+            .ok_or_else(|| {
+                let available: Vec<&str> =
+                    self.channels.content.iter().map(|c| c.name.as_str()).collect();
+                ReleaseError::Config(format!(
+                    "channel '{name}' not found. Available: {}",
+                    if available.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        available.join(", ")
+                    }
+                ))
+            })
+    }
+
+    /// Resolve the default channel.
+    pub fn default_channel(&self) -> Result<&ChannelConfig, ReleaseError> {
+        self.resolve_channel(&self.channels.default)
+    }
+
+    /// Find a package by path.
+    pub fn find_package(&self, path: &str) -> Result<&PackageConfig, ReleaseError> {
         self.packages
             .iter()
-            .find(|p| p.name == name)
+            .find(|p| p.path == path)
             .ok_or_else(|| {
-                let available: Vec<&str> = self.packages.iter().map(|p| p.name.as_str()).collect();
+                let available: Vec<&str> = self.packages.iter().map(|p| p.path.as_str()).collect();
+                ReleaseError::Config(format!(
+                    "package '{path}' not found. Available: {}",
+                    if available.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        available.join(", ")
+                    }
+                ))
+            })
+    }
+
+    /// Find a package by name (last component of path).
+    pub fn find_package_by_name(&self, name: &str) -> Result<&PackageConfig, ReleaseError> {
+        self.packages
+            .iter()
+            .find(|p| {
+                p.path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&p.path)
+                    == name
+            })
+            .ok_or_else(|| {
+                let available: Vec<&str> = self
+                    .packages
+                    .iter()
+                    .map(|p| p.path.rsplit('/').next().unwrap_or(&p.path))
+                    .collect();
                 ReleaseError::Config(format!(
                     "package '{name}' not found. Available: {}",
                     if available.is_empty() {
@@ -358,6 +503,58 @@ impl Config {
                 ))
             })
     }
+
+    /// Resolve effective tag prefix for a package.
+    pub fn tag_prefix_for(&self, pkg: &PackageConfig) -> String {
+        if let Some(ref prefix) = pkg.tag_prefix {
+            return prefix.clone();
+        }
+        if pkg.path == "." {
+            self.git.tag_prefix.clone()
+        } else {
+            let dir_name = pkg.path.rsplit('/').next().unwrap_or(&pkg.path);
+            format!("{}/v", dir_name)
+        }
+    }
+
+    /// Resolve effective changelog config for a package.
+    pub fn changelog_for<'a>(&'a self, pkg: &'a PackageConfig) -> &'a ChangelogConfig {
+        pkg.changelog.as_ref().unwrap_or(&self.changelog)
+    }
+
+    /// Resolve effective version files for a package, with auto-detection.
+    pub fn version_files_for(&self, pkg: &PackageConfig) -> Vec<String> {
+        if !pkg.version_files.is_empty() {
+            return pkg.version_files.clone();
+        }
+        let detected = detect_version_files(Path::new(&pkg.path));
+        if pkg.path == "." {
+            detected
+        } else {
+            detected
+                .into_iter()
+                .map(|f| format!("{}/{f}", pkg.path))
+                .collect()
+        }
+    }
+
+    /// Get all non-independent packages (for fixed versioning).
+    pub fn fixed_packages(&self) -> Vec<&PackageConfig> {
+        self.packages.iter().filter(|p| !p.independent).collect()
+    }
+
+    /// Get all independent packages.
+    pub fn independent_packages(&self) -> Vec<&PackageConfig> {
+        self.packages.iter().filter(|p| p.independent).collect()
+    }
+
+    /// Collect all artifacts glob patterns from all packages.
+    pub fn all_artifacts(&self) -> Vec<String> {
+        self.packages
+            .iter()
+            .flat_map(|p| p.artifacts.clone())
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -366,11 +563,11 @@ impl Config {
 
 pub fn default_config_template(version_files: &[String]) -> String {
     let vf = if version_files.is_empty() {
-        "  version_files: []\n".to_string()
+        "    version_files: []\n".to_string()
     } else {
-        let mut s = "  version_files:\n".to_string();
+        let mut s = "    version_files:\n".to_string();
         for f in version_files {
-            s.push_str(&format!("    - {f}\n"));
+            s.push_str(&format!("      - {f}\n"));
         }
         s
     };
@@ -379,123 +576,81 @@ pub fn default_config_template(version_files: &[String]) -> String {
         r#"# sr configuration
 # Full reference: https://github.com/urmzd/sr#configuration
 
-# How commits are parsed and classified.
-commit:
-  # Regex for parsing conventional commits.
-  # Required named groups: type, description. Optional: scope, breaking.
-  pattern: '^(?P<type>\w+)(?:\((?P<scope>[^)]+)\))?(?P<breaking>!)?:\s+(?P<description>.+)'
-
-  # Changelog section headings.
-  breaking_section: Breaking Changes
-  misc_section: Miscellaneous
-
-  # Commit type definitions.
-  types:
-    - name: feat
-      bump: minor
-      section: Features
-    - name: fix
-      bump: patch
-      section: Bug Fixes
-    - name: perf
-      bump: patch
-      section: Performance
-    - name: docs
-      section: Documentation
-    - name: refactor
-      bump: patch
-      section: Refactoring
-    - name: revert
-      section: Reverts
-    - name: chore
-    - name: ci
-    - name: test
-    - name: build
-    - name: style
-
-# How releases are cut.
-release:
-  branches:
-    - main
+git:
   tag_prefix: "v"
-  changelog:
-    file: CHANGELOG.md
-{vf}  version_files_strict: false
-  artifacts: []
-  floating_tags: true
-  stage_files: []
+  floating_tag: true
   sign_tags: false
-  draft: false
-  # prerelease: alpha
-  # release_name_template: "{{{{ tag_name }}}}"
+  v0_protection: true
 
-  # Release channels for trunk-based promotion.
-  # channels:
-  #   canary:
-  #     prerelease: canary
-  #   rc:
-  #     prerelease: rc
-  #     draft: true
-  #   stable: {{}}
-  # default_channel: stable
+commit:
+  types:
+    minor:
+      - feat
+    patch:
+      - fix
+      - perf
+      - refactor
+    none:
+      - docs
+      - revert
+      - chore
+      - ci
+      - test
+      - build
+      - style
 
-# Lifecycle hooks — shell commands keyed by event.
-# Available events: pre_commit, post_commit, pre_branch, post_branch,
-#   pre_pr, post_pr, pre_review, post_review, pre_release, post_release.
-# Release hooks receive SR_VERSION and SR_TAG env vars.
-# hooks:
-#   pre_commit:
-#     - "cargo fmt --check"
-#     - "cargo clippy -- -D warnings"
-#   pre_release:
-#     - "cargo test --workspace"
-#   post_release:
-#     - "./scripts/notify-slack.sh"
+changelog:
+  file: CHANGELOG.md
+  # template: changelog.md.j2
+  groups:
+    - name: breaking
+      content:
+        - breaking
+    - name: features
+      content:
+        - feat
+    - name: bug-fixes
+      content:
+        - fix
+    - name: performance
+      content:
+        - perf
+    - name: misc
+      content:
+        - chore
+        - ci
+        - test
+        - build
+        - style
 
-# Monorepo packages (uncomment and configure if needed).
-# packages:
-#   - name: core
-#     path: crates/core
-#     tag_prefix: "core/v"
-#     version_files:
-#       - crates/core/Cargo.toml
-#     stage_files:
-#       - crates/core/Cargo.lock
+channels:
+  default: stable
+  branch: main
+  content:
+    - name: stable
+  # - name: rc
+  #   prerelease: rc
+  #   draft: true
+  # - name: canary
+  #   branch: develop
+  #   prerelease: canary
+
+# vcs:
+#   github:
+#     release_name_template: "{{{{ tag_name }}}}"
+
+packages:
+  - path: .
+{vf}    # version_files_strict: false
+    # stage_files: []
+    # artifacts: []
+    # hooks:
+    #   pre_release:
+    #     - cargo build --release
+    #   post_release:
+    #     - cargo publish
 "#
     )
-}
-
-// ---------------------------------------------------------------------------
-// Serde for BumpLevel
-// ---------------------------------------------------------------------------
-
-impl<'de> Deserialize<'de> for BumpLevel {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "major" => Ok(BumpLevel::Major),
-            "minor" => Ok(BumpLevel::Minor),
-            "patch" => Ok(BumpLevel::Patch),
-            _ => Err(serde::de::Error::custom(format!("unknown bump level: {s}"))),
-        }
-    }
-}
-
-impl Serialize for BumpLevel {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let s = match self {
-            BumpLevel::Major => "major",
-            BumpLevel::Minor => "minor",
-            BumpLevel::Patch => "patch",
-        };
-        serializer.serialize_str(s)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -510,26 +665,23 @@ mod tests {
     #[test]
     fn default_values() {
         let config = Config::default();
-        assert_eq!(config.release.branches, vec!["main"]);
-        assert_eq!(config.release.tag_prefix, "v");
-        assert_eq!(config.commit.pattern, DEFAULT_COMMIT_PATTERN);
-        assert_eq!(config.commit.breaking_section, "Breaking Changes");
-        assert_eq!(config.commit.misc_section, "Miscellaneous");
-        assert!(!config.commit.types.is_empty());
-        assert!(!config.release.version_files_strict);
-        assert!(config.release.artifacts.is_empty());
-        assert!(config.release.floating_tags);
+        assert_eq!(config.git.tag_prefix, "v");
+        assert!(config.git.floating_tag);
+        assert!(!config.git.sign_tags);
+        assert_eq!(config.commit.types.minor, vec!["feat"]);
+        assert!(config.commit.types.patch.contains(&"fix".to_string()));
+        assert!(config.commit.types.none.contains(&"chore".to_string()));
         assert_eq!(
-            config.release.changelog.file.as_deref(),
+            config.changelog.file.as_deref(),
             Some("CHANGELOG.md")
         );
-        let refactor = config
-            .commit
-            .types
-            .iter()
-            .find(|t| t.name == "refactor")
-            .unwrap();
-        assert_eq!(refactor.bump, Some(BumpLevel::Patch));
+        assert!(!config.changelog.groups.is_empty());
+        assert_eq!(config.channels.default, "stable");
+        assert_eq!(config.channels.content.len(), 1);
+        assert_eq!(config.channels.content[0].name, "stable");
+        assert_eq!(config.channels.branch, "main");
+        assert_eq!(config.packages.len(), 1);
+        assert_eq!(config.packages[0].path, ".");
     }
 
     #[test]
@@ -537,36 +689,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent.yml");
         let config = Config::load(&path).unwrap();
-        assert_eq!(config.release.tag_prefix, "v");
-    }
-
-    #[test]
-    fn load_nested_yaml() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.yml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
-            "commit:\n  pattern: custom\nrelease:\n  branches:\n    - develop\n  tag_prefix: release-"
-        )
-        .unwrap();
-
-        let config = Config::load(&path).unwrap();
-        assert_eq!(config.release.branches, vec!["develop"]);
-        assert_eq!(config.release.tag_prefix, "release-");
-        assert_eq!(config.commit.pattern, "custom");
+        assert_eq!(config.git.tag_prefix, "v");
     }
 
     #[test]
     fn load_partial_yaml() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yml");
-        std::fs::write(&path, "release:\n  tag_prefix: rel-\n").unwrap();
+        std::fs::write(&path, "git:\n  tag_prefix: rel-\n").unwrap();
 
         let config = Config::load(&path).unwrap();
-        assert_eq!(config.release.tag_prefix, "rel-");
-        assert_eq!(config.release.branches, vec!["main"]);
-        assert_eq!(config.commit.pattern, DEFAULT_COMMIT_PATTERN);
+        assert_eq!(config.git.tag_prefix, "rel-");
+        assert_eq!(config.channels.default, "stable");
     }
 
     #[test]
@@ -575,80 +709,41 @@ mod tests {
         let path = dir.path().join("config.yml");
         std::fs::write(
             &path,
-            "packages:\n  - name: core\n    path: crates/core\n    version_files:\n      - crates/core/Cargo.toml\n",
+            "packages:\n  - path: crates/core\n    version_files:\n      - crates/core/Cargo.toml\n",
         )
         .unwrap();
 
         let config = Config::load(&path).unwrap();
         assert_eq!(config.packages.len(), 1);
-        assert_eq!(config.packages[0].name, "core");
+        assert_eq!(config.packages[0].path, "crates/core");
     }
 
     #[test]
-    fn resolve_package_defaults() {
-        let config = Config {
-            packages: vec![PackageConfig {
-                name: "core".into(),
-                path: "crates/core".into(),
-                tag_prefix: None,
-                version_files: vec![],
-                changelog: None,
-                stage_files: vec![],
-            }],
-            ..Default::default()
-        };
-
-        let resolved = config.resolve_package(&config.packages[0]);
-        assert_eq!(resolved.release.tag_prefix, "core/v");
-        assert_eq!(resolved.release.path_filter.as_deref(), Some("crates/core"));
-        assert!(resolved.packages.is_empty());
+    fn commit_types_conversion() {
+        let types = CommitTypesConfig::default();
+        let commit_types = types.into_commit_types();
+        let feat = commit_types.iter().find(|t| t.name == "feat").unwrap();
+        assert_eq!(feat.bump, Some(BumpLevel::Minor));
+        let fix = commit_types.iter().find(|t| t.name == "fix").unwrap();
+        assert_eq!(fix.bump, Some(BumpLevel::Patch));
+        let chore = commit_types.iter().find(|t| t.name == "chore").unwrap();
+        assert_eq!(chore.bump, None);
     }
 
     #[test]
-    fn resolve_package_overrides() {
-        let mut config = Config::default();
-        config.release.version_files = vec!["Cargo.toml".into()];
-        config.packages = vec![PackageConfig {
-            name: "cli".into(),
-            path: "crates/cli".into(),
-            tag_prefix: Some("cli-v".into()),
-            version_files: vec!["crates/cli/Cargo.toml".into()],
-            changelog: Some(ChangelogConfig {
-                file: Some("crates/cli/CHANGELOG.md".into()),
-                template: None,
-            }),
-            stage_files: vec!["crates/cli/Cargo.lock".into()],
-        }];
-
-        let resolved = config.resolve_package(&config.packages[0]);
-        assert_eq!(resolved.release.tag_prefix, "cli-v");
-        assert_eq!(
-            resolved.release.version_files,
-            vec!["crates/cli/Cargo.toml"]
-        );
-        assert_eq!(resolved.release.stage_files, vec!["crates/cli/Cargo.lock"]);
-    }
-
-    #[test]
-    fn find_package_not_found() {
-        let config = Config::default();
-        let err = config.find_package("nonexistent").unwrap_err();
-        assert!(err.to_string().contains("nonexistent"));
+    fn all_type_names() {
+        let types = CommitTypesConfig::default();
+        let names = types.all_type_names();
+        assert!(names.contains(&"feat"));
+        assert!(names.contains(&"fix"));
+        assert!(names.contains(&"chore"));
     }
 
     #[test]
     fn resolve_channel() {
-        let mut config = Config::default();
-        config.release.channels.insert(
-            "canary".into(),
-            ChannelConfig {
-                prerelease: Some("canary".into()),
-                ..Default::default()
-            },
-        );
-
-        let resolved = config.resolve_channel("canary").unwrap();
-        assert_eq!(resolved.release.prerelease.as_deref(), Some("canary"));
+        let config = Config::default();
+        let channel = config.resolve_channel("stable").unwrap();
+        assert!(channel.prerelease.is_none());
     }
 
     #[test]
@@ -658,23 +753,94 @@ mod tests {
     }
 
     #[test]
-    fn hook_event_roundtrip() {
-        let mut hooks = BTreeMap::new();
-        hooks.insert(HookEvent::PreRelease, vec!["cargo test".to_string()]);
-        let config = HooksConfig { hooks };
-        let yaml = serde_yaml_ng::to_string(&config).unwrap();
-        assert!(yaml.contains("pre_release"));
-        let parsed: HooksConfig = serde_yaml_ng::from_str(&yaml).unwrap();
-        assert!(parsed.hooks.contains_key(&HookEvent::PreRelease));
+    fn tag_prefix_root_package() {
+        let config = Config::default();
+        let pkg = &config.packages[0];
+        assert_eq!(config.tag_prefix_for(pkg), "v");
+    }
+
+    #[test]
+    fn tag_prefix_subpackage() {
+        let config = Config::default();
+        let pkg = PackageConfig {
+            path: "crates/core".into(),
+            ..Default::default()
+        };
+        assert_eq!(config.tag_prefix_for(&pkg), "core/v");
+    }
+
+    #[test]
+    fn tag_prefix_override() {
+        let config = Config::default();
+        let pkg = PackageConfig {
+            path: "crates/cli".into(),
+            tag_prefix: Some("cli-v".into()),
+            ..Default::default()
+        };
+        assert_eq!(config.tag_prefix_for(&pkg), "cli-v");
+    }
+
+    #[test]
+    fn validate_duplicate_types() {
+        let config = Config {
+            commit: CommitConfig {
+                types: CommitTypesConfig {
+                    minor: vec!["feat".into()],
+                    patch: vec!["feat".into()],
+                    none: vec![],
+                },
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_no_bump_types() {
+        let config = Config {
+            commit: CommitConfig {
+                types: CommitTypesConfig {
+                    minor: vec![],
+                    patch: vec![],
+                    none: vec!["chore".into()],
+                },
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_duplicate_channels() {
+        let config = Config {
+            channels: ChannelsConfig {
+                default: "stable".into(),
+                branch: "main".into(),
+                content: vec![
+                    ChannelConfig {
+                        name: "stable".into(),
+                        prerelease: None,
+                        draft: false,
+                    },
+                    ChannelConfig {
+                        name: "stable".into(),
+                        prerelease: None,
+                        draft: false,
+                    },
+                ],
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
     }
 
     #[test]
     fn default_template_parses() {
         let template = default_config_template(&[]);
         let config: Config = serde_yaml_ng::from_str(&template).unwrap();
-        assert_eq!(config.release.branches, vec!["main"]);
-        assert_eq!(config.release.tag_prefix, "v");
-        assert!(config.release.floating_tags);
+        assert_eq!(config.git.tag_prefix, "v");
+        assert!(config.git.floating_tag);
+        assert_eq!(config.channels.default, "stable");
     }
 
     #[test]
@@ -682,35 +848,48 @@ mod tests {
         let template = default_config_template(&["Cargo.toml".into(), "package.json".into()]);
         let config: Config = serde_yaml_ng::from_str(&template).unwrap();
         assert_eq!(
-            config.release.version_files,
+            config.packages[0].version_files,
             vec!["Cargo.toml", "package.json"]
         );
     }
 
     #[test]
-    fn bump_level_roundtrip() {
-        for (level, expected) in [
-            (BumpLevel::Major, "major"),
-            (BumpLevel::Minor, "minor"),
-            (BumpLevel::Patch, "patch"),
-        ] {
-            let yaml = serde_yaml_ng::to_string(&level).unwrap();
-            assert!(yaml.contains(expected));
-            let parsed: BumpLevel = serde_yaml_ng::from_str(&yaml).unwrap();
-            assert_eq!(parsed, level);
-        }
+    fn find_package_by_name_works() {
+        let config = Config {
+            packages: vec![
+                PackageConfig {
+                    path: "crates/core".into(),
+                    ..Default::default()
+                },
+                PackageConfig {
+                    path: "crates/cli".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let pkg = config.find_package_by_name("core").unwrap();
+        assert_eq!(pkg.path, "crates/core");
     }
 
     #[test]
-    fn versioning_mode_roundtrip() {
-        for (mode, label) in [
-            (VersioningMode::Independent, "independent"),
-            (VersioningMode::Fixed, "fixed"),
-        ] {
-            let yaml = serde_yaml_ng::to_string(&mode).unwrap();
-            assert!(yaml.contains(label));
-            let parsed: VersioningMode = serde_yaml_ng::from_str(&yaml).unwrap();
-            assert_eq!(parsed, mode);
-        }
+    fn collect_all_artifacts() {
+        let config = Config {
+            packages: vec![
+                PackageConfig {
+                    path: "crates/core".into(),
+                    artifacts: vec!["core-*".into()],
+                    ..Default::default()
+                },
+                PackageConfig {
+                    path: "crates/cli".into(),
+                    artifacts: vec!["cli-*".into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let artifacts = config.all_artifacts();
+        assert_eq!(artifacts, vec!["core-*", "cli-*"]);
     }
 }

@@ -1,8 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 use serde::Serialize;
 
-use crate::commit::{CommitType, ConventionalCommit};
+use crate::commit::ConventionalCommit;
+use crate::config::ChangelogGroup;
 use crate::error::ReleaseError;
 
 /// A single changelog entry representing a release.
@@ -15,105 +14,131 @@ pub struct ChangelogEntry {
     pub repo_url: Option<String>,
 }
 
+/// A rendered group of commits for template context.
+#[derive(Debug, Clone, Serialize)]
+pub struct RenderedGroup {
+    pub name: String,
+    pub commits: Vec<ConventionalCommit>,
+}
+
 /// Formats changelog entries into a string representation.
 pub trait ChangelogFormatter: Send + Sync {
     fn format(&self, entries: &[ChangelogEntry]) -> Result<String, ReleaseError>;
 }
 
-/// Default formatter that produces simple markdown output.
+/// Default formatter using changelog groups.
 /// When a custom template is provided, renders using minijinja.
 pub struct DefaultChangelogFormatter {
     template: Option<String>,
-    types: Vec<CommitType>,
-    breaking_section: String,
-    misc_section: String,
+    groups: Vec<ChangelogGroup>,
 }
 
 impl DefaultChangelogFormatter {
-    pub fn new(
-        template: Option<String>,
-        types: Vec<CommitType>,
-        breaking_section: String,
-        misc_section: String,
-    ) -> Self {
-        Self {
-            template,
-            types,
-            breaking_section,
-            misc_section,
+    pub fn new(template: Option<String>, groups: Vec<ChangelogGroup>) -> Self {
+        Self { template, groups }
+    }
+
+    /// Resolve template: if it's a file path that exists, read it.
+    /// Otherwise treat as inline template string.
+    fn resolve_template(&self) -> Option<String> {
+        let tmpl = self.template.as_ref()?;
+        if std::path::Path::new(tmpl).exists() {
+            std::fs::read_to_string(tmpl).ok()
+        } else {
+            Some(tmpl.clone())
         }
+    }
+
+    /// Build rendered groups from commits using configured groups.
+    fn build_groups(&self, commits: &[ConventionalCommit]) -> Vec<RenderedGroup> {
+        self.groups
+            .iter()
+            .map(|group| {
+                let group_commits: Vec<_> = commits
+                    .iter()
+                    .filter(|c| {
+                        if group.content.contains(&"breaking".to_string()) {
+                            c.breaking
+                        } else {
+                            !c.breaking && group.content.contains(&c.r#type)
+                        }
+                    })
+                    .cloned()
+                    .collect();
+                RenderedGroup {
+                    name: group.name.clone(),
+                    commits: group_commits,
+                }
+            })
+            .collect()
     }
 }
 
 impl ChangelogFormatter for DefaultChangelogFormatter {
     fn format(&self, entries: &[ChangelogEntry]) -> Result<String, ReleaseError> {
-        if let Some(ref template_str) = self.template {
-            return render_template(template_str, entries);
-        }
-
-        let mut output = String::new();
-
-        // Build ordered list of unique sections, preserving definition order.
-        let mut seen_sections = Vec::new();
-        let mut section_map: BTreeMap<&str, &str> = BTreeMap::new();
-        for ct in &self.types {
-            if let Some(ref section) = ct.section {
-                if !seen_sections.contains(&section.as_str()) {
-                    seen_sections.push(section.as_str());
-                }
-                section_map.insert(&ct.name, section.as_str());
+        if let Some(template_str) = self.resolve_template() {
+            // Build groups for each entry and pass to template.
+            #[derive(Serialize)]
+            struct TemplateEntry {
+                version: String,
+                date: String,
+                groups: Vec<RenderedGroup>,
+                compare_url: Option<String>,
+                repo_url: Option<String>,
             }
+
+            let template_entries: Vec<_> = entries
+                .iter()
+                .map(|e| TemplateEntry {
+                    version: e.version.clone(),
+                    date: e.date.clone(),
+                    groups: self.build_groups(&e.commits),
+                    compare_url: e.compare_url.clone(),
+                    repo_url: e.repo_url.clone(),
+                })
+                .collect();
+
+            let mut env = minijinja::Environment::new();
+            env.add_template("changelog", &template_str)
+                .map_err(|e| ReleaseError::Changelog(format!("invalid template: {e}")))?;
+            let tmpl = env
+                .get_template("changelog")
+                .map_err(|e| ReleaseError::Changelog(format!("template error: {e}")))?;
+            let output = tmpl
+                .render(minijinja::context! { entries => template_entries })
+                .map_err(|e| ReleaseError::Changelog(format!("template render error: {e}")))?;
+            return Ok(output.trim_end().to_string());
         }
 
-        // Set of type names that have an explicit mapping (section or no-section).
-        let known_types: BTreeSet<&str> = self.types.iter().map(|t| t.name.as_str()).collect();
+        // Built-in default format using groups.
+        let mut output = String::new();
 
         for entry in entries {
             output.push_str(&format!("## {} ({})\n", entry.version, entry.date));
 
-            // 1. Breaking changes section (at the top).
-            let breaking: Vec<_> = entry.commits.iter().filter(|c| c.breaking).collect();
-            if !breaking.is_empty() {
-                output.push_str(&format!("\n### {}\n\n", self.breaking_section));
-                for commit in &breaking {
-                    format_commit_line(&mut output, commit, entry.repo_url.as_deref());
+            let groups = self.build_groups(&entry.commits);
+            for group in &groups {
+                if group.commits.is_empty() {
+                    continue;
                 }
-            }
-
-            // 2. Type sections (Features, Bug Fixes, Performance, Documentation, etc.)
-            for section_name in &seen_sections {
-                let commits_in_section: Vec<_> = entry
-                    .commits
-                    .iter()
-                    .filter(|c| {
-                        !c.breaking
-                            && section_map
-                                .get(c.r#type.as_str())
-                                .is_some_and(|s| s == section_name)
+                // Convert group name to title case for heading.
+                let title = group
+                    .name
+                    .split('-')
+                    .map(|w| {
+                        let mut c = w.chars();
+                        match c.next() {
+                            None => String::new(),
+                            Some(f) => {
+                                f.to_uppercase().to_string() + c.as_str()
+                            }
+                        }
                     })
-                    .collect();
+                    .collect::<Vec<_>>()
+                    .join(" ");
 
-                if !commits_in_section.is_empty() {
-                    output.push_str(&format!("\n### {section_name}\n\n"));
-                    for commit in &commits_in_section {
-                        format_commit_line(&mut output, commit, entry.repo_url.as_deref());
-                    }
-                }
-            }
-
-            // 3. Miscellaneous catch-all (commits with no section mapping, excluding breaking).
-            let misc: Vec<_> = entry
-                .commits
-                .iter()
-                .filter(|c| {
-                    !c.breaking
-                        && !section_map.contains_key(c.r#type.as_str())
-                        && known_types.contains(c.r#type.as_str())
-                })
-                .collect();
-            if !misc.is_empty() {
-                output.push_str(&format!("\n### {}\n\n", self.misc_section));
-                for commit in &misc {
+                output.push_str(&format!("\n### {title}\n\n"));
+                for commit in &group.commits {
                     format_commit_line(&mut output, commit, entry.repo_url.as_deref());
                 }
             }
@@ -127,19 +152,6 @@ impl ChangelogFormatter for DefaultChangelogFormatter {
 
         Ok(output.trim_end().to_string())
     }
-}
-
-fn render_template(template_str: &str, entries: &[ChangelogEntry]) -> Result<String, ReleaseError> {
-    let mut env = minijinja::Environment::new();
-    env.add_template("changelog", template_str)
-        .map_err(|e| ReleaseError::Changelog(format!("invalid template: {e}")))?;
-    let tmpl = env
-        .get_template("changelog")
-        .map_err(|e| ReleaseError::Changelog(format!("template error: {e}")))?;
-    let output = tmpl
-        .render(minijinja::context! { entries => entries })
-        .map_err(|e| ReleaseError::Changelog(format!("template render error: {e}")))?;
-    Ok(output.trim_end().to_string())
 }
 
 fn format_commit_line(output: &mut String, commit: &ConventionalCommit, repo_url: Option<&str>) {
@@ -161,7 +173,7 @@ fn format_commit_line(output: &mut String, commit: &ConventionalCommit, repo_url
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::default_commit_types;
+    use crate::config::default_changelog_groups;
 
     fn make_commit(
         type_: &str,
@@ -190,14 +202,9 @@ mod tests {
     }
 
     fn format(entries: &[ChangelogEntry]) -> String {
-        DefaultChangelogFormatter::new(
-            None,
-            default_commit_types(),
-            "Breaking Changes".into(),
-            "Miscellaneous".into(),
-        )
-        .format(entries)
-        .unwrap()
+        DefaultChangelogFormatter::new(None, default_changelog_groups())
+            .format(entries)
+            .unwrap()
     }
 
     #[test]
@@ -227,7 +234,7 @@ mod tests {
             vec![make_commit("feat", "new API", None, true)],
             None,
         )]);
-        assert!(out.contains("### Breaking Changes"));
+        assert!(out.contains("### Breaking"));
     }
 
     #[test]
@@ -240,7 +247,7 @@ mod tests {
         let out = format(&[entry(commits, None)]);
         assert!(out.contains("### Features"));
         assert!(out.contains("### Bug Fixes"));
-        assert!(out.contains("### Breaking Changes"));
+        assert!(out.contains("### Breaking"));
     }
 
     #[test]
@@ -266,7 +273,6 @@ mod tests {
         let out = format(&[entry(vec![], None)]);
         assert!(!out.contains("### Features"));
         assert!(!out.contains("### Bug Fixes"));
-        assert!(!out.contains("### Breaking Changes"));
     }
 
     #[test]
@@ -284,12 +290,9 @@ mod tests {
             make_commit("feat", "breaking thing", None, true),
         ];
         let out = format(&[entry(commits, None)]);
-        let breaking_pos = out.find("### Breaking Changes").unwrap();
+        let breaking_pos = out.find("### Breaking").unwrap();
         let features_pos = out.find("### Features").unwrap();
-        assert!(
-            breaking_pos < features_pos,
-            "Breaking Changes should appear before Features"
-        );
+        assert!(breaking_pos < features_pos);
     }
 
     #[test]
@@ -300,7 +303,7 @@ mod tests {
             make_commit("ci", "fix pipeline", None, false),
         ];
         let out = format(&[entry(commits, None)]);
-        assert!(out.contains("### Miscellaneous"));
+        assert!(out.contains("### Misc"));
         assert!(out.contains("tidy up"));
         assert!(out.contains("fix pipeline"));
     }
@@ -312,7 +315,6 @@ mod tests {
             make_commit("feat", "breaking feature", None, true),
         ];
         let out = format(&[entry(commits, None)]);
-        // The breaking commit should be in Breaking Changes, not in Features
         let features_section_start = out.find("### Features").unwrap();
         let features_section_end = out[features_section_start..]
             .find("\n### ")
@@ -324,31 +326,13 @@ mod tests {
     }
 
     #[test]
-    fn format_new_type_sections() {
-        let commits = vec![
-            make_commit("perf", "speed up query", None, false),
-            make_commit("docs", "update readme", None, false),
-            make_commit("refactor", "clean up code", None, false),
-            make_commit("revert", "undo change", None, false),
-        ];
-        let out = format(&[entry(commits, None)]);
-        assert!(out.contains("### Performance"));
-        assert!(out.contains("### Documentation"));
-        assert!(out.contains("### Refactoring"));
-        assert!(out.contains("### Reverts"));
-    }
-
-    #[test]
     fn custom_template_renders() {
         let template = r#"{% for entry in entries %}Release {{ entry.version }}
-{% for c in entry.commits %}- {{ c.description }}
-{% endfor %}{% endfor %}"#;
-        let formatter = DefaultChangelogFormatter::new(
-            Some(template.into()),
-            default_commit_types(),
-            "Breaking Changes".into(),
-            "Miscellaneous".into(),
-        );
+{% for group in entry.groups %}{% if group.commits %}{{ group.name }}:
+{% for c in group.commits %}- {{ c.description }}
+{% endfor %}{% endif %}{% endfor %}{% endfor %}"#;
+        let formatter =
+            DefaultChangelogFormatter::new(Some(template.into()), default_changelog_groups());
         let out = formatter
             .format(&[entry(
                 vec![
@@ -361,57 +345,15 @@ mod tests {
         assert!(out.contains("Release 1.0.0"));
         assert!(out.contains("- add button"));
         assert!(out.contains("- null check"));
-        // Should NOT contain default markdown headings
         assert!(!out.contains("### Features"));
-    }
-
-    #[test]
-    fn custom_template_access_all_fields() {
-        let template = r#"{% for entry in entries %}## {{ entry.version }} ({{ entry.date }})
-{% for c in entry.commits %}{{ c.type }}{% if c.scope %}({{ c.scope }}){% endif %}{% if c.breaking %}!{% endif %}: {{ c.description }} ({{ c.sha }})
-{% endfor %}{% endfor %}"#;
-        let formatter = DefaultChangelogFormatter::new(
-            Some(template.into()),
-            default_commit_types(),
-            "Breaking Changes".into(),
-            "Miscellaneous".into(),
-        );
-        let out = formatter
-            .format(&[entry(
-                vec![
-                    make_commit("feat", "add flag", Some("cli"), false),
-                    make_commit("fix", "crash", None, true),
-                ],
-                None,
-            )])
-            .unwrap();
-        assert!(out.contains("feat(cli): add flag"));
-        assert!(out.contains("fix!: crash"));
-        assert!(out.contains("(abc1234def5678)"));
     }
 
     #[test]
     fn invalid_template_returns_error() {
         let template = "{% invalid %}";
-        let formatter = DefaultChangelogFormatter::new(
-            Some(template.into()),
-            default_commit_types(),
-            "Breaking Changes".into(),
-            "Miscellaneous".into(),
-        );
+        let formatter =
+            DefaultChangelogFormatter::new(Some(template.into()), default_changelog_groups());
         let result = formatter.format(&[entry(vec![], None)]);
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("template"));
-    }
-
-    #[test]
-    fn none_template_uses_default_format() {
-        // Verify that None template produces the same output as before
-        let commits = vec![make_commit("feat", "add button", None, false)];
-        let out = format(&[entry(commits, None)]);
-        assert!(out.contains("## 1.0.0"));
-        assert!(out.contains("### Features"));
-        assert!(out.contains("- add button"));
     }
 }

@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::changelog::{ChangelogEntry, ChangelogFormatter};
 use crate::commit::{CommitParser, ConventionalCommit, DefaultCommitClassifier};
-use crate::config::{Config, HookEvent};
+use crate::config::{Config, PackageConfig};
 use crate::error::ReleaseError;
 use crate::git::GitRepository;
 use crate::version::{BumpLevel, apply_bump, apply_prerelease_bump, determine_bump};
@@ -123,6 +123,10 @@ pub struct TrunkReleaseStrategy<G, V, C, F> {
     pub config: Config,
     /// When true, re-release the current tag if HEAD is at the latest tag.
     pub force: bool,
+    /// Pre-release identifier resolved from the active channel (None = stable).
+    pub prerelease_id: Option<String>,
+    /// Whether the GitHub release should be created as a draft.
+    pub draft: bool,
 }
 
 impl<G, V, C, F> TrunkReleaseStrategy<G, V, C, F>
@@ -136,7 +140,7 @@ where
         let today = today_string();
         let compare_url = match &plan.current_version {
             Some(v) => {
-                let base = format!("{}{v}", self.config.release.tag_prefix);
+                let base = format!("{}{v}", self.config.git.tag_prefix);
                 self.vcs
                     .compare_url(&base, &plan.tag_name)
                     .ok()
@@ -156,14 +160,14 @@ where
 
     /// Render the release name from the configured template, or fall back to the tag name.
     fn release_name(&self, plan: &ReleasePlan) -> String {
-        if let Some(ref template_str) = self.config.release.release_name_template {
+        if let Some(ref template_str) = self.config.vcs.github.release_name_template {
             let mut env = minijinja::Environment::new();
             if env.add_template("release_name", template_str).is_ok()
                 && let Ok(tmpl) = env.get_template("release_name")
                 && let Ok(rendered) = tmpl.render(minijinja::context! {
                     version => plan.next_version.to_string(),
                     tag_name => &plan.tag_name,
-                    tag_prefix => &self.config.release.tag_prefix,
+                    tag_prefix => &self.config.git.tag_prefix,
                 })
             {
                 return rendered;
@@ -171,6 +175,16 @@ where
             eprintln!("warning: invalid release_name_template, falling back to tag name");
         }
         plan.tag_name.clone()
+    }
+
+    /// Return the active package for a single-package release (the root package or the only one).
+    /// Returns the root package (".") if present, otherwise the first package.
+    fn active_package(&self) -> Option<&PackageConfig> {
+        self.config
+            .packages
+            .iter()
+            .find(|p| p.path == ".")
+            .or_else(|| self.config.packages.first())
     }
 }
 
@@ -182,11 +196,11 @@ where
     F: ChangelogFormatter,
 {
     fn plan(&self) -> Result<ReleasePlan, ReleaseError> {
-        let is_prerelease = self.config.release.prerelease.is_some();
+        let is_prerelease = self.prerelease_id.is_some();
 
         // For stable releases, find the latest stable tag (skip pre-release tags).
         // For pre-releases, find the latest tag of any kind to determine commits since.
-        let all_tags = self.git.all_tags(&self.config.release.tag_prefix)?;
+        let all_tags = self.git.all_tags(&self.config.git.tag_prefix)?;
         let latest_stable = all_tags.iter().rev().find(|t| t.version.pre.is_empty());
         let latest_any = all_tags.last();
 
@@ -202,11 +216,20 @@ where
             None => (None, None),
         };
 
-        let raw_commits = if let Some(ref path) = self.config.release.path_filter {
+        let default_pkg = PackageConfig::default();
+        let pkg = self.active_package().unwrap_or(&default_pkg);
+        let path_filter = if pkg.path != "." {
+            Some(pkg.path.as_str())
+        } else {
+            None
+        };
+
+        let raw_commits = if let Some(path) = path_filter {
             self.git.commits_since_in_path(from_sha, path)?
         } else {
             self.git.commits_since(from_sha)?
         };
+
         if raw_commits.is_empty() {
             // Force mode: re-release if HEAD is exactly at the latest tag
             if self.force
@@ -214,10 +237,10 @@ where
             {
                 let head = self.git.head_sha()?;
                 if head == info.sha {
-                    let floating_tag_name = if self.config.release.floating_tags {
+                    let floating_tag_name = if self.config.git.floating_tag {
                         Some(format!(
                             "{}{}",
-                            self.config.release.tag_prefix, info.version.major
+                            self.config.git.tag_prefix, info.version.major
                         ))
                     } else {
                         None
@@ -246,10 +269,8 @@ where
             .filter_map(|c| self.parser.parse(c).ok())
             .collect();
 
-        let classifier = DefaultCommitClassifier::new(
-            self.config.commit.types.clone(),
-            self.config.commit.pattern.clone(),
-        );
+        let classifier =
+            DefaultCommitClassifier::new(self.config.commit.types.into_commit_types());
         let tag_for_err = tag_info
             .map(|i| i.name.clone())
             .unwrap_or_else(|| "(none)".into());
@@ -276,18 +297,20 @@ where
         };
 
         // v0 protection: downshift Major → Minor when version is 0.x.y
-        // to prevent accidentally leaving v0. Use --force to bump to v1.
-        let bump = if base_version.major == 0 && bump == BumpLevel::Major && !self.force {
-            eprintln!(
-                "v0 protection: breaking change detected at v{base_version}, \
-                 downshifting major → minor (use --force to bump to v1)"
-            );
-            BumpLevel::Minor
-        } else {
-            bump
-        };
+        // to prevent accidentally bumping to v1. Disable with git.v0_protection: false.
+        let bump =
+            if base_version.major == 0 && bump == BumpLevel::Major && self.config.git.v0_protection
+            {
+                eprintln!(
+                    "v0 protection: breaking change detected at v{base_version}, \
+                     downshifting major → minor (set git.v0_protection: false to bump to v1)"
+                );
+                BumpLevel::Minor
+            } else {
+                bump
+            };
 
-        let next_version = if let Some(ref prerelease_id) = self.config.release.prerelease {
+        let next_version = if let Some(ref prerelease_id) = self.prerelease_id {
             let existing_versions: Vec<Version> =
                 all_tags.iter().map(|t| t.version.clone()).collect();
             apply_prerelease_bump(&base_version, bump, prerelease_id, &existing_versions)
@@ -295,13 +318,13 @@ where
             apply_bump(&base_version, bump)
         };
 
-        let tag_name = format!("{}{next_version}", self.config.release.tag_prefix);
+        let tag_name = format!("{}{next_version}", self.config.git.tag_prefix);
 
         // Don't update floating tags for pre-releases
-        let floating_tag_name = if self.config.release.floating_tags && !is_prerelease {
+        let floating_tag_name = if self.config.git.floating_tag && !is_prerelease {
             Some(format!(
                 "{}{}",
-                self.config.release.tag_prefix, next_version.major
+                self.config.git.tag_prefix, next_version.major
             ))
         } else {
             None
@@ -326,7 +349,11 @@ where
         let env_refs: Vec<(&str, &str)> =
             env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         if !dry_run {
-            crate::hooks::run_event(&self.config.hooks, HookEvent::PreRelease, &env_refs)?;
+            if let Some(pkg) = self.active_package() {
+                if let Some(ref hooks) = pkg.hooks {
+                    crate::hooks::run_pre_release(hooks, &env_refs)?;
+                }
+            }
         }
 
         // 2. Generate changelog
@@ -345,7 +372,11 @@ where
 
         // 6. Run post_release hooks
         if !dry_run {
-            crate::hooks::run_event(&self.config.hooks, HookEvent::PostRelease, &env_refs)?;
+            if let Some(pkg) = self.active_package() {
+                if let Some(ref hooks) = pkg.hooks {
+                    crate::hooks::run_post_release(hooks, &env_refs)?;
+                }
+            }
         }
 
         if dry_run {
@@ -379,15 +410,22 @@ where
         changelog_body: &str,
         dry_run: bool,
     ) -> Result<(), ReleaseError> {
+        let default_pkg = PackageConfig::default();
+        let pkg = self.active_package().unwrap_or(&default_pkg);
+        let version_files = self.config.version_files_for(pkg);
+        let version_files_strict = pkg.version_files_strict;
+        let stage_files = &pkg.stage_files;
+        let changelog_file = self.config.changelog_for(pkg).file.clone();
+
         if dry_run {
-            for file in &self.config.release.version_files {
+            for file in &version_files {
                 let filename = Path::new(file)
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or_default();
                 if is_supported_version_file(filename) {
                     eprintln!("[dry-run] Would bump version in: {file}");
-                } else if self.config.release.version_files_strict {
+                } else if version_files_strict {
                     return Err(ReleaseError::VersionBump(format!(
                         "unsupported version file: {filename}"
                     )));
@@ -395,60 +433,28 @@ where
                     eprintln!("[dry-run] warning: unsupported version file, would skip: {file}");
                 }
             }
-            if !self.config.release.stage_files.is_empty() {
+            if !stage_files.is_empty() {
                 eprintln!(
                     "[dry-run] Would stage additional files: {}",
-                    self.config.release.stage_files.join(", ")
+                    stage_files.join(", ")
                 );
             }
             return Ok(());
         }
 
-        // Snapshot files before mutation (for rollback on failure)
-        let mut file_snapshots: Vec<(String, Option<String>)> = Vec::new();
-        for file in &self.config.release.version_files {
-            let path = Path::new(file);
-            let contents = if path.exists() {
-                Some(
-                    fs::read_to_string(path)
-                        .map_err(|e| ReleaseError::VersionBump(e.to_string()))?,
-                )
-            } else {
-                None
-            };
-            file_snapshots.push((file.clone(), contents));
-        }
-        if let Some(ref changelog_file) = self.config.release.changelog.file {
-            let path = Path::new(changelog_file);
-            let contents = if path.exists() {
-                Some(fs::read_to_string(path).map_err(|e| ReleaseError::Changelog(e.to_string()))?)
-            } else {
-                None
-            };
-            file_snapshots.push((changelog_file.clone(), contents));
-        }
-
-        // Run mutations with rollback on failure
-        let files_to_stage = match self.execute_mutations(version_str, changelog_body) {
-            Ok(files) => files,
-            Err(e) => {
-                eprintln!("error during release, restoring files...");
-                restore_snapshots(&file_snapshots);
-                return Err(e);
-            }
-        };
+        let files_to_stage =
+            self.execute_mutations(version_str, changelog_body, &version_files, &changelog_file, version_files_strict)?;
 
         // Resolve stage_files globs and collect all paths to stage
         let mut paths_to_stage: Vec<String> = Vec::new();
-        if let Some(ref changelog_file) = self.config.release.changelog.file {
-            paths_to_stage.push(changelog_file.clone());
+        if let Some(ref cf) = changelog_file {
+            paths_to_stage.push(cf.clone());
         }
         for file in &files_to_stage {
             paths_to_stage.push(file.clone());
         }
-        if !self.config.release.stage_files.is_empty() {
-            let extra =
-                resolve_globs(&self.config.release.stage_files).map_err(ReleaseError::Config)?;
+        if !stage_files.is_empty() {
+            let extra = resolve_globs(stage_files).map_err(ReleaseError::Config)?;
             paths_to_stage.extend(extra);
         }
         if !paths_to_stage.is_empty() {
@@ -466,7 +472,7 @@ where
         dry_run: bool,
     ) -> Result<(), ReleaseError> {
         if dry_run {
-            let sign_label = if self.config.release.sign_tags {
+            let sign_label = if self.config.git.sign_tags {
                 " (signed)"
             } else {
                 ""
@@ -484,7 +490,7 @@ where
         if !self.git.tag_exists(&plan.tag_name)? {
             let tag_message = format!("{}\n\n{}", plan.tag_name, changelog_body);
             self.git
-                .create_tag(&plan.tag_name, &tag_message, self.config.release.sign_tags)?;
+                .create_tag(&plan.tag_name, &tag_message, self.config.git.sign_tags)?;
         }
 
         // Push commit (safe to re-run — no-op if up to date)
@@ -510,11 +516,7 @@ where
         dry_run: bool,
     ) -> Result<(), ReleaseError> {
         if dry_run {
-            let draft_label = if self.config.release.draft {
-                " (draft)"
-            } else {
-                ""
-            };
+            let draft_label = if self.draft { " (draft)" } else { "" };
             let release_name = self.release_name(plan);
             eprintln!(
                 "[dry-run] Would create GitHub release \"{release_name}\" for {}{draft_label}",
@@ -530,7 +532,7 @@ where
                 &release_name,
                 changelog_body,
                 plan.prerelease,
-                self.config.release.draft,
+                self.draft,
             )?;
         } else {
             self.vcs.create_release(
@@ -538,18 +540,19 @@ where
                 &release_name,
                 changelog_body,
                 plan.prerelease,
-                self.config.release.draft,
+                self.draft,
             )?;
         }
         Ok(())
     }
 
     fn upload_artifacts(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError> {
-        if self.config.release.artifacts.is_empty() {
+        let all_artifacts = self.config.all_artifacts();
+        if all_artifacts.is_empty() {
             return Ok(());
         }
 
-        let resolved = resolve_globs(&self.config.release.artifacts).map_err(ReleaseError::Vcs)?;
+        let resolved = resolve_globs(&all_artifacts).map_err(ReleaseError::Vcs)?;
 
         if dry_run {
             if resolved.is_empty() {
@@ -593,14 +596,17 @@ where
     }
 
     /// Bump version files and write changelog.
-    /// Returns the list of bumped files on success. On error the caller restores snapshots.
+    /// Returns the list of bumped files on success.
     fn execute_mutations(
         &self,
         version_str: &str,
         changelog_body: &str,
+        version_files: &[String],
+        changelog_file: &Option<String>,
+        version_files_strict: bool,
     ) -> Result<Vec<String>, ReleaseError> {
         let mut files_to_stage: Vec<String> = Vec::new();
-        for file in &self.config.release.version_files {
+        for file in version_files {
             match bump_version_file(Path::new(file), version_str) {
                 Ok(extra) => {
                     files_to_stage.push(file.clone());
@@ -608,7 +614,7 @@ where
                         files_to_stage.push(extra_path.to_string_lossy().into_owned());
                     }
                 }
-                Err(e) if !self.config.release.version_files_strict => {
+                Err(e) if !version_files_strict => {
                     eprintln!("warning: {e} — skipping {file}");
                 }
                 Err(e) => return Err(e),
@@ -624,8 +630,8 @@ where
         }
 
         // Write changelog file if configured
-        if let Some(ref changelog_file) = self.config.release.changelog.file {
-            let path = Path::new(changelog_file);
+        if let Some(cf) = changelog_file {
+            let path = Path::new(cf);
             let existing = if path.exists() {
                 fs::read_to_string(path).map_err(|e| ReleaseError::Changelog(e.to_string()))?
             } else {
@@ -646,28 +652,6 @@ where
         }
 
         Ok(files_to_stage)
-    }
-}
-
-/// Restore file contents from snapshots (best-effort, used during rollback).
-fn restore_snapshots(snapshots: &[(String, Option<String>)]) {
-    for (file, contents) in snapshots {
-        let path = Path::new(file);
-        match contents {
-            Some(data) => {
-                if let Err(e) = fs::write(path, data) {
-                    eprintln!("warning: failed to restore {file}: {e}");
-                }
-            }
-            None => {
-                // File didn't exist before — remove it
-                if path.exists()
-                    && let Err(e) = fs::remove_file(path)
-                {
-                    eprintln!("warning: failed to remove {file}: {e}");
-                }
-            }
-        }
     }
 }
 
@@ -720,8 +704,10 @@ mod tests {
 
     use super::*;
     use crate::changelog::DefaultChangelogFormatter;
-    use crate::commit::{Commit, DefaultCommitParser};
-    use crate::config::{CommitConfig, Config, HooksConfig, ReleaseConfig};
+    use crate::commit::{Commit, TypedCommitParser};
+    use crate::config::{
+        ChangelogConfig, Config, GitConfig, PackageConfig, default_changelog_groups,
+    };
     use crate::git::{GitRepository, TagInfo};
 
     // --- Fakes ---
@@ -929,15 +915,46 @@ mod tests {
 
     // --- Helpers ---
 
-    /// Config with changelog file disabled so tests don't pollute the real CHANGELOG.md.
-    /// Use instead of `ReleaseConfig::default()` in tests that call `.execute()`.
-    fn test_config() -> ReleaseConfig {
-        ReleaseConfig {
-            changelog: crate::config::ChangelogConfig {
+    type TestStrategy =
+        TrunkReleaseStrategy<FakeGit, FakeVcs, TypedCommitParser, DefaultChangelogFormatter>;
+
+    /// Build a Config with changelog file disabled so tests don't pollute the real CHANGELOG.md.
+    fn test_config() -> Config {
+        Config {
+            changelog: ChangelogConfig {
                 file: None,
                 ..Default::default()
             },
             ..Default::default()
+        }
+    }
+
+    /// Build a Config with custom floating_tag / tag_prefix settings.
+    fn config_with_git(git: GitConfig) -> Config {
+        Config {
+            git,
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn make_strategy(
+        tags: Vec<TagInfo>,
+        commits: Vec<Commit>,
+        config: Config,
+    ) -> TestStrategy {
+        TrunkReleaseStrategy {
+            git: FakeGit::new(tags, commits),
+            vcs: FakeVcs::new(),
+            parser: TypedCommitParser::default(),
+            formatter: DefaultChangelogFormatter::new(None, default_changelog_groups()),
+            config,
+            force: false,
+            prerelease_id: None,
+            draft: false,
         }
     }
 
@@ -948,36 +965,11 @@ mod tests {
         }
     }
 
-    fn make_strategy(
-        tags: Vec<TagInfo>,
-        commits: Vec<Commit>,
-        release_config: ReleaseConfig,
-    ) -> TrunkReleaseStrategy<FakeGit, FakeVcs, DefaultCommitParser, DefaultChangelogFormatter>
-    {
-        let config = Config {
-            commit: CommitConfig::default(),
-            release: release_config,
-            hooks: HooksConfig::default(),
-            packages: vec![],
-        };
-        let types = config.commit.types.clone();
-        let breaking_section = config.commit.breaking_section.clone();
-        let misc_section = config.commit.misc_section.clone();
-        TrunkReleaseStrategy {
-            git: FakeGit::new(tags, commits),
-            vcs: FakeVcs::new(),
-            parser: DefaultCommitParser,
-            formatter: DefaultChangelogFormatter::new(None, types, breaking_section, misc_section),
-            config,
-            force: false,
-        }
-    }
-
     // --- plan() tests ---
 
     #[test]
     fn plan_no_commits_returns_error() {
-        let s = make_strategy(vec![], vec![], ReleaseConfig::default());
+        let s = make_strategy(vec![], vec![], Config::default());
         let err = s.plan().unwrap_err();
         assert!(matches!(err, ReleaseError::NoCommits { .. }));
     }
@@ -987,7 +979,7 @@ mod tests {
         let s = make_strategy(
             vec![],
             vec![raw_commit("chore: tidy up")],
-            ReleaseConfig::default(),
+            Config::default(),
         );
         let err = s.plan().unwrap_err();
         assert!(matches!(err, ReleaseError::NoBump { .. }));
@@ -1003,7 +995,7 @@ mod tests {
         let mut s = make_strategy(
             vec![tag],
             vec![raw_commit("chore: rename package")],
-            ReleaseConfig::default(),
+            Config::default(),
         );
         s.force = true;
         let plan = s.plan().unwrap();
@@ -1016,7 +1008,7 @@ mod tests {
         let s = make_strategy(
             vec![],
             vec![raw_commit("feat: initial feature")],
-            ReleaseConfig::default(),
+            Config::default(),
         );
         let plan = s.plan().unwrap();
         assert_eq!(plan.next_version, Version::new(0, 1, 0));
@@ -1034,7 +1026,7 @@ mod tests {
         let s = make_strategy(
             vec![tag],
             vec![raw_commit("fix: patch bug")],
-            ReleaseConfig::default(),
+            Config::default(),
         );
         let plan = s.plan().unwrap();
         assert_eq!(plan.next_version, Version::new(1, 2, 4));
@@ -1050,7 +1042,7 @@ mod tests {
         let s = make_strategy(
             vec![tag],
             vec![raw_commit("feat!: breaking change")],
-            ReleaseConfig::default(),
+            Config::default(),
         );
         let plan = s.plan().unwrap();
         assert_eq!(plan.next_version, Version::new(2, 0, 0));
@@ -1066,7 +1058,7 @@ mod tests {
         let s = make_strategy(
             vec![tag],
             vec![raw_commit("feat!: breaking change")],
-            ReleaseConfig::default(),
+            Config::default(),
         );
         let plan = s.plan().unwrap();
         // v0 protection: Major → Minor, so 0.5.0 → 0.6.0 (not 1.0.0)
@@ -1075,20 +1067,21 @@ mod tests {
     }
 
     #[test]
-    fn plan_v0_breaking_with_force_bumps_major() {
+    fn plan_v0_breaking_with_protection_disabled_bumps_major() {
         let tag = TagInfo {
             name: "v0.5.0".into(),
             version: Version::new(0, 5, 0),
             sha: "c".repeat(40),
         };
-        let mut s = make_strategy(
+        let mut config = Config::default();
+        config.git.v0_protection = false;
+        let s = make_strategy(
             vec![tag],
             vec![raw_commit("feat!: breaking change")],
-            ReleaseConfig::default(),
+            config,
         );
-        s.force = true;
         let plan = s.plan().unwrap();
-        // --force bypasses v0 protection
+        // v0_protection: false allows bumping to v1
         assert_eq!(plan.next_version, Version::new(1, 0, 0));
         assert_eq!(plan.bump, BumpLevel::Major);
     }
@@ -1103,7 +1096,7 @@ mod tests {
         let s = make_strategy(
             vec![tag],
             vec![raw_commit("feat: new feature")],
-            ReleaseConfig::default(),
+            Config::default(),
         );
         let plan = s.plan().unwrap();
         // Non-breaking feat in v0 stays as minor bump
@@ -1121,7 +1114,7 @@ mod tests {
         let s = make_strategy(
             vec![tag],
             vec![raw_commit("fix: bug fix")],
-            ReleaseConfig::default(),
+            Config::default(),
         );
         let plan = s.plan().unwrap();
         // Fix in v0 stays as patch
@@ -1168,11 +1161,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let changelog_path = dir.path().join("CHANGELOG.md");
 
-        let config = ReleaseConfig {
-            changelog: crate::config::ChangelogConfig {
+        // Use the temp dir as the package path so auto-detection finds no version files.
+        let config = Config {
+            changelog: ChangelogConfig {
                 file: Some(changelog_path.to_str().unwrap().to_string()),
                 ..Default::default()
             },
+            packages: vec![PackageConfig {
+                path: dir.path().to_str().unwrap().to_string(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
 
@@ -1274,9 +1272,17 @@ mod tests {
         )
         .unwrap();
 
-        let config = ReleaseConfig {
-            version_files: vec![cargo_path.to_str().unwrap().to_string()],
-            ..test_config()
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                version_files: vec![cargo_path.to_str().unwrap().to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1309,12 +1315,16 @@ mod tests {
 
         let changelog_path = dir.path().join("CHANGELOG.md");
 
-        let config = ReleaseConfig {
-            changelog: crate::config::ChangelogConfig {
+        let config = Config {
+            changelog: ChangelogConfig {
                 file: Some(changelog_path.to_str().unwrap().to_string()),
                 ..Default::default()
             },
-            version_files: vec![cargo_path.to_str().unwrap().to_string()],
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                version_files: vec![cargo_path.to_str().unwrap().to_string()],
+                ..Default::default()
+            }],
             ..Default::default()
         };
 
@@ -1345,12 +1355,20 @@ mod tests {
         std::fs::write(dir.path().join("app.tar.gz"), "fake tarball").unwrap();
         std::fs::write(dir.path().join("app.zip"), "fake zip").unwrap();
 
-        let config = ReleaseConfig {
-            artifacts: vec![
-                dir.path().join("*.tar.gz").to_str().unwrap().to_string(),
-                dir.path().join("*.zip").to_str().unwrap().to_string(),
-            ],
-            ..test_config()
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                artifacts: vec![
+                    dir.path().join("*.tar.gz").to_str().unwrap().to_string(),
+                    dir.path().join("*.zip").to_str().unwrap().to_string(),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1370,9 +1388,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("app.tar.gz"), "fake tarball").unwrap();
 
-        let config = ReleaseConfig {
-            artifacts: vec![dir.path().join("*.tar.gz").to_str().unwrap().to_string()],
-            ..test_config()
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                artifacts: vec![dir.path().join("*.tar.gz").to_str().unwrap().to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
         };
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
@@ -1428,10 +1454,10 @@ mod tests {
             version: Version::new(3, 2, 0),
             sha: "d".repeat(40),
         };
-        let config = ReleaseConfig {
-            floating_tags: true,
+        let config = config_with_git(GitConfig {
+            floating_tag: true,
             ..Default::default()
-        };
+        });
 
         let s = make_strategy(vec![tag], vec![raw_commit("fix: patch")], config);
         let plan = s.plan().unwrap();
@@ -1444,10 +1470,10 @@ mod tests {
         let s = make_strategy(
             vec![],
             vec![raw_commit("feat: something")],
-            ReleaseConfig {
-                floating_tags: false,
+            config_with_git(GitConfig {
+                floating_tag: false,
                 ..Default::default()
-            },
+            }),
         );
         let plan = s.plan().unwrap();
         assert!(plan.floating_tag_name.is_none());
@@ -1460,11 +1486,11 @@ mod tests {
             version: Version::new(2, 5, 0),
             sha: "e".repeat(40),
         };
-        let config = ReleaseConfig {
-            floating_tags: true,
+        let config = config_with_git(GitConfig {
+            floating_tag: true,
             tag_prefix: "release-".into(),
             ..Default::default()
-        };
+        });
 
         let s = make_strategy(vec![tag], vec![raw_commit("fix: patch")], config);
         let plan = s.plan().unwrap();
@@ -1473,10 +1499,10 @@ mod tests {
 
     #[test]
     fn execute_floating_tags_force_create_and_push() {
-        let config = ReleaseConfig {
-            floating_tags: true,
-            ..test_config()
-        };
+        let config = config_with_git(GitConfig {
+            floating_tag: true,
+            ..Default::default()
+        });
 
         let tag = TagInfo {
             name: "v1.2.3".into(),
@@ -1498,10 +1524,10 @@ mod tests {
         let s = make_strategy(
             vec![],
             vec![raw_commit("feat: something")],
-            ReleaseConfig {
-                floating_tags: false,
-                ..test_config()
-            },
+            config_with_git(GitConfig {
+                floating_tag: false,
+                ..Default::default()
+            }),
         );
         let plan = s.plan().unwrap();
         assert!(plan.floating_tag_name.is_none());
@@ -1514,10 +1540,10 @@ mod tests {
 
     #[test]
     fn execute_floating_tags_dry_run_no_side_effects() {
-        let config = ReleaseConfig {
-            floating_tags: true,
-            ..test_config()
-        };
+        let config = config_with_git(GitConfig {
+            floating_tag: true,
+            ..Default::default()
+        });
 
         let tag = TagInfo {
             name: "v2.0.0".into(),
@@ -1536,10 +1562,10 @@ mod tests {
 
     #[test]
     fn execute_floating_tags_idempotent() {
-        let config = ReleaseConfig {
-            floating_tags: true,
-            ..test_config()
-        };
+        let config = config_with_git(GitConfig {
+            floating_tag: true,
+            ..Default::default()
+        });
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
         let plan = s.plan().unwrap();
@@ -1563,7 +1589,7 @@ mod tests {
             version: Version::new(1, 2, 3),
             sha: "a".repeat(40),
         };
-        let mut s = make_strategy(vec![tag], vec![], ReleaseConfig::default());
+        let mut s = make_strategy(vec![tag], vec![], Config::default());
         // HEAD == tag SHA, and no new commits
         s.git.head = "a".repeat(40);
         s.force = true;
@@ -1582,7 +1608,7 @@ mod tests {
             version: Version::new(1, 2, 3),
             sha: "a".repeat(40),
         };
-        let mut s = make_strategy(vec![tag], vec![], ReleaseConfig::default());
+        let mut s = make_strategy(vec![tag], vec![], Config::default());
         // HEAD != tag SHA
         s.git.head = "b".repeat(40);
         s.force = true;

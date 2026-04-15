@@ -5,7 +5,8 @@ use semver::Version;
 use crate::commit::{CommitClassifier, ConventionalCommit};
 
 /// The kind of version bump to apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BumpLevel {
     Patch,
     Minor,

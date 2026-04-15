@@ -59,7 +59,7 @@ The installer automatically adds `~/.local/bin` to your `PATH` in your shell pro
 ### GitHub Action (recommended)
 
 ```yaml
-- uses: urmzd/sr@v6
+- uses: urmzd/sr@v7
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -81,13 +81,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v6
+      - uses: urmzd/sr@v7
 ```
 
 Dry-run on pull requests:
 
 ```yaml
-      - uses: urmzd/sr@v6
+      - uses: urmzd/sr@v7
         with:
           dry-run: "true"
 ```
@@ -95,7 +95,7 @@ Dry-run on pull requests:
 Use outputs in subsequent steps:
 
 ```yaml
-      - uses: urmzd/sr@v6
+      - uses: urmzd/sr@v7
         id: sr
       - if: steps.sr.outputs.released == 'true'
         run: echo "Released ${{ steps.sr.outputs.version }}"
@@ -104,7 +104,7 @@ Use outputs in subsequent steps:
 Verify the downloaded sr binary with a SHA256 checksum:
 
 ```yaml
-      - uses: urmzd/sr@v6
+      - uses: urmzd/sr@v7
         with:
           sha256: "abc123..."
 ```
@@ -140,7 +140,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v6
+      - uses: urmzd/sr@v7
         with:
           force: ${{ github.event.inputs.force || 'false' }}
 ```
@@ -292,32 +292,31 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - uses: urmzd/sr@v6
+      - uses: urmzd/sr@v7
         with:
           github-token: ${{ steps.app-token.outputs.token }}
 ```
 
 ## Lifecycle Hooks
 
-sr runs hooks at key points in the release lifecycle. Each hook event maps to a list of shell commands in `sr.yaml`:
+sr runs per-package hooks at key points in the release lifecycle. Each hook event is configured under `packages[].hooks` in `sr.yaml`:
 
 ```yaml
-hooks:
-  pre_commit:
-    - "cargo fmt --check"
-    - "cargo clippy --workspace -- -D warnings"
-  pre_release:
-    - "cargo test --workspace"
-  post_release:
-    - "./scripts/notify-slack.sh"
+packages:
+  - path: .
+    hooks:
+      pre_release:
+        - "cargo test --workspace"
+      post_release:
+        - "./scripts/notify-slack.sh"
 ```
 
 **Available events:**
 
 | Event | When it runs |
 |-------|-------------|
-| `pre_release` | Before `sr release` starts (validation, tests) |
-| `post_release` | After `sr release` completes (notifications, deploys) |
+| `pre_release` | After version files are bumped, before git commit/tag (e.g. build with bumped versions) |
+| `post_release` | After GitHub release and artifact upload (e.g. publish to registry) |
 
 Release hooks receive `SR_VERSION` and `SR_TAG` environment variables.
 
@@ -330,7 +329,7 @@ Release hooks receive `SR_VERSION` and `SR_TAG` environment variables.
 Use the action outputs to run steps conditionally:
 
 ```yaml
-- uses: urmzd/sr@v6
+- uses: urmzd/sr@v7
   id: sr
 - if: steps.sr.outputs.released == 'true'
   run: ./deploy.sh ${{ steps.sr.outputs.version }}
@@ -387,7 +386,7 @@ All diagnostic messages go to stderr, so stdout is always clean JSON (or empty o
 | `sr init` | Create default config file (`sr.yaml`) |
 | `sr completions` | Generate shell completions (bash, zsh, fish, powershell, elvish) |
 | `sr update` | Update sr to the latest version |
-| `sr migrate` | Show migration guide to sr 5.x |
+| `sr migrate` | Show migration guide to the latest sr version |
 
 ### Common flags
 
@@ -437,130 +436,164 @@ Running `sr init` generates a fully-commented `sr.yaml` with every available opt
 
 ### Configuration reference
 
-The config is grouped into three sections — `commit`, `release`, and `hooks`:
+The config has 6 top-level sections — `git`, `commit`, `changelog`, `channels`, `vcs`, and `packages`:
+
+#### `git`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `git.tag_prefix` | `string` | `"v"` | Prefix for git tags (e.g. `v1.0.0`) |
+| `git.floating_tag` | `bool` | `true` | Create floating major version tags (e.g. `v3` always points to the latest `v3.x.x` release) |
+| `git.sign_tags` | `bool` | `false` | Sign annotated tags with GPG/SSH |
+| `git.v0_protection` | `bool` | `true` | Prevent a breaking change from bumping `0.x` to `1.0.0` — stays at `0.x` |
 
 #### `commit`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `commit.pattern` | `string` | See below | Regex for parsing commit messages (must use named groups: `type`, `scope`, `breaking`, `description`) |
-| `commit.breaking_section` | `string` | `"Breaking Changes"` | Changelog section heading for breaking changes |
-| `commit.misc_section` | `string` | `"Miscellaneous"` | Changelog section heading for commit types without an explicit section |
-| `commit.types` | `CommitType[]` | See below | Commit type definitions (name, bump level, changelog section) |
+| `commit.types` | `object` | See below | Commit types grouped by bump level: `minor`, `patch`, `none` |
+| `commit.types.minor` | `string[]` | `["feat"]` | Types that trigger a minor bump |
+| `commit.types.patch` | `string[]` | `["fix", "perf", "refactor"]` | Types that trigger a patch bump |
+| `commit.types.none` | `string[]` | `["docs", "revert", "chore", "ci", "test", "build", "style"]` | Types that do not trigger a release |
 
-#### `release`
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `release.branches` | `string[]` | `["main"]` | Branches that trigger releases |
-| `release.tag_prefix` | `string` | `"v"` | Prefix for git tags (e.g. `v1.0.0`) |
-| `release.changelog.file` | `string?` | `"CHANGELOG.md"` | Path to the changelog file. Set to `null` or omit to skip changelog generation |
-| `release.changelog.template` | `string?` | `null` | Custom minijinja template for changelog rendering |
-| `release.version_files` | `string[]` | `[]` | Manifest files to bump (auto-detected if empty) |
-| `release.version_files_strict` | `bool` | `false` | Fail the release if any version file is unsupported |
-| `release.artifacts` | `string[]` | `[]` | Glob patterns for files to upload to the GitHub release |
-| `release.floating_tags` | `bool` | `true` | Create floating major version tags (e.g. `v3` always points to the latest `v3.x.x` release) |
-| `release.stage_files` | `string[]` | `[]` | Additional file globs to stage in the release commit (e.g. `["Cargo.lock"]`) |
-| `release.prerelease` | `string?` | `null` | Pre-release identifier (e.g. `"alpha"`, `"rc"`). Produces versions like `X.Y.Z-<id>.N` |
-| `release.sign_tags` | `bool` | `false` | Sign annotated tags with GPG/SSH |
-| `release.draft` | `bool` | `false` | Create GitHub releases as drafts |
-| `release.release_name_template` | `string?` | `null` | Minijinja template for the GitHub release name. Variables: `version`, `tag_name`, `tag_prefix` |
-| `release.versioning` | `string` | `"independent"` | Monorepo versioning: `"independent"` (per-package) or `"fixed"` (all packages share one version) |
-| `release.channels` | `map<string, ChannelConfig>` | `{}` | Named release channels. See [Release channels](#release-channels) |
-| `release.default_channel` | `string?` | `null` | Default channel for `sr release` when no `--channel` flag given |
-
-#### `hooks`
+#### `changelog`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `hooks` | `map<HookEvent, string[]>` | `{}` | Lifecycle hooks — shell commands keyed by event. See [Lifecycle hooks](#lifecycle-hooks) |
+| `changelog.file` | `string?` | `"CHANGELOG.md"` | Path to the changelog file. Omit to skip changelog generation |
+| `changelog.template` | `string?` | `null` | Path to a custom minijinja template file for changelog rendering |
+| `changelog.groups` | `ChangelogGroup[]` | See below | Ordered list of changelog sections, each mapping type names to a heading |
+| `changelog.groups[].name` | `string` | — (required) | Section heading name |
+| `changelog.groups[].content` | `string[]` | — (required) | Commit types that appear in this section. Use `"breaking"` for breaking changes |
 
-#### `packages` (monorepo)
+#### `channels`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `packages[].name` | `string` | — (required) | Package name, used in the default tag prefix |
-| `packages[].path` | `string` | — (required) | Directory path relative to repo root. Only commits touching this path trigger a release |
-| `packages[].tag_prefix` | `string?` | `"{name}/v"` | Tag prefix override |
-| `packages[].version_files` | `string[]` | inherited | Version files override |
-| `packages[].changelog` | `object?` | inherited | Changelog config override |
-| `packages[].stage_files` | `string[]` | inherited | Stage files override |
+| `channels.default` | `string` | `"stable"` | Default channel name used when no `--channel` flag is given |
+| `channels.branch` | `string` | `"main"` | The trunk branch that triggers releases (all channels release from this branch) |
+| `channels.content` | `Channel[]` | `[{name: "stable"}]` | Array of channel definitions |
+| `channels.content[].name` | `string` | — (required) | Channel name (e.g. `canary`, `rc`, `stable`) |
+| `channels.content[].prerelease` | `string?` | `null` | Pre-release identifier (e.g. `"canary"`, `"rc"`). None = stable |
+| `channels.content[].draft` | `bool` | `false` | Create GitHub release as draft |
+
+#### `vcs`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `vcs.github.release_name_template` | `string?` | `null` | Minijinja template for the GitHub release name. Variables: `version`, `tag_name`, `tag_prefix` |
+
+#### `packages`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `packages[].path` | `string` | — (required) | Directory path relative to repo root. Only commits touching this path trigger a release. Package name is derived from the path |
+| `packages[].tag_prefix` | `string?` | derived from path | Tag prefix override |
+| `packages[].independent` | `bool` | `true` | Independent versioning per package (`true`) vs. all packages sharing one version (`false`) |
+| `packages[].version_files` | `string[]` | `[]` | Manifest files to bump |
+| `packages[].artifacts` | `string[]` | `[]` | Glob patterns for files to upload to the GitHub release |
+| `packages[].stage_files` | `string[]` | `[]` | Additional file globs to stage in the release commit (e.g. `["Cargo.lock"]`) |
+| `packages[].hooks.pre_release` | `string[]` | `[]` | Commands to run after version bump, before git commit (e.g. build) |
+| `packages[].hooks.post_release` | `string[]` | `[]` | Commands to run after GitHub release and artifact upload (e.g. publish) |
 
 ### Example config
 
 ```yaml
 # sr.yaml
 
-commit:
-  pattern: '^(?P<type>\w+)(?:\((?P<scope>[^)]+)\))?(?P<breaking>!)?:\s+(?P<description>.+)'
-  breaking_section: Breaking Changes
-  misc_section: Miscellaneous
-  types:
-    - name: feat
-      bump: minor
-      section: Features
-    - name: fix
-      bump: patch
-      section: Bug Fixes
-    - name: perf
-      bump: patch
-      section: Performance
-    - name: docs
-      section: Documentation
-    - name: refactor
-      bump: patch
-      section: Refactoring
-    - name: revert
-      section: Reverts
-    - name: chore
-    - name: ci
-    - name: test
-    - name: build
-    - name: style
-
-release:
-  branches: [main]
+git:
   tag_prefix: "v"
-  changelog:
-    file: CHANGELOG.md
-  version_files:
-    - Cargo.toml
-    - package.json
-  version_files_strict: false
-  artifacts: []
-  floating_tags: true
-  stage_files: []
+  floating_tag: true
   sign_tags: false
-  draft: false
+  v0_protection: true
 
-hooks:
-  pre_commit:
-    - "cargo fmt --check"
-    - "cargo clippy -- -D warnings"
-  pre_release:
-    - "cargo test --workspace"
-  post_release:
-    - "./scripts/notify-slack.sh"
+commit:
+  types:
+    minor:
+      - feat
+    patch:
+      - fix
+      - perf
+      - refactor
+    none:
+      - docs
+      - revert
+      - chore
+      - ci
+      - test
+      - build
+      - style
 
-# Release channels (optional)
+changelog:
+  file: CHANGELOG.md
+  groups:
+    - name: breaking
+      content:
+        - breaking
+    - name: features
+      content:
+        - feat
+    - name: bug-fixes
+      content:
+        - fix
+    - name: performance
+      content:
+        - perf
+    - name: misc
+      content:
+        - chore
+        - ci
+        - test
+        - build
+        - style
+
+channels:
+  default: stable
+  branch: main
+  content:
+    - name: stable
+
+# Optional: pre-release or draft channels
 # channels:
-#   canary:
-#     prerelease: canary
-#   rc:
-#     prerelease: rc
-#     draft: true
-#   stable: {}
-# default_channel: stable
+#   default: stable
+#   branch: main
+#   content:
+#     - name: canary
+#       prerelease: canary
+#     - name: rc
+#       prerelease: rc
+#       draft: true
+#     - name: stable
+
+vcs:
+  github:
+    release_name_template: "{{ tag_name }}"
+
+packages:
+  - path: .
+    version_files:
+      - Cargo.toml
+    stage_files:
+      - Cargo.lock
+    artifacts:
+      - "target/release/sr-*"
+    hooks:
+      pre_release:
+        - cargo build --release
+      post_release:
+        - cargo publish
 
 # Monorepo packages (optional)
 # packages:
-#   - name: core
-#     path: crates/core
-#     tag_prefix: "core/v"
+#   - path: crates/core
 #     version_files:
 #       - crates/core/Cargo.toml
 #     stage_files:
 #       - crates/core/Cargo.lock
+#   - path: crates/cli
+#     tag_prefix: "cli-v"
+#     version_files:
+#       - crates/cli/Cargo.toml
 ```
 
 ### Supported version files
@@ -588,9 +621,10 @@ When bumping a workspace root, `sr` automatically finds and bumps all member man
 For example, a Cargo workspace only needs the root listed:
 
 ```yaml
-release:
-  version_files:
-    - Cargo.toml    # automatically bumps all workspace member Cargo.toml files
+packages:
+  - path: .
+    version_files:
+      - Cargo.toml    # automatically bumps all workspace member Cargo.toml files
 ```
 
 ### Environment variables
@@ -603,25 +637,28 @@ release:
 
 ### Commit types
 
-Each entry in the `types` list has these fields:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | `string` | Yes | The commit type prefix (e.g. `feat`, `fix`) |
-| `bump` | `string?` | No | Bump level: `major`, `minor`, or `patch`. Omit to not trigger a release for this type |
-| `section` | `string?` | No | Changelog section heading (e.g. `"Features"`). Omit to exclude from changelog |
-| `pattern` | `string?` | No | Regex matched against the full commit message as a fallback when the standard type-prefix pattern doesn't match. Named groups `scope`, `breaking`, `description` are used if present |
-
-**Fallback pattern matching:** When a commit doesn't match the standard `commit.pattern`, sr tries each type's `pattern` regex in order. The first match wins. This is useful for non-conventional commit formats like Dependabot:
+Commit types are grouped by their bump level under `commit.types`:
 
 ```yaml
 commit:
   types:
-    - name: deps
-      bump: patch
-      section: Dependencies
-      pattern: '^Bump (?P<description>.+)'   # matches "Bump serde from 1.0 to 1.1"
+    minor:
+      - feat
+    patch:
+      - fix
+      - perf
+      - refactor
+    none:
+      - docs
+      - revert
+      - chore
+      - ci
+      - test
+      - build
+      - style
 ```
+
+The commit pattern is derived automatically from the type names. Any commit type not listed is silently ignored.
 
 Breaking changes are detected in two ways per the [Conventional Commits](https://www.conventionalcommits.org/) spec:
 
@@ -632,51 +669,34 @@ Either form triggers a `major` bump regardless of the type's configured bump lev
 
 #### Default commit-type mapping
 
-| Type | Bump | Changelog Section |
-|------|------|-------------------|
-| `feat` | minor | Features |
-| `fix` | patch | Bug Fixes |
-| `perf` | patch | Performance |
-| `docs` | — | Documentation |
-| `refactor` | patch | Refactoring |
-| `revert` | — | Reverts |
-| `chore` | — | — |
-| `ci` | — | — |
-| `test` | — | — |
-| `build` | — | — |
-| `style` | — | — |
+| Type | Bump | Notes |
+|------|------|-------|
+| `feat` | minor | |
+| `fix` | patch | |
+| `perf` | patch | |
+| `refactor` | patch | |
+| `docs` | none | |
+| `revert` | none | |
+| `chore` | none | |
+| `ci` | none | |
+| `test` | none | |
+| `build` | none | |
+| `style` | none | |
 
-Types without a bump level do not trigger a release on their own. Types without a section are grouped under the `misc_section` heading if they appear in a release with other releasable commits.
-
-### Commit pattern
-
-The default pattern follows the [Conventional Commits](https://www.conventionalcommits.org/) spec:
-
-```
-^(?P<type>\w+)(?:\((?P<scope>[^)]+)\))?(?P<breaking>!)?:\s+(?P<description>.+)
-```
-
-If you override `commit.pattern`, your regex **must** include these named capture groups:
-
-| Group | Required | Description |
-|-------|----------|-------------|
-| `type` | Yes | The commit type (e.g. `feat`, `fix`) |
-| `scope` | No | Optional scope in parentheses |
-| `breaking` | No | The `!` marker for breaking changes |
-| `description` | Yes | The commit description |
+Types in the `none` group do not trigger a release on their own. Changelog sections are configured separately under `changelog.groups`.
 
 ### Changelog behavior
 
-When `release.changelog.file` is set:
+When `changelog.file` is set:
 - If the file doesn't exist, it's created with a `# Changelog` heading
 - If it already exists, new entries are inserted after the first heading (prepended, not appended)
 - Each entry has the format: `## <version> (<date>)`
-- Sections appear in order: Breaking Changes, then type sections in definition order, then Miscellaneous
+- Sections appear in the order defined in `changelog.groups`
 - Commits link to their full SHA on GitHub when the repo URL is available
 
 ### Changelog templates
 
-Set `release.changelog.template` to a [minijinja](https://docs.rs/minijinja) (Jinja2-compatible) template string for full control over changelog output. When set, the default markdown format is bypassed entirely.
+Set `changelog.template` to a path pointing to a [minijinja](https://docs.rs/minijinja) (Jinja2-compatible) template file for full control over changelog output. When set, the default markdown format is bypassed entirely.
 
 **Template context:**
 
@@ -698,73 +718,80 @@ Set `release.changelog.template` to a [minijinja](https://docs.rs/minijinja) (Ji
 **Example template:**
 
 ```yaml
-release:
-  changelog:
-    file: CHANGELOG.md
-    template: |
-      {% for entry in entries %}
-      ## {{ entry.version }} ({{ entry.date }})
-      {% for c in entry.commits %}
-      - {% if c.scope %}**{{ c.scope }}**: {% endif %}{{ c.description }}
-      {% endfor %}
-      {% endfor %}
+changelog:
+  file: CHANGELOG.md
+  template: changelog.md.j2
+```
+
+`changelog.md.j2`:
+
+```jinja
+{% for entry in entries %}
+## {{ entry.version }} ({{ entry.date }})
+{% for c in entry.commits %}
+- {% if c.scope %}**{{ c.scope }}**: {% endif %}{{ c.description }}
+{% endfor %}
+{% endfor %}
 ```
 
 ### Release execution order
 
-1. **`pre_release` hooks** — validation, tests
-2. **Bump version files** — all configured `version_files` are updated on disk
+1. **Parse commits** — determine version bump from commits since last tag
+2. **Bump version files** — all configured `packages[].version_files` are updated on disk
 3. **Write changelog** — the changelog file is written (if configured)
-4. **Git commit** — version files + changelog + `stage_files` are staged and committed as `chore(release): <tag> [skip ci]`
-5. **Create and push tag** — annotated tag at HEAD (signed with GPG/SSH when `sign_tags: true`)
-6. **Create/update floating tag** (if `floating_tags: true`)
-7. **Create or update GitHub release** — uses PATCH to preserve existing assets on re-runs; supports `draft` mode
-8. **Upload artifacts** — MIME-type-aware uploads to the GitHub release
-9. **Verify release** — confirms the GitHub release exists and is accessible
-10. **`post_release` hooks** — notifications, deployments
+4. **Package `pre_release` hooks** — build or prepare artifacts with the bumped versions (e.g. `cargo build --release`)
+5. **Git commit** — version files + changelog + `stage_files` are staged and committed as `chore(release): <tag> [skip ci]`
+6. **Create and push tag** — annotated tag at HEAD (signed with GPG/SSH when `git.sign_tags: true`)
+7. **Create/update floating tag** (if `git.floating_tag: true`)
+8. **Create or update GitHub release** — uses PATCH to preserve existing assets on re-runs; supports `draft` mode
+9. **Upload artifacts** — MIME-type-aware uploads to the GitHub release (collected from all packages)
+10. **Package `post_release` hooks** — publish to registries, send notifications (e.g. `cargo publish`)
 
-If any step in 1-3 fails, modified files are automatically rolled back to their original contents. Steps 5-9 are idempotent — re-running with `--force` will skip already-completed steps.
+Steps 6-9 are idempotent — re-running with `--force` will skip already-completed steps.
 
 ### Release channels
 
-Channels model trunk-based promotion — the same commits get progressively promoted from less stable to more stable:
+Channels model trunk-based promotion — channels specify which branch they release from and optional pre-release identifiers:
 
 ```yaml
-release:
-  channels:
-    canary:
+channels:
+  default: stable
+  branch: main
+  content:
+    - name: canary
       prerelease: canary
-    rc:
+    - name: rc
       prerelease: rc
       draft: true
-    stable: {}
-
-  default_channel: stable
+    - name: stable
 ```
 
 ```bash
 sr release --channel canary     # 1.2.0-canary.1
 sr release --channel rc         # 1.2.0-rc.1
-sr release                      # 1.2.0 (stable, uses default_channel)
+sr release                      # 1.2.0 (stable, uses default channel)
 ```
-
-All channels release from the same trunk branch. No separate release branches.
 
 **Channel fields:**
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `name` | `string` | — (required) | Channel name |
 | `prerelease` | `string?` | `null` | Pre-release identifier. None = stable |
 | `draft` | `bool` | `false` | Create GitHub release as draft |
-| `artifacts` | `string[]` | `[]` | Additional artifact patterns for this channel |
 
 ### Pre-releases
 
-Set `release.prerelease` to produce versions like `1.2.0-alpha.1` instead of `1.2.0`:
+Set `prerelease` on a channel to produce versions like `1.2.0-alpha.1` instead of `1.2.0`:
 
 ```yaml
-release:
-  prerelease: alpha
+channels:
+  default: stable
+  branch: main
+  content:
+    - name: alpha
+      prerelease: alpha
+    - name: stable
 ```
 
 Or via CLI: `sr release --prerelease alpha`
@@ -783,15 +810,11 @@ For repositories containing multiple independently versioned packages, use the `
 
 ```yaml
 packages:
-  - name: core
-    path: crates/core
+  - path: crates/core
     version_files:
       - crates/core/Cargo.toml
-    changelog:
-      file: crates/core/CHANGELOG.md
-  - name: cli
-    path: crates/cli
-    tag_prefix: "cli-v"              # default: "cli/v"
+  - path: crates/cli
+    tag_prefix: "cli-v"              # default: derived from path
     version_files:
       - crates/cli/Cargo.toml
     stage_files:
@@ -807,7 +830,7 @@ sr release -p core                # release only the core package
 sr status -p cli --format json    # preview next release for cli
 ```
 
-All other config fields (`commit.types`, `release.branches`, etc.) are inherited from the root config.
+All other config fields (`commit.types`, `channels`, etc.) are shared across all packages.
 
 When `packages` is empty or absent, `sr` behaves as a single-package tool.
 
@@ -817,31 +840,58 @@ When `packages` is empty or absent, `sr` behaves as a single-package tool.
 
 ## FAQ / Troubleshooting
 
+<!-- fsrc src="docs/FAQ.md" -->
+### Non-conventional commits are silently ignored
+
+sr only understands commits that match the configured commit pattern (derived from type names defined in `commit.types`; follows [Conventional Commits](https://www.conventionalcommits.org/) by default). Commits that don't match — merge commits, JIRA-style messages, freeform text — are silently skipped during release planning. They won't trigger a version bump or appear in the changelog.
+
+This means:
+- **Merge commits** (`Merge pull request #123 from...`) — ignored, no impact
+- **Squash merges with conventional titles** (`feat: add search`) — work perfectly
+- **JIRA-style commits** (`PROJ-1234: fix login`) — ignored
+- **Dependabot commits** (`Bump serde from 1.0 to 1.1`) — ignored
+- **Freeform messages** (`fixed the bug`, `wip`) — ignored
+
+If *all* commits since the last tag are non-conventional, sr exits with code 2 (no releasable changes).
+
+### How merge strategies affect sr
+
+sr reads the commit history from HEAD back to the latest tag. It doesn't care *how* commits landed on the branch — only what the commit messages say.
+
+| Strategy | What sr sees | Impact |
+|----------|-------------|--------|
+| **Merge commit** (default) | The merge commit itself (`Merge pull request...`) + all individual commits from the branch | Merge commit is ignored (non-conventional). Individual commits are parsed normally. |
+| **Squash merge** | A single commit with the PR title as the message | Works perfectly if the PR title is conventional (e.g. `feat: add search`). |
+| **Rebase merge** | All individual commits replayed onto the branch | Each commit is parsed independently. Same as regular commits. |
+| **Fast-forward** | All individual commits | Same as rebase. |
+
+**Recommendation:** Squash merges with conventional PR titles give the cleanest release history — one commit per PR, one changelog entry per feature/fix.
+
 ### `sr release` exits with code 2
 
-Exit code 2 means **no releasable commits** were found since the last tag. This is not an error — it means all commits since the last release are non-bumping types (e.g. `chore`, `docs`, `ci`). To force a release anyway, use `sr release --force`.
+Exit code 2 means **no releasable commits** were found since the last tag. This is not an error — it means all commits since the last release are either non-bumping types (e.g. `chore`, `docs`, `ci`) or non-conventional messages that were skipped. To force a release anyway, use `sr release --force`.
 
 ### Changelog is not generated
 
-Set `release.changelog.file` in `sr.yaml` — changelog generation is opt-in:
+Set `changelog.file` in `sr.yaml` — changelog generation is opt-in:
 
 ```yaml
-release:
-  changelog:
-    file: CHANGELOG.md
+changelog:
+  file: CHANGELOG.md
 ```
 
 ### Version files not updated
 
-Ensure your manifest files are listed in `release.version_files` and match a [supported format](#supported-version-files). Set `release.version_files_strict: true` to fail loudly on unsupported files instead of silently skipping them.
+Ensure your manifest files are listed in `packages[].version_files` and match a [supported format](#supported-version-files).
 
 ### Tags are not signed
 
-Set `release.sign_tags: true` in `sr.yaml` or pass `--sign-tags`. You must have a GPG or SSH signing key configured in git (`git config user.signingkey`).
+Set `git.sign_tags: true` in `sr.yaml` or pass `--sign-tags`. You must have a GPG or SSH signing key configured in git (`git config user.signingkey`).
 
-### Migrating from v3.x, v4.x, or v5.x
+### Migrating from v6.x
 
-Run `sr migrate` to see the full migration guide, or read [docs/migration.md](docs/migration.md).
+Run `sr migrate` to see the full migration guide, or read [migration.md](crates/sr-cli/docs/migration.md).
+<!-- /fsrc -->
 
 ## Architecture
 
