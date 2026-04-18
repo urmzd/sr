@@ -1248,9 +1248,7 @@ mod tests {
         assert_eq!(uploaded.len(), 2);
         let artifact_call = uploaded
             .iter()
-            .find(|(_tag, files)| {
-                files.iter().any(|f| f.ends_with("app.tar.gz"))
-            })
+            .find(|(_tag, files)| files.iter().any(|f| f.ends_with("app.tar.gz")))
             .expect("expected an upload call containing user artifacts");
         assert_eq!(artifact_call.0, "v0.1.0");
         assert_eq!(artifact_call.1.len(), 2);
@@ -1298,7 +1296,9 @@ mod tests {
         let user_uploads: Vec<_> = uploaded
             .iter()
             .filter(|(_tag, files)| {
-                !files.iter().all(|f| f.ends_with(crate::manifest::MANIFEST_ASSET_NAME))
+                !files
+                    .iter()
+                    .all(|f| f.ends_with(crate::manifest::MANIFEST_ASSET_NAME))
             })
             .collect();
         assert!(
@@ -1673,13 +1673,7 @@ mod tests {
             packages: vec![PackageConfig {
                 path: ".".into(),
                 version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                artifacts: vec![
-                    dir.path()
-                        .join("*.tar.gz")
-                        .to_str()
-                        .unwrap()
-                        .to_string(),
-                ],
+                artifacts: vec![dir.path().join("*.tar.gz").to_str().unwrap().to_string()],
                 hooks: Some(HooksConfig {
                     build: vec!["true".into()],
                     ..Default::default()
@@ -1754,9 +1748,7 @@ mod tests {
             packages: vec![PackageConfig {
                 path: ".".into(),
                 version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                artifacts: vec![
-                    dir.path().join("*.tar.gz").to_str().unwrap().to_string(),
-                ],
+                artifacts: vec![dir.path().join("*.tar.gz").to_str().unwrap().to_string()],
                 ..Default::default()
             }],
             ..Default::default()
@@ -1771,8 +1763,7 @@ mod tests {
             .fetch_asset("v0.1.0", crate::manifest::MANIFEST_ASSET_NAME)
             .unwrap()
             .expect("manifest should be present");
-        let manifest: crate::manifest::Manifest =
-            serde_json::from_slice(&manifest_bytes).unwrap();
+        let manifest: crate::manifest::Manifest = serde_json::from_slice(&manifest_bytes).unwrap();
 
         assert_eq!(manifest.tag, "v0.1.0");
         assert!(manifest.artifacts.iter().any(|a| a == "app.tar.gz"));
@@ -1795,9 +1786,7 @@ mod tests {
             packages: vec![PackageConfig {
                 path: ".".into(),
                 version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                artifacts: vec![
-                    dir.path().join("*.tar.gz").to_str().unwrap().to_string(),
-                ],
+                artifacts: vec![dir.path().join("*.tar.gz").to_str().unwrap().to_string()],
                 ..Default::default()
             }],
             ..Default::default()

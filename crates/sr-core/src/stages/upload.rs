@@ -110,10 +110,7 @@ mod tests {
 
         let (to_upload, to_skip) = UploadArtifacts::partition(&resolved, &existing);
         assert_eq!(to_skip, vec!["/tmp/out/app.tar.gz"]);
-        assert_eq!(
-            to_upload,
-            vec!["/tmp/out/app.zip", "/tmp/out/manual.json"]
-        );
+        assert_eq!(to_upload, vec!["/tmp/out/app.zip", "/tmp/out/manual.json"]);
     }
 
     #[test]

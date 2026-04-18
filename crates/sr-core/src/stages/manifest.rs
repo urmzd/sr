@@ -28,7 +28,10 @@ impl Stage for UploadManifest {
 
     fn run(&self, ctx: &mut StageContext<'_>) -> Result<(), ReleaseError> {
         if ctx.dry_run {
-            eprintln!("[dry-run] Would upload {MANIFEST_ASSET_NAME} to {}", ctx.plan.tag_name);
+            eprintln!(
+                "[dry-run] Would upload {MANIFEST_ASSET_NAME} to {}",
+                ctx.plan.tag_name
+            );
             return Ok(());
         }
 
