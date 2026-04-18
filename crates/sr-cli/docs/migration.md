@@ -9,6 +9,7 @@
 | **5.x** | Release-only CLI | CLI commands stripped to release engineering; all git/PR/review workflows move to MCP tools |
 | **6.x** | MCP-first workflows | PR, worktree, and breaking-commit tools added to MCP server; `sr init` improved |
 | **7.x** | Config redesign | Entire config structure rewritten; 6 top-level sections; MCP server removed; agentspec removed; file snapshot/rollback removed |
+| **7.1** | Build stage + reconciliation | New `hooks.build` phase runs after bump before tag; declared artifacts validated before tagging; `sr-manifest.json` proves completion; idempotent uploads; reconciliation blocks new releases on top of broken ones |
 
 ---
 
@@ -303,6 +304,130 @@ Worktrees created via MCP (`sr_worktree`) are stored under `.sr/worktrees/`
 instead of sibling directories. Each worktree gets a metadata file at
 `.sr/worktrees/<branch>.json` tracking its purpose, description, and creation
 date. The `.sr/` directory is automatically gitignored by `sr init`.
+
+---
+
+## Migrating from 7.0 to 7.1
+
+v7.1 is **additive, non-breaking**. Existing configs and workflows continue to work unchanged. The new capabilities are opt-in via `hooks.build`, plus one automatic behavior change: sr now uploads `sr-manifest.json` as the final asset on every release and refuses to cut a new release on top of a broken one.
+
+### What changed in the pipeline
+
+Old order (v7.0):
+
+```
+pre_release hooks → bump → commit → tag → push → create release → upload artifacts → post_release hooks
+```
+
+New order (v7.1):
+
+```
+pre_release hooks → bump → build → validate → commit → tag → push → create release → upload artifacts → post_release hooks → upload manifest
+```
+
+Two new stages:
+
+- **`build`**: runs configured `hooks.build` commands after version files have been bumped on disk. Binaries built here embed the new version.
+- **`validate`**: when `hooks.build` is non-empty, every `artifacts:` glob must resolve to ≥1 file, else the release aborts before tag creation. Guarantees the tag invariant: a tag on remote implies the declared artifacts exist.
+
+Two new behaviors:
+
+- **Idempotent upload**: `UploadArtifacts` skips any asset whose basename is already present on the release. Safe to re-run.
+- **Reconciliation check**: at the start of `sr release`, sr inspects the latest remote tag's `sr-manifest.json`. If it declares artifacts that aren't present on the release, sr errors with: `previous release v1.2.3 is incomplete: ... missing (...). Heal it first — git checkout v1.2.3 && sr release --force — then re-run sr release.` Tags with no manifest (legacy) pass silently. `--force` bypasses.
+
+### Opt-in `hooks.build` (recommended)
+
+Move build commands from external CI steps (or from `hooks.pre_release`, where they would have embedded the pre-bump version) into `hooks.build`:
+
+```yaml
+# v7.0 (still works, but binaries embed old version)
+packages:
+  - path: .
+    artifacts: ["release-assets/*.tar.gz"]
+    hooks:
+      pre_release:
+        - cargo build --release  # runs BEFORE version bump — wrong version
+      post_release:
+        - cargo publish
+
+# v7.1 (build embeds new version, sr validates output)
+packages:
+  - path: .
+    artifacts: ["release-assets/*.tar.gz"]
+    hooks:
+      pre_release:
+        - cargo test  # validations that can abort the release
+      build:
+        - cargo build --release  # runs AFTER bump — embeds new version
+        - mkdir -p release-assets
+        - tar czf release-assets/sr.tar.gz target/release/sr
+      post_release:
+        - cargo publish
+```
+
+If `hooks.build` is empty, pipeline behavior is identical to v7.0 — no validation, no enforcement.
+
+### GitHub Actions workflow changes
+
+Workflows pin `urmzd/sr@v7` (floating major) — they pick up v7.1 automatically. Per-pattern guidance:
+
+**Pattern A — build + sr in same job (teasr, fsrc, agentspec, github-insights, urmzd.com, zigbee-skill).** Move the build steps from the workflow into `hooks.build` in `sr.yaml`. The workflow reduces to a single `urmzd/sr@v7` step.
+
+```yaml
+# Before: separate build step in the workflow
+- run: cargo build --release
+- run: tar czf release-assets/app.tar.gz target/release/app
+- uses: urmzd/sr@v7
+
+# After: build lives in sr.yaml hooks.build; workflow just invokes sr
+- uses: urmzd/sr@v7
+```
+
+**Pattern B — parallel matrix build → consolidate → sr (sr itself).** Keep the matrix. `hooks.build` runs in one process on one runner and cannot replace a cross-runner matrix. Leave `hooks.build` empty; ValidateArtifacts stays inactive (same safety level as v7.0). Reconciliation still applies.
+
+**Pattern C — sr-only, no build (streamsafe, lazyspeak.nvim, mnemonist).** No change.
+
+**Pattern D — post-release build (incipit, linear-gp, saige).** This pattern is structurally unreachable by sr's validation: sr completes (no artifacts declared → validate skipped → manifest uploaded as "complete"), then the workflow's post-release build runs outside sr. If that build fails, sr has no record and reconciliation won't trigger on the next release. Two options: (a) move the build into `hooks.build` on the same runner as sr, or (b) accept that this pattern has no binary-presence guarantee.
+
+### Recovery: when a release breaks mid-way
+
+Under v7.1, a partial failure is now detectable and recoverable:
+
+```bash
+# Scenario: sr uploaded 2 of 3 declared artifacts, then CI runner died.
+# Next release attempt:
+$ sr release
+Error: previous release v1.2.3 is incomplete: 1 declared asset(s) missing
+(sr-aarch64-darwin.tar.gz). Heal it first — git checkout v1.2.3 && sr release --force —
+then re-run sr release.
+
+# Heal:
+$ git checkout v1.2.3
+$ sr release --force   # re-runs the pipeline; idempotent upload skips the 2 already present
+$ git checkout main
+$ sr release           # now succeeds; cuts v1.2.4
+```
+
+If a workflow needs to trigger recovery non-interactively, add a `force` input:
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Re-release current tag (reconcile broken release)"
+        type: boolean
+        default: false
+- uses: urmzd/sr@v7
+  with:
+    force: ${{ inputs.force }}
+```
+
+Many repos already have this input — they're ready.
+
+### Legacy releases
+
+Releases created before v7.1 don't have `sr-manifest.json`. sr treats them as `Unknown` status, neither complete nor incomplete, and doesn't block future releases. The manifest-based reconciliation only applies to releases cut by v7.1+.
 
 ---
 

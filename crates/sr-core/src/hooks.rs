@@ -49,6 +49,13 @@ pub fn run_pre_release(config: &HooksConfig, env: &[(&str, &str)]) -> Result<(),
     run_commands("pre_release", &config.pre_release, env)
 }
 
+/// Run build hooks from a HooksConfig.
+/// Runs after version bump, before commit — output artifacts must match
+/// the declared `artifacts` globs (sr validates this before tagging).
+pub fn run_build(config: &HooksConfig, env: &[(&str, &str)]) -> Result<(), ReleaseError> {
+    run_commands("build", &config.build, env)
+}
+
 /// Run post_release hooks from a HooksConfig.
 pub fn run_post_release(config: &HooksConfig, env: &[(&str, &str)]) -> Result<(), ReleaseError> {
     run_commands("post_release", &config.post_release, env)

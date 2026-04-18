@@ -1,6 +1,3 @@
-use std::fs;
-use std::path::Path;
-
 use semver::Version;
 use serde::Serialize;
 
@@ -9,8 +6,8 @@ use crate::commit::{CommitParser, ConventionalCommit, DefaultCommitClassifier};
 use crate::config::{Config, PackageConfig};
 use crate::error::ReleaseError;
 use crate::git::GitRepository;
+use crate::stages::{StageContext, default_pipeline};
 use crate::version::{BumpLevel, apply_bump, apply_prerelease_bump, determine_bump};
-use crate::version_files::{bump_version_file, discover_lock_files, is_supported_version_file};
 
 /// The computed plan for a release, before execution.
 #[derive(Debug, Serialize)]
@@ -77,6 +74,20 @@ pub trait VcsProvider: Send + Sync {
     /// Upload asset files to an existing release identified by tag.
     fn upload_assets(&self, _tag: &str, _files: &[&str]) -> Result<(), ReleaseError> {
         Ok(())
+    }
+
+    /// List the basenames of assets currently attached to the release for `tag`.
+    /// Returns `Ok(vec![])` for providers that don't support asset listing.
+    /// Used by the idempotent upload path to skip assets already present.
+    fn list_assets(&self, _tag: &str) -> Result<Vec<String>, ReleaseError> {
+        Ok(Vec::new())
+    }
+
+    /// Fetch the content of a named asset on the release for `tag`.
+    /// Returns `Ok(None)` if the asset doesn't exist or the provider doesn't
+    /// support it. Used by the reconciler to read `sr-manifest.json`.
+    fn fetch_asset(&self, _tag: &str, _name: &str) -> Result<Option<Vec<u8>>, ReleaseError> {
+        Ok(None)
     }
 
     /// Verify that a release exists and is in the expected state after creation.
@@ -203,6 +214,32 @@ where
         let all_tags = self.git.all_tags(&self.config.git.tag_prefix)?;
         let latest_stable = all_tags.iter().rev().find(|t| t.version.pre.is_empty());
         let latest_any = all_tags.last();
+
+        // Reconciliation check: don't cut a new release on top of an incomplete
+        // one. `--force` bypasses (it's explicit user intent to re-run the
+        // pipeline, which itself heals). Unknown status (legacy release, no
+        // manifest) passes silently — we can't distinguish "old release" from
+        // "sr died before upload" remotely.
+        if !self.force
+            && let Some(latest) = all_tags.last()
+        {
+            match crate::manifest::check_release_status(&self.vcs, &latest.name)? {
+                crate::manifest::ReleaseStatus::Incomplete {
+                    missing_artifacts, ..
+                } => {
+                    return Err(ReleaseError::Vcs(format!(
+                        "previous release {tag} is incomplete: {} declared asset(s) missing ({}). \
+                         Heal it first — `git checkout {tag} && sr release --force` — \
+                         then re-run sr release.",
+                        missing_artifacts.len(),
+                        missing_artifacts.join(", "),
+                        tag = latest.name,
+                    )));
+                }
+                crate::manifest::ReleaseStatus::Complete(_)
+                | crate::manifest::ReleaseStatus::Unknown => {}
+            }
+        }
 
         // Use the latest tag (any kind) for commit range, but the latest stable for base version
         let tag_info = if is_prerelease {
@@ -344,38 +381,36 @@ where
 
     fn execute(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError> {
         let version_str = plan.next_version.to_string();
+        let changelog_body = self.format_changelog(plan)?;
+        let release_name = self.release_name(plan);
 
-        // 1. Run pre_release hooks
         let env = release_env(&version_str, &plan.tag_name);
         let env_refs: Vec<(&str, &str)> =
             env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        if !dry_run
-            && let Some(pkg) = self.active_package()
-            && let Some(ref hooks) = pkg.hooks
-        {
-            crate::hooks::run_pre_release(hooks, &env_refs)?;
-        }
 
-        // 2. Generate changelog
-        let changelog_body = self.format_changelog(plan)?;
+        let default_pkg = PackageConfig::default();
+        let active_package = self.active_package().unwrap_or(&default_pkg);
 
-        // 3. Bump, write changelog, stage, commit
-        self.bump_and_build(plan, &version_str, &changelog_body, dry_run)?;
+        let mut ctx = StageContext {
+            plan,
+            config: &self.config,
+            git: &self.git,
+            vcs: &self.vcs,
+            active_package,
+            changelog_body: &changelog_body,
+            release_name: &release_name,
+            version_str: &version_str,
+            hooks_env: &env_refs,
+            dry_run,
+            sign_tags: self.config.git.sign_tags,
+            draft: self.draft,
+            bumped_files: Vec::new(),
+        };
 
-        // 4. Create and push tags
-        self.create_and_push_tags(plan, &changelog_body, dry_run)?;
-
-        // 5. GitHub release
-        self.create_or_update_release(plan, &changelog_body, dry_run)?;
-        self.upload_artifacts(plan, dry_run)?;
-        self.verify_release_exists(plan, dry_run)?;
-
-        // 6. Run post_release hooks
-        if !dry_run
-            && let Some(pkg) = self.active_package()
-            && let Some(ref hooks) = pkg.hooks
-        {
-            crate::hooks::run_post_release(hooks, &env_refs)?;
+        for stage in default_pipeline() {
+            if !stage.is_complete(&ctx)? {
+                stage.run(&mut ctx)?;
+            }
         }
 
         if dry_run {
@@ -395,272 +430,8 @@ fn release_env(version: &str, tag: &str) -> Vec<(String, String)> {
     ]
 }
 
-impl<G, V, C, F> TrunkReleaseStrategy<G, V, C, F>
-where
-    G: GitRepository,
-    V: VcsProvider,
-    C: CommitParser,
-    F: ChangelogFormatter,
-{
-    fn bump_and_build(
-        &self,
-        plan: &ReleasePlan,
-        version_str: &str,
-        changelog_body: &str,
-        dry_run: bool,
-    ) -> Result<(), ReleaseError> {
-        let default_pkg = PackageConfig::default();
-        let pkg = self.active_package().unwrap_or(&default_pkg);
-        let version_files = self.config.version_files_for(pkg);
-        let version_files_strict = pkg.version_files_strict;
-        let stage_files = &pkg.stage_files;
-        let changelog_file = self.config.changelog_for(pkg).file.clone();
-
-        if dry_run {
-            for file in &version_files {
-                let filename = Path::new(file)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default();
-                if is_supported_version_file(filename) {
-                    eprintln!("[dry-run] Would bump version in: {file}");
-                } else if version_files_strict {
-                    return Err(ReleaseError::VersionBump(format!(
-                        "unsupported version file: {filename}"
-                    )));
-                } else {
-                    eprintln!("[dry-run] warning: unsupported version file, would skip: {file}");
-                }
-            }
-            if !stage_files.is_empty() {
-                eprintln!(
-                    "[dry-run] Would stage additional files: {}",
-                    stage_files.join(", ")
-                );
-            }
-            return Ok(());
-        }
-
-        let files_to_stage = self.execute_mutations(
-            version_str,
-            changelog_body,
-            &version_files,
-            &changelog_file,
-            version_files_strict,
-        )?;
-
-        // Resolve stage_files globs and collect all paths to stage
-        let mut paths_to_stage: Vec<String> = Vec::new();
-        if let Some(ref cf) = changelog_file {
-            paths_to_stage.push(cf.clone());
-        }
-        for file in &files_to_stage {
-            paths_to_stage.push(file.clone());
-        }
-        if !stage_files.is_empty() {
-            let extra = resolve_globs(stage_files).map_err(ReleaseError::Config)?;
-            paths_to_stage.extend(extra);
-        }
-        if !paths_to_stage.is_empty() {
-            let refs: Vec<&str> = paths_to_stage.iter().map(|s| s.as_str()).collect();
-            let commit_msg = format!("chore(release): {} [skip ci]", plan.tag_name);
-            self.git.stage_and_commit(&refs, &commit_msg)?;
-        }
-        Ok(())
-    }
-
-    fn create_and_push_tags(
-        &self,
-        plan: &ReleasePlan,
-        changelog_body: &str,
-        dry_run: bool,
-    ) -> Result<(), ReleaseError> {
-        if dry_run {
-            let sign_label = if self.config.git.sign_tags {
-                " (signed)"
-            } else {
-                ""
-            };
-            eprintln!("[dry-run] Would create tag: {}{sign_label}", plan.tag_name);
-            eprintln!("[dry-run] Would push commit and tag: {}", plan.tag_name);
-            if let Some(ref floating) = plan.floating_tag_name {
-                eprintln!("[dry-run] Would create/update floating tag: {floating}");
-                eprintln!("[dry-run] Would force-push floating tag: {floating}");
-            }
-            return Ok(());
-        }
-
-        // Create tag (skip if it already exists locally)
-        if !self.git.tag_exists(&plan.tag_name)? {
-            let tag_message = format!("{}\n\n{}", plan.tag_name, changelog_body);
-            self.git
-                .create_tag(&plan.tag_name, &tag_message, self.config.git.sign_tags)?;
-        }
-
-        // Push commit (safe to re-run — no-op if up to date)
-        self.git.push()?;
-
-        // Push tag (skip if tag already exists on remote)
-        if !self.git.remote_tag_exists(&plan.tag_name)? {
-            self.git.push_tag(&plan.tag_name)?;
-        }
-
-        // Force-create and force-push floating tag (e.g. v3)
-        if let Some(ref floating) = plan.floating_tag_name {
-            self.git.force_create_tag(floating)?;
-            self.git.force_push_tag(floating)?;
-        }
-        Ok(())
-    }
-
-    fn create_or_update_release(
-        &self,
-        plan: &ReleasePlan,
-        changelog_body: &str,
-        dry_run: bool,
-    ) -> Result<(), ReleaseError> {
-        if dry_run {
-            let draft_label = if self.draft { " (draft)" } else { "" };
-            let release_name = self.release_name(plan);
-            eprintln!(
-                "[dry-run] Would create GitHub release \"{release_name}\" for {}{draft_label}",
-                plan.tag_name
-            );
-            return Ok(());
-        }
-
-        let release_name = self.release_name(plan);
-        if self.vcs.release_exists(&plan.tag_name)? {
-            self.vcs.update_release(
-                &plan.tag_name,
-                &release_name,
-                changelog_body,
-                plan.prerelease,
-                self.draft,
-            )?;
-        } else {
-            self.vcs.create_release(
-                &plan.tag_name,
-                &release_name,
-                changelog_body,
-                plan.prerelease,
-                self.draft,
-            )?;
-        }
-        Ok(())
-    }
-
-    fn upload_artifacts(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError> {
-        let all_artifacts = self.config.all_artifacts();
-        if all_artifacts.is_empty() {
-            return Ok(());
-        }
-
-        let resolved = resolve_globs(&all_artifacts).map_err(ReleaseError::Vcs)?;
-
-        if dry_run {
-            if resolved.is_empty() {
-                eprintln!("[dry-run] Artifact patterns matched no files");
-            } else {
-                eprintln!("[dry-run] Would upload {} artifact(s):", resolved.len());
-                for f in &resolved {
-                    eprintln!("[dry-run]   {f}");
-                }
-            }
-            return Ok(());
-        }
-
-        if !resolved.is_empty() {
-            let file_refs: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
-            self.vcs.upload_assets(&plan.tag_name, &file_refs)?;
-            eprintln!(
-                "Uploaded {} artifact(s) to {}",
-                resolved.len(),
-                plan.tag_name
-            );
-        }
-        Ok(())
-    }
-
-    fn verify_release_exists(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError> {
-        if dry_run {
-            eprintln!("[dry-run] Would verify release: {}", plan.tag_name);
-            return Ok(());
-        }
-
-        if let Err(e) = self.vcs.verify_release(&plan.tag_name) {
-            eprintln!("warning: post-release verification failed: {e}");
-            eprintln!(
-                "  The tag {} was pushed but the GitHub release may be incomplete.",
-                plan.tag_name
-            );
-            eprintln!("  Re-run with --force to retry.");
-        }
-        Ok(())
-    }
-
-    /// Bump version files and write changelog.
-    /// Returns the list of bumped files on success.
-    fn execute_mutations(
-        &self,
-        version_str: &str,
-        changelog_body: &str,
-        version_files: &[String],
-        changelog_file: &Option<String>,
-        version_files_strict: bool,
-    ) -> Result<Vec<String>, ReleaseError> {
-        let mut files_to_stage: Vec<String> = Vec::new();
-        for file in version_files {
-            match bump_version_file(Path::new(file), version_str) {
-                Ok(extra) => {
-                    files_to_stage.push(file.clone());
-                    for extra_path in extra {
-                        files_to_stage.push(extra_path.to_string_lossy().into_owned());
-                    }
-                }
-                Err(e) if !version_files_strict => {
-                    eprintln!("warning: {e} — skipping {file}");
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        // Auto-discover and stage lock files associated with bumped manifests
-        for lock_file in discover_lock_files(&files_to_stage) {
-            let lock_str = lock_file.to_string_lossy().into_owned();
-            if !files_to_stage.contains(&lock_str) {
-                files_to_stage.push(lock_str);
-            }
-        }
-
-        // Write changelog file if configured
-        if let Some(cf) = changelog_file {
-            let path = Path::new(cf);
-            let existing = if path.exists() {
-                fs::read_to_string(path).map_err(|e| ReleaseError::Changelog(e.to_string()))?
-            } else {
-                String::new()
-            };
-            let new_content = if existing.is_empty() {
-                format!("# Changelog\n\n{changelog_body}\n")
-            } else {
-                match existing.find("\n\n") {
-                    Some(pos) => {
-                        let (header, rest) = existing.split_at(pos);
-                        format!("{header}\n\n{changelog_body}\n{rest}")
-                    }
-                    None => format!("{existing}\n\n{changelog_body}\n"),
-                }
-            };
-            fs::write(path, new_content).map_err(|e| ReleaseError::Changelog(e.to_string()))?;
-        }
-
-        Ok(files_to_stage)
-    }
-}
-
 /// Resolve glob patterns into a deduplicated, sorted list of file paths.
-fn resolve_globs(patterns: &[String]) -> Result<Vec<String>, String> {
+pub(crate) fn resolve_globs(patterns: &[String]) -> Result<Vec<String>, String> {
     let mut files = std::collections::BTreeSet::new();
     for pattern in patterns {
         let paths =
@@ -710,7 +481,7 @@ mod tests {
     use crate::changelog::DefaultChangelogFormatter;
     use crate::commit::{Commit, TypedCommitParser};
     use crate::config::{
-        ChangelogConfig, Config, GitConfig, PackageConfig, default_changelog_groups,
+        ChangelogConfig, Config, GitConfig, HooksConfig, PackageConfig, default_changelog_groups,
     };
     use crate::git::{GitRepository, TagInfo};
 
@@ -847,6 +618,10 @@ mod tests {
         releases: Mutex<Vec<(String, String)>>,
         deleted_releases: Mutex<Vec<String>>,
         uploaded_assets: Mutex<Vec<(String, Vec<String>)>>,
+        /// (tag, basename) → bytes. Populated by upload_assets when the file
+        /// on disk is readable; consumed by fetch_asset and list_assets to
+        /// simulate GitHub's release-assets view.
+        stored_assets: Mutex<Vec<(String, String, Vec<u8>)>>,
     }
 
     impl FakeVcs {
@@ -855,7 +630,17 @@ mod tests {
                 releases: Mutex::new(Vec::new()),
                 deleted_releases: Mutex::new(Vec::new()),
                 uploaded_assets: Mutex::new(Vec::new()),
+                stored_assets: Mutex::new(Vec::new()),
             }
+        }
+
+        /// Pre-seed an asset on a release — for reconciliation tests where the
+        /// starting state already has a manifest.
+        fn seed_asset(&self, tag: &str, name: &str, content: Vec<u8>) {
+            self.stored_assets
+                .lock()
+                .unwrap()
+                .push((tag.to_string(), name.to_string(), content));
         }
     }
 
@@ -909,7 +694,41 @@ mod tests {
                 tag.to_string(),
                 files.iter().map(|s| s.to_string()).collect(),
             ));
+            // Mirror into stored_assets so list/fetch see what was uploaded.
+            for path in files {
+                let basename = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path)
+                    .to_string();
+                let content = std::fs::read(path).unwrap_or_default();
+                self.stored_assets
+                    .lock()
+                    .unwrap()
+                    .push((tag.to_string(), basename, content));
+            }
             Ok(())
+        }
+
+        fn list_assets(&self, tag: &str) -> Result<Vec<String>, ReleaseError> {
+            Ok(self
+                .stored_assets
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(t, _, _)| t == tag)
+                .map(|(_, n, _)| n.clone())
+                .collect())
+        }
+
+        fn fetch_asset(&self, tag: &str, name: &str) -> Result<Option<Vec<u8>>, ReleaseError> {
+            Ok(self
+                .stored_assets
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(t, n, _)| t == tag && n == name)
+                .map(|(_, _, b)| b.clone()))
         }
 
         fn repo_url(&self) -> Option<String> {
@@ -1425,11 +1244,16 @@ mod tests {
         s.execute(&plan, false).unwrap();
 
         let uploaded = s.vcs.uploaded_assets.lock().unwrap();
-        assert_eq!(uploaded.len(), 1);
-        assert_eq!(uploaded[0].0, "v0.1.0");
-        assert_eq!(uploaded[0].1.len(), 2);
-        assert!(uploaded[0].1.iter().any(|f| f.ends_with("app.tar.gz")));
-        assert!(uploaded[0].1.iter().any(|f| f.ends_with("app.zip")));
+        // UploadArtifacts call + UploadManifest call
+        assert_eq!(uploaded.len(), 2);
+        let artifact_call = uploaded
+            .iter()
+            .find(|(_tag, files)| files.iter().any(|f| f.ends_with("app.tar.gz")))
+            .expect("expected an upload call containing user artifacts");
+        assert_eq!(artifact_call.0, "v0.1.0");
+        assert_eq!(artifact_call.1.len(), 2);
+        assert!(artifact_call.1.iter().any(|f| f.ends_with("app.tar.gz")));
+        assert!(artifact_call.1.iter().any(|f| f.ends_with("app.zip")));
     }
 
     #[test]
@@ -1466,8 +1290,21 @@ mod tests {
         let plan = s.plan().unwrap();
         s.execute(&plan, false).unwrap();
 
+        // No user-declared artifacts → no user-artifact upload call. The
+        // manifest stage still uploads sr-manifest.json.
         let uploaded = s.vcs.uploaded_assets.lock().unwrap();
-        assert!(uploaded.is_empty());
+        let user_uploads: Vec<_> = uploaded
+            .iter()
+            .filter(|(_tag, files)| {
+                !files
+                    .iter()
+                    .all(|f| f.ends_with(crate::manifest::MANIFEST_ASSET_NAME))
+            })
+            .collect();
+        assert!(
+            user_uploads.is_empty(),
+            "unexpected non-manifest uploads: {user_uploads:?}"
+        );
     }
 
     #[test]
@@ -1665,5 +1502,435 @@ mod tests {
 
         let err = s.plan().unwrap_err();
         assert!(matches!(err, ReleaseError::NoCommits { .. }));
+    }
+
+    // --- build hooks + artifact validation tests ---
+
+    /// Build hooks receive SR_VERSION set to the bumped version.
+    #[test]
+    fn execute_runs_build_hook_with_version_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("saw_version.txt");
+        let cmd = format!("echo \"$SR_VERSION\" > {}", marker.display());
+
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                version_files: vec!["__sr_test_dummy_no_bump__".into()],
+                hooks: Some(HooksConfig {
+                    build: vec![cmd],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
+        let plan = s.plan().unwrap();
+        s.execute(&plan, false).unwrap();
+
+        let content = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(content.trim(), "0.1.0");
+    }
+
+    /// Build hooks run AFTER version bump — the manifest on disk contains the
+    /// new version when the build executes.
+    #[test]
+    fn execute_build_sees_bumped_version_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let cargo_path = dir.path().join("Cargo.toml");
+        std::fs::write(
+            &cargo_path,
+            "[package]\nname = \"test\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+
+        let marker = dir.path().join("observed_version.txt");
+        // Build hook reads whatever version is currently in Cargo.toml.
+        let cmd = format!(
+            "grep '^version' {} > {}",
+            cargo_path.display(),
+            marker.display()
+        );
+
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                version_files: vec![cargo_path.to_str().unwrap().to_string()],
+                hooks: Some(HooksConfig {
+                    build: vec![cmd],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
+        let plan = s.plan().unwrap();
+        s.execute(&plan, false).unwrap();
+
+        let content = std::fs::read_to_string(&marker).unwrap();
+        assert!(
+            content.contains("0.1.0"),
+            "build should see bumped version on disk, got: {content}"
+        );
+    }
+
+    /// A failing build aborts before tag/commit/release — preserves the invariant
+    /// that a tag on remote implies a successful build.
+    #[test]
+    fn execute_build_failure_leaves_no_tag_or_commit() {
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                version_files: vec!["__sr_test_dummy_no_bump__".into()],
+                hooks: Some(HooksConfig {
+                    build: vec!["false".into()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
+        let plan = s.plan().unwrap();
+        let err = s.execute(&plan, false).unwrap_err();
+        assert!(matches!(err, ReleaseError::Hook(_)), "got {err:?}");
+
+        assert!(s.git.created_tags.lock().unwrap().is_empty());
+        assert!(s.git.pushed_tags.lock().unwrap().is_empty());
+        assert!(s.git.committed.lock().unwrap().is_empty());
+        assert!(s.vcs.releases.lock().unwrap().is_empty());
+    }
+
+    /// When `hooks.build` is set, every declared artifact glob must match ≥1 file
+    /// or the pipeline aborts before tagging.
+    #[test]
+    fn execute_validation_fails_when_declared_artifact_missing() {
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                version_files: vec!["__sr_test_dummy_no_bump__".into()],
+                artifacts: vec!["/definitely/not/here/*.tar.gz".into()],
+                hooks: Some(HooksConfig {
+                    build: vec!["true".into()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
+        let plan = s.plan().unwrap();
+        let err = s.execute(&plan, false).unwrap_err();
+
+        match err {
+            ReleaseError::Vcs(ref msg) => {
+                assert!(
+                    msg.contains("matched no files"),
+                    "expected validation error, got: {msg}"
+                );
+            }
+            other => panic!("expected Vcs error, got {other:?}"),
+        }
+
+        assert!(s.git.created_tags.lock().unwrap().is_empty());
+        assert!(s.git.pushed_tags.lock().unwrap().is_empty());
+        assert!(s.vcs.releases.lock().unwrap().is_empty());
+    }
+
+    /// Validation passes when every declared glob resolves to ≥1 file.
+    #[test]
+    fn execute_validation_passes_when_all_artifacts_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("app.tar.gz"), "fake").unwrap();
+
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                version_files: vec!["__sr_test_dummy_no_bump__".into()],
+                artifacts: vec![dir.path().join("*.tar.gz").to_str().unwrap().to_string()],
+                hooks: Some(HooksConfig {
+                    build: vec!["true".into()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
+        let plan = s.plan().unwrap();
+        s.execute(&plan, false).unwrap();
+
+        assert_eq!(*s.git.created_tags.lock().unwrap(), vec!["v0.1.0"]);
+    }
+
+    /// No `hooks.build` means no contract — missing declared artifacts do NOT
+    /// fail the pipeline. Preserves today's behavior for users building
+    /// outside sr.
+    #[test]
+    fn execute_validation_skipped_without_build_hooks() {
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                version_files: vec!["__sr_test_dummy_no_bump__".into()],
+                artifacts: vec!["/still/not/here/*.tar.gz".into()],
+                // No hooks.build — today's behavior.
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
+        let plan = s.plan().unwrap();
+        s.execute(&plan, false).unwrap();
+
+        assert_eq!(*s.git.created_tags.lock().unwrap(), vec!["v0.1.0"]);
+    }
+
+    // --- manifest + reconciliation tests ---
+
+    /// sr-manifest.json is uploaded on every successful release.
+    #[test]
+    fn execute_uploads_manifest_as_final_asset() {
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], test_config());
+        let plan = s.plan().unwrap();
+        s.execute(&plan, false).unwrap();
+
+        let assets = s.vcs.list_assets("v0.1.0").unwrap();
+        assert!(
+            assets.contains(&crate::manifest::MANIFEST_ASSET_NAME.to_string()),
+            "manifest should be uploaded; got {assets:?}"
+        );
+    }
+
+    /// Manifest records the tag, the commit sha at HEAD, and (when declared)
+    /// the resolved artifact basenames.
+    #[test]
+    fn execute_manifest_contains_tag_and_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("app.tar.gz"), "fake").unwrap();
+
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                version_files: vec!["__sr_test_dummy_no_bump__".into()],
+                artifacts: vec![dir.path().join("*.tar.gz").to_str().unwrap().to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
+        let plan = s.plan().unwrap();
+        s.execute(&plan, false).unwrap();
+
+        let manifest_bytes = s
+            .vcs
+            .fetch_asset("v0.1.0", crate::manifest::MANIFEST_ASSET_NAME)
+            .unwrap()
+            .expect("manifest should be present");
+        let manifest: crate::manifest::Manifest = serde_json::from_slice(&manifest_bytes).unwrap();
+
+        assert_eq!(manifest.tag, "v0.1.0");
+        assert!(manifest.artifacts.iter().any(|a| a == "app.tar.gz"));
+        assert!(!manifest.commit_sha.is_empty());
+        assert!(!manifest.sr_version.is_empty());
+    }
+
+    /// Second run against a release that already has all declared artifacts
+    /// uploaded is a no-op for upload — no duplicate asset errors.
+    #[test]
+    fn execute_skips_already_uploaded_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("app.tar.gz"), "fake").unwrap();
+
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                version_files: vec!["__sr_test_dummy_no_bump__".into()],
+                artifacts: vec![dir.path().join("*.tar.gz").to_str().unwrap().to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
+        let plan = s.plan().unwrap();
+
+        // First run uploads the artifact + manifest.
+        s.execute(&plan, false).unwrap();
+        let uploads_after_first = s.vcs.uploaded_assets.lock().unwrap().len();
+
+        // Second run should skip both — no new uploads.
+        s.execute(&plan, false).unwrap();
+        let uploads_after_second = s.vcs.uploaded_assets.lock().unwrap().len();
+
+        assert_eq!(
+            uploads_after_first, uploads_after_second,
+            "idempotent re-run should not re-upload existing assets"
+        );
+    }
+
+    /// plan() refuses to cut a new version when the latest remote tag has a
+    /// manifest declaring artifacts that aren't present on the release.
+    #[test]
+    fn plan_blocks_when_previous_release_incomplete() {
+        let prev_tag = TagInfo {
+            name: "v1.0.0".into(),
+            version: Version::new(1, 0, 0),
+            sha: "a".repeat(40),
+        };
+        let s = make_strategy(
+            vec![prev_tag],
+            vec![raw_commit("feat: new thing")],
+            test_config(),
+        );
+
+        // Seed an incomplete manifest on the remote: declares an asset that
+        // isn't in list_assets.
+        let incomplete = crate::manifest::Manifest {
+            sr_version: "7.1.0".into(),
+            tag: "v1.0.0".into(),
+            commit_sha: "a".repeat(40),
+            artifacts: vec!["missing-binary.tar.gz".into()],
+            completed_at: "2026-04-18T00:00:00Z".into(),
+        };
+        s.vcs.seed_asset(
+            "v1.0.0",
+            crate::manifest::MANIFEST_ASSET_NAME,
+            serde_json::to_vec(&incomplete).unwrap(),
+        );
+
+        let err = s.plan().unwrap_err();
+        match err {
+            ReleaseError::Vcs(ref msg) => {
+                assert!(
+                    msg.contains("incomplete") && msg.contains("missing-binary.tar.gz"),
+                    "unexpected error: {msg}"
+                );
+            }
+            other => panic!("expected Vcs error, got {other:?}"),
+        }
+    }
+
+    /// Complete manifest on the previous release → plan proceeds.
+    #[test]
+    fn plan_passes_when_previous_release_complete() {
+        let prev_tag = TagInfo {
+            name: "v1.0.0".into(),
+            version: Version::new(1, 0, 0),
+            sha: "a".repeat(40),
+        };
+        let s = make_strategy(
+            vec![prev_tag],
+            vec![raw_commit("feat: next thing")],
+            test_config(),
+        );
+
+        let complete = crate::manifest::Manifest {
+            sr_version: "7.1.0".into(),
+            tag: "v1.0.0".into(),
+            commit_sha: "a".repeat(40),
+            artifacts: vec!["ok.tar.gz".into()],
+            completed_at: "2026-04-18T00:00:00Z".into(),
+        };
+        s.vcs.seed_asset(
+            "v1.0.0",
+            crate::manifest::MANIFEST_ASSET_NAME,
+            serde_json::to_vec(&complete).unwrap(),
+        );
+        s.vcs.seed_asset("v1.0.0", "ok.tar.gz", b"bin".to_vec());
+
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.next_version, Version::new(1, 1, 0));
+    }
+
+    /// No manifest on the previous release (legacy/pre-sr) → plan proceeds
+    /// without blocking. We can't distinguish legacy from aborted remotely.
+    #[test]
+    fn plan_passes_when_previous_release_has_no_manifest() {
+        let prev_tag = TagInfo {
+            name: "v1.0.0".into(),
+            version: Version::new(1, 0, 0),
+            sha: "a".repeat(40),
+        };
+        let s = make_strategy(
+            vec![prev_tag],
+            vec![raw_commit("feat: legacy compat")],
+            test_config(),
+        );
+        // Intentionally no seed — fetch_asset returns None → Unknown status.
+
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.next_version, Version::new(1, 1, 0));
+    }
+
+    /// --force bypasses the reconciliation check so a broken tag can be healed
+    /// by re-running the pipeline against it.
+    #[test]
+    fn plan_with_force_bypasses_reconciliation_block() {
+        let prev_tag = TagInfo {
+            name: "v1.0.0".into(),
+            version: Version::new(1, 0, 0),
+            sha: "a".repeat(40),
+        };
+        let mut s = make_strategy(vec![prev_tag], vec![], test_config());
+        s.git.head = "a".repeat(40); // HEAD at tag → force-rerelease path
+        s.force = true;
+
+        let incomplete = crate::manifest::Manifest {
+            sr_version: "7.1.0".into(),
+            tag: "v1.0.0".into(),
+            commit_sha: "a".repeat(40),
+            artifacts: vec!["missing.tar.gz".into()],
+            completed_at: "2026-04-18T00:00:00Z".into(),
+        };
+        s.vcs.seed_asset(
+            "v1.0.0",
+            crate::manifest::MANIFEST_ASSET_NAME,
+            serde_json::to_vec(&incomplete).unwrap(),
+        );
+
+        // Should NOT error — --force bypasses the reconciliation check.
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.next_version, Version::new(1, 0, 0));
     }
 }
