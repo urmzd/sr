@@ -1,5 +1,14 @@
 # Changelog
 
+## 7.1.0 (2026-04-18)
+
+### Features
+
+- **core**: stage pipeline, build hooks, and release reconciliation (#22) ([7979d61](https://github.com/urmzd/sr/commit/7979d61be646a2d5051d17c2e8593ea47d8883d6))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v7.0.0...v7.1.0)
+
+
 ## 7.0.0 (2026-04-15)
 
 ### Breaking
