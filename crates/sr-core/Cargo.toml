@@ -26,6 +26,4 @@ base64 = { workspace = true }
 ureq = { workspace = true }
 sha2 = { workspace = true }
 dirs = { workspace = true }
-
-[dev-dependencies]
 tempfile = { workspace = true }

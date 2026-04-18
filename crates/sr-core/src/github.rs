@@ -14,6 +14,16 @@ struct ReleaseResponse {
     id: u64,
     html_url: String,
     upload_url: String,
+    #[serde(default)]
+    assets: Vec<ReleaseAsset>,
+}
+
+#[derive(serde::Deserialize, Debug, Clone)]
+struct ReleaseAsset {
+    #[allow(dead_code)]
+    id: u64,
+    name: String,
+    url: String,
 }
 
 impl GitHubProvider {
@@ -394,6 +404,42 @@ impl VcsProvider for GitHubProvider {
         // GET the release by tag to confirm it exists and is accessible
         self.get_release_by_tag(tag)?;
         Ok(())
+    }
+
+    fn list_assets(&self, tag: &str) -> Result<Vec<String>, ReleaseError> {
+        match self.get_release_by_tag(tag) {
+            Ok(release) => Ok(release.assets.into_iter().map(|a| a.name).collect()),
+            // No release yet — no assets.
+            Err(ReleaseError::Vcs(msg)) if msg.contains("404") => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn fetch_asset(&self, tag: &str, name: &str) -> Result<Option<Vec<u8>>, ReleaseError> {
+        let release = match self.get_release_by_tag(tag) {
+            Ok(r) => r,
+            Err(ReleaseError::Vcs(msg)) if msg.contains("404") => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let asset = match release.assets.into_iter().find(|a| a.name == name) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+        // GET the asset URL with Accept: application/octet-stream returns bytes.
+        let resp = self
+            .agent()
+            .get(&asset.url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .header("Accept", "application/octet-stream")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "sr-github")
+            .call()
+            .map_err(|e| ReleaseError::Vcs(format!("GitHub API GET {}: {e}", asset.url)))?;
+        let bytes = resp
+            .into_body()
+            .read_to_vec()
+            .map_err(|e| ReleaseError::Vcs(format!("failed to read asset body: {e}")))?;
+        Ok(Some(bytes))
     }
 }
 

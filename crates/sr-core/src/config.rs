@@ -384,8 +384,16 @@ impl Default for PackageConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct HooksConfig {
-    /// Runs after version bump, before commit (build with bumped versions).
+    /// Runs before any mutation — tests, lints, validations that may abort the release.
     pub pre_release: Vec<String>,
+    /// Runs after version files are bumped on disk, before the release is
+    /// committed or tagged. Commands here read the new version from the
+    /// manifest and produce the declared `artifacts`. A failure leaves the
+    /// workspace dirty but no commit/tag/push — `git checkout .` heals it.
+    ///
+    /// When set, sr enforces that every declared artifact glob resolves to
+    /// ≥1 file before the tag is created.
+    pub build: Vec<String>,
     /// Runs after tag + GitHub release (publish to registries).
     pub post_release: Vec<String>,
 }
@@ -671,8 +679,15 @@ packages:
     # stage_files: []
     # artifacts: []
     # hooks:
+    #   # Runs before any mutation: tests, lints. May abort the release.
     #   pre_release:
+    #     - cargo test
+    #   # Runs after version bump, before tag/commit. Produces the declared
+    #   # `artifacts` with the new version embedded. sr verifies every
+    #   # artifact glob resolves to >=1 file before tagging.
+    #   build:
     #     - cargo build --release
+    #   # Runs after tag + GitHub release. Must be idempotent.
     #   post_release:
     #     - cargo publish
 "#
