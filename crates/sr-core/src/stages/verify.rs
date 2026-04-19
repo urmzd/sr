@@ -22,7 +22,9 @@ impl Stage for VerifyRelease {
                 "  The tag {} was pushed but the GitHub release may be incomplete.",
                 ctx.plan.tag_name
             );
-            eprintln!("  Re-run with --force to retry.");
+            eprintln!(
+                "  Push a new commit to roll forward; the broken release will remain as a dangling record."
+            );
         }
         Ok(())
     }

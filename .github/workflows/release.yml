@@ -3,23 +3,13 @@ name: Release
 on:
   push:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      force:
-        description: "Re-release the current tag (use when a previous release partially failed)"
-        type: boolean
-        default: false
 
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  ci:
-    uses: ./.github/workflows/ci.yml
-
   build:
-    needs: ci
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -100,10 +90,11 @@ jobs:
 
   release:
     name: Release
-    needs: [ci, build]
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
     steps:
       - name: Generate app token
         id: app-token
@@ -117,17 +108,6 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
-          path: sr
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: sr
-
-      - name: Build sr
-        working-directory: sr
-        run: cargo build --release -p sr-cli
 
       - name: Download artifacts
         uses: actions/download-artifact@v8
@@ -143,69 +123,31 @@ jobs:
           chmod +x release-assets/sr-*[!e]
           ls -la release-assets/
 
-      - name: Run sr release
-        id: sr
-        working-directory: sr
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Install sr from matrix artifact
         run: |
-          set -uo pipefail
-          set +e
-          JSON=$(./target/release/sr release ${{ inputs.force && '--force' || '' }} --artifacts "../release-assets/*" | tail -1)
-          RC=${PIPESTATUS[0]}
-          set -e
-          if [ $RC -eq 0 ]; then
-            echo "released=true" >> "$GITHUB_OUTPUT"
-            echo "version=$(echo "$JSON" | jq -r '.version')" >> "$GITHUB_OUTPUT"
-          elif [ $RC -eq 2 ]; then
-            echo "No releasable commits — skipping release"
-            echo "released=false" >> "$GITHUB_OUTPUT"
-          else
-            exit $RC
-          fi
+          install -m 0755 release-assets/sr-x86_64-unknown-linux-gnu /usr/local/bin/sr
+          sr --version
 
-    outputs:
-      released: ${{ steps.sr.outputs.released }}
-      tag: v${{ steps.sr.outputs.version }}
-
-  publish:
-    needs: release
-    if: needs.release.outputs.released == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release.outputs.tag }}
-          path: sr
-
+      # Toolchain only needed for cargo publish (called from sr.yaml hooks.post_release).
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: sr
 
       - name: Authenticate with crates.io
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
 
-      - name: Publish to crates.io
-        working-directory: sr
+      - name: Run sr release
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
-          publish() {
-            local output
-            output=$(cargo publish -p "$1" 2>&1) && return 0
-            if echo "$output" | grep -q "already exists"; then
-              echo "$1 already published, skipping"
-              return 0
-            fi
-            echo "$output" >&2
-            return 1
-          }
-          publish sr-core
-          sleep 30
-          publish sr-cli
+          set -uo pipefail
+          set +e
+          sr release | tail -1
+          RC=${PIPESTATUS[0]}
+          set -e
+          if [ $RC -eq 0 ] || [ $RC -eq 2 ]; then
+            exit 0
+          fi
+          exit $RC

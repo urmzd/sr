@@ -26,7 +26,7 @@ sr reads the commit history from HEAD back to the latest tag. It doesn't care *h
 
 ### `sr release` exits with code 2
 
-Exit code 2 means **no releasable commits** were found since the last tag. This is not an error — it means all commits since the last release are either non-bumping types (e.g. `chore`, `docs`, `ci`) or non-conventional messages that were skipped. To force a release anyway, use `sr release --force`.
+Exit code 2 means **no releasable commits** were found since the last tag. This is not an error — it means all commits since the last release are either non-bumping types (e.g. `chore`, `docs`, `ci`) or non-conventional messages that were skipped. To ship a release anyway, push a `feat:`/`fix:`/`perf:`/`refactor:` commit (an empty commit works: `git commit --allow-empty -m "fix: trigger release"`).
 
 ### Changelog is not generated
 

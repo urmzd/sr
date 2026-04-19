@@ -40,7 +40,6 @@ Use `sr` to manage the full release lifecycle.
 | `sr plan` | Preview next release (version, commits, changelog) |
 | `sr release` | Execute a full release |
 | `sr release --dry-run` | Simulate without side effects |
-| `sr release --force` | Re-release current tag (partial failure recovery) |
 | `sr release --sign-tags` | Sign tags with GPG/SSH |
 | `sr release --draft` | Create GitHub release as draft |
 | `sr release -p <name>` | Release a specific monorepo package |

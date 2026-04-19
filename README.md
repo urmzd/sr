@@ -394,7 +394,6 @@ All diagnostic messages go to stderr, so stdout is always clean JSON (or empty o
 sr release -p core              # target a specific monorepo package
 sr release -c canary            # release via named channel
 sr release --dry-run            # preview without making changes
-sr release --force              # re-release the current tag (for partial failure recovery)
 sr release --prerelease alpha   # produce pre-release versions (e.g. 1.2.0-alpha.1)
 sr release --sign-tags          # sign tags with GPG/SSH (git tag -s)
 sr release --draft              # create GitHub release as a draft
@@ -415,18 +414,11 @@ sr completions bash             # generate Bash completions
 | `1` | Real error — configuration issue, git failure, VCS provider error, etc. |
 | `2` | No releasable changes — no new commits or no releasable commit types since the last tag. |
 
-### `--force` flag
+### Recovery from a broken release
 
-Use `--force` to re-run a release that partially failed (e.g. the tag was created but artifact upload failed). Force mode only works when HEAD is exactly at the latest tag — it re-executes the release pipeline for that tag without bumping the version.
+sr never re-releases the same commit. If a release breaks mid-pipeline (artifact upload died, post-release hook failed, CI runner dropped), the tag and partial release stay on GitHub as a dangling record. To recover, push a new commit — sr cuts the next version on top, the floating major tag moves to the new release, and users installing get the good one.
 
-```bash
-# Re-release the current tag after a partial failure
-sr release --force
-```
-
-Force mode will error if:
-- There are no tags yet (nothing to re-release)
-- HEAD is not at the latest tag (there are new commits — use a normal release instead)
+The next `sr release` invocation will print a warning if the prior release is incomplete (manifest declares assets that aren't on the release), but never blocks. Roll forward is the only recovery path.
 
 ## Configuration
 
@@ -760,7 +752,7 @@ changelog:
 9. **Upload artifacts** — MIME-type-aware uploads to the GitHub release (collected from all packages)
 10. **Package `post_release` hooks** — publish to registries, send notifications (e.g. `cargo publish`)
 
-Steps 6-9 are idempotent — re-running with `--force` will skip already-completed steps.
+Tag, push, release create, and asset upload steps are idempotent — sr skips work that's already reflected on the remote.
 
 ### Release channels
 
@@ -923,7 +915,7 @@ sr reads the commit history from HEAD back to the latest tag. It doesn't care *h
 
 ### `sr release` exits with code 2
 
-Exit code 2 means **no releasable commits** were found since the last tag. This is not an error — it means all commits since the last release are either non-bumping types (e.g. `chore`, `docs`, `ci`) or non-conventional messages that were skipped. To force a release anyway, use `sr release --force`.
+Exit code 2 means **no releasable commits** were found since the last tag. This is not an error — it means all commits since the last release are either non-bumping types (e.g. `chore`, `docs`, `ci`) or non-conventional messages that were skipped. To ship a release anyway, push a `feat:`/`fix:`/`perf:`/`refactor:` commit (an empty commit works: `git commit --allow-empty -m "fix: trigger release"`).
 
 ### Changelog is not generated
 

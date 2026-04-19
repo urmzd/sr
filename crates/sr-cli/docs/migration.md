@@ -9,7 +9,7 @@
 | **5.x** | Release-only CLI | CLI commands stripped to release engineering; all git/PR/review workflows move to MCP tools |
 | **6.x** | MCP-first workflows | PR, worktree, and breaking-commit tools added to MCP server; `sr init` improved |
 | **7.x** | Config redesign | Entire config structure rewritten; 6 top-level sections; MCP server removed; agentspec removed; file snapshot/rollback removed |
-| **7.1** | Build stage + reconciliation | New `hooks.build` phase runs after bump before tag; declared artifacts validated before tagging; `sr-manifest.json` proves completion; idempotent uploads; reconciliation blocks new releases on top of broken ones |
+| **7.1** | Build stage + roll-forward recovery | New `hooks.build` phase runs after bump before tag; declared artifacts validated before tagging; `sr-manifest.json` proves completion; idempotent uploads; reconciliation warns (never blocks); `--force` flag removed — recovery is push a new commit |
 
 ---
 
@@ -309,7 +309,7 @@ date. The `.sr/` directory is automatically gitignored by `sr init`.
 
 ## Migrating from 7.0 to 7.1
 
-v7.1 is **additive, non-breaking**. Existing configs and workflows continue to work unchanged. The new capabilities are opt-in via `hooks.build`, plus one automatic behavior change: sr now uploads `sr-manifest.json` as the final asset on every release and refuses to cut a new release on top of a broken one.
+v7.1 is **additive in config, subtractive in CLI**. Existing `sr.yaml` files continue to work. New capability is opt-in via `hooks.build`. One CLI flag (`--force`) and one workflow input pattern (`workflow_dispatch` with `force`) go away — recovery is now strictly via pushing a new commit, never re-running the same release. sr also uploads `sr-manifest.json` as the final asset on every release for completion tracking.
 
 ### What changed in the pipeline
 
@@ -333,7 +333,7 @@ Two new stages:
 Two new behaviors:
 
 - **Idempotent upload**: `UploadArtifacts` skips any asset whose basename is already present on the release. Safe to re-run.
-- **Reconciliation check**: at the start of `sr release`, sr inspects the latest remote tag's `sr-manifest.json`. If it declares artifacts that aren't present on the release, sr errors with: `previous release v1.2.3 is incomplete: ... missing (...). Heal it first — git checkout v1.2.3 && sr release --force — then re-run sr release.` Tags with no manifest (legacy) pass silently. `--force` bypasses.
+- **Reconciliation warning**: at the start of `sr release`, sr inspects the latest remote tag's `sr-manifest.json`. If it declares artifacts that aren't present on the release, sr prints a warning and **proceeds** — the broken release stays as a dangling record, and the new release rolls forward on top. Tags with no manifest (legacy or aborted-before-manifest) pass silently. There is no `--force` flag; recovery is by pushing a new commit.
 
 ### Opt-in `hooks.build` (recommended)
 
@@ -369,7 +369,12 @@ If `hooks.build` is empty, pipeline behavior is identical to v7.0 — no validat
 
 ### GitHub Actions workflow changes
 
-Workflows pin `urmzd/sr@v7` (floating major) — they pick up v7.1 automatically. Per-pattern guidance:
+Workflows pin `urmzd/sr@v7` (floating major) — they pick up v7.1 automatically. Two universal cleanup steps for any sr-using workflow:
+
+1. **Drop the `force` input from `workflow_dispatch`.** It no longer does anything; the action's `force:` input is gone. If you have a workflow_dispatch trigger purely for recovery, you can remove it entirely — recovery is just a normal `git push` of a fix commit.
+2. **Drop the `force: ${{ inputs.force }}` parameter** anywhere it appears in `with:` blocks for `urmzd/sr@v7`.
+
+Per-pattern guidance:
 
 **Pattern A — build + sr in same job (teasr, fsrc, agentspec, github-insights, urmzd.com, zigbee-skill).** Move the build steps from the workflow into `hooks.build` in `sr.yaml`. The workflow reduces to a single `urmzd/sr@v7` step.
 
@@ -389,41 +394,22 @@ Workflows pin `urmzd/sr@v7` (floating major) — they pick up v7.1 automatically
 
 **Pattern D — post-release build (incipit, linear-gp, saige).** This pattern is structurally unreachable by sr's validation: sr completes (no artifacts declared → validate skipped → manifest uploaded as "complete"), then the workflow's post-release build runs outside sr. If that build fails, sr has no record and reconciliation won't trigger on the next release. Two options: (a) move the build into `hooks.build` on the same runner as sr, or (b) accept that this pattern has no binary-presence guarantee.
 
-### Recovery: when a release breaks mid-way
+### Recovery: roll forward, never re-release the same commit
 
-Under v7.1, a partial failure is now detectable and recoverable:
+sr never re-releases the same commit. If a release breaks mid-pipeline (artifact upload died, post-release hook failed, CI runner dropped), the tag and partial release stay on GitHub as a dangling record. Recovery is to **push a new commit**:
 
 ```bash
-# Scenario: sr uploaded 2 of 3 declared artifacts, then CI runner died.
-# Next release attempt:
-$ sr release
-Error: previous release v1.2.3 is incomplete: 1 declared asset(s) missing
-(sr-aarch64-darwin.tar.gz). Heal it first — git checkout v1.2.3 && sr release --force —
-then re-run sr release.
-
-# Heal:
-$ git checkout v1.2.3
-$ sr release --force   # re-runs the pipeline; idempotent upload skips the 2 already present
-$ git checkout main
-$ sr release           # now succeeds; cuts v1.2.4
+# Scenario: sr uploaded 2 of 3 declared artifacts during v1.2.3, then CI runner died.
+# To recover, push a fix (or an empty commit) and let sr cut v1.2.4 on top:
+$ git commit --allow-empty -m "fix: trigger release after v1.2.3 partial"
+$ git push
+# CI runs sr release → warns about v1.2.3 being incomplete → proceeds → v1.2.4 ships.
+# Floating major tag (v1) moves to v1.2.4. Users installing get the good release.
 ```
 
-If a workflow needs to trigger recovery non-interactively, add a `force` input:
+The broken v1.2.3 stays on GitHub as history, but no floating tag points to it and the next "latest" is v1.2.4.
 
-```yaml
-on:
-  workflow_dispatch:
-    inputs:
-      force:
-        description: "Re-release current tag (reconcile broken release)"
-        type: boolean
-        default: false
-- uses: urmzd/sr@v7
-  with:
-    force: ${{ inputs.force }}
-```
-
-Many repos already have this input — they're ready.
+There is **no** `--force` flag, no `workflow_dispatch` input for recovery, no `git checkout` step, no `cargo publish` retry. sr never tries to re-release the same version, so `cargo publish: already exists` never fires.
 
 ### Legacy releases
 
