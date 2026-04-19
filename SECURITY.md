@@ -38,6 +38,5 @@ sr is a release engineering CLI that interacts with:
 ## Supply Chain
 
 - Built with Rust (memory-safe, no garbage collector)
-- Dependencies audited with [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny) — see [`deny.toml`](deny.toml)
 - CI builds are reproducible from tagged source
 - Pre-built binaries are published as GitHub release assets with checksums

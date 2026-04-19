@@ -45,6 +45,10 @@ Ensure your manifest files are listed in `packages[].version_files` and match a 
 
 Set `git.sign_tags: true` in `sr.yaml` or pass `--sign-tags`. You must have a GPG or SSH signing key configured in git (`git config user.signingkey`).
 
+### Can sr cross-compile binaries?
+
+No — sr runs as a single process on one runner. `hooks.build` is for single-platform native builds (e.g. `cargo build --release` on the current host). For cross-platform binaries, run a matrix in CI (GitHub Actions `strategy.matrix`, [cargo-dist](https://github.com/axodotdev/cargo-dist), [goreleaser](https://goreleaser.com/), Nix, etc.), deposit outputs in a known directory, then call sr. sr uploads whatever matches `packages[].artifacts` — it's agnostic to how those files were produced. See the [Build strategy](../README.md#build-strategy) section for the decision table.
+
 ### Migrating from v6.x
 
 Run `sr migrate` to see the full migration guide, or read [migration.md](migration.md).
