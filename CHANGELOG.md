@@ -1,5 +1,19 @@
 # Changelog
 
+## 7.1.2 (2026-04-19)
+
+### Bug Fixes
+
+- **core**: rewrite Cargo.lock workspace versions during bump ([d2b7582](https://github.com/urmzd/sr/commit/d2b7582a6ed50ec2e230d6e4d2a4b1f2e356fa96))
+
+### Misc
+
+- remove AI command references and --merge flag from sr skill ([66755ed](https://github.com/urmzd/sr/commit/66755ed4b95274ce4749644a2d3aa410a856752d))
+- clarify hooks lifecycle and add build strategy guide (#24) ([744c6c4](https://github.com/urmzd/sr/commit/744c6c4198c8e90b87d61c6df690a97d01f21f17))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v7.1.1...v7.1.2)
+
+
 ## 7.1.1 (2026-04-19)
 
 ### Refactoring
