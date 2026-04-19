@@ -1,5 +1,14 @@
 # Changelog
 
+## 7.1.1 (2026-04-19)
+
+### Refactoring
+
+- **core**: drop --force, warn-only reconciliation, consolidated release workflow (#23) ([408b072](https://github.com/urmzd/sr/commit/408b072e61e35326e517fd6f2550333acb47492c))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v7.1.0...v7.1.1)
+
+
 ## 7.1.0 (2026-04-18)
 
 ### Features
