@@ -37,10 +37,6 @@ enum Commands {
         #[arg(long = "artifacts")]
         artifacts: Vec<String>,
 
-        /// Re-release the current tag (use when a previous release partially failed)
-        #[arg(long)]
-        force: bool,
-
         /// Additional file globs to stage in the release commit (repeatable, e.g. Cargo.lock)
         #[arg(long = "stage-files")]
         stage_files: Vec<String>,
@@ -114,7 +110,6 @@ use sr_core::release::NoopVcsProvider;
 
 fn build_local_strategy(
     config: Config,
-    force: bool,
     prerelease_id: Option<String>,
     draft: bool,
 ) -> anyhow::Result<
@@ -139,7 +134,6 @@ fn build_local_strategy(
         parser,
         formatter,
         config,
-        force,
         prerelease_id,
         draft,
     })
@@ -147,7 +141,6 @@ fn build_local_strategy(
 
 fn build_full_strategy(
     config: Config,
-    force: bool,
     prerelease_id: Option<String>,
     draft: bool,
 ) -> anyhow::Result<
@@ -181,7 +174,6 @@ fn build_full_strategy(
         parser,
         formatter,
         config,
-        force,
         prerelease_id,
         draft,
     })
@@ -407,7 +399,7 @@ fn run() -> anyhow::Result<()> {
                 config.changelog.template.clone(),
                 config.changelog.groups.clone(),
             );
-            let strategy = build_local_strategy(config, false, None, false)?;
+            let strategy = build_local_strategy(config, None, false)?;
             let plan_result = strategy.plan();
 
             match format {
@@ -515,7 +507,6 @@ fn run() -> anyhow::Result<()> {
             channel,
             dry_run,
             artifacts,
-            force,
             stage_files,
             prerelease,
             sign_tags,
@@ -554,26 +545,24 @@ fn run() -> anyhow::Result<()> {
                 pkg.stage_files.extend(stage_files);
             }
 
-            let plan =
-                match build_full_strategy(config.clone(), force, prerelease_id.clone(), draft) {
-                    Ok(strategy) => {
+            let plan = match build_full_strategy(config.clone(), prerelease_id.clone(), draft) {
+                Ok(strategy) => {
+                    let plan = strategy.plan()?;
+                    strategy.execute(&plan, dry_run)?;
+                    plan
+                }
+                Err(e) => {
+                    if dry_run {
+                        eprintln!("warning: {e} (continuing dry-run without GitHub)");
+                        let strategy = build_local_strategy(config, prerelease_id, draft)?;
                         let plan = strategy.plan()?;
                         strategy.execute(&plan, dry_run)?;
                         plan
+                    } else {
+                        return Err(e);
                     }
-                    Err(e) => {
-                        if dry_run {
-                            eprintln!("warning: {e} (continuing dry-run without GitHub)");
-                            let strategy =
-                                build_local_strategy(config, force, prerelease_id, draft)?;
-                            let plan = strategy.plan()?;
-                            strategy.execute(&plan, dry_run)?;
-                            plan
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                };
+                }
+            };
             #[derive(serde::Serialize)]
             struct ReleaseOutput {
                 version: String,

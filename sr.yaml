@@ -25,6 +25,18 @@ packages:
   - path: "."
     version_files: [Cargo.toml]
     version_files_strict: false
+    # Cross-platform binaries are built by the release.yml matrix (one per
+    # target) and consolidated into release-assets/ before sr runs. sr only
+    # uploads them — no `hooks.build` because the matrix can't run in one
+    # process.
+    artifacts:
+      - "release-assets/sr-*"
     hooks:
-      pre_release:
-        - "cargo test --workspace"
+      # Tests run in CI on the PR — no need to re-run them here. cargo
+      # publish runs after the tag/release/uploads succeed; if a publish
+      # fails the next sr run rolls forward to a new version (sr never
+      # re-publishes the same version, so "already exists" never fires).
+      post_release:
+        - cargo publish -p sr-core
+        - sleep 30
+        - cargo publish -p sr-cli

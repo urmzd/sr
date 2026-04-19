@@ -132,8 +132,6 @@ pub struct TrunkReleaseStrategy<G, V, C, F> {
     pub parser: C,
     pub formatter: F,
     pub config: Config,
-    /// When true, re-release the current tag if HEAD is at the latest tag.
-    pub force: bool,
     /// Pre-release identifier resolved from the active channel (None = stable).
     pub prerelease_id: Option<String>,
     /// Whether the GitHub release should be created as a draft.
@@ -215,26 +213,26 @@ where
         let latest_stable = all_tags.iter().rev().find(|t| t.version.pre.is_empty());
         let latest_any = all_tags.last();
 
-        // Reconciliation check: don't cut a new release on top of an incomplete
-        // one. `--force` bypasses (it's explicit user intent to re-run the
-        // pipeline, which itself heals). Unknown status (legacy release, no
-        // manifest) passes silently — we can't distinguish "old release" from
-        // "sr died before upload" remotely.
-        if !self.force
-            && let Some(latest) = all_tags.last()
-        {
+        // Reconciliation: warn if the latest remote tag's release is
+        // incomplete (manifest says declared artifacts are missing), but
+        // never block. Users recover by pushing a new commit; the broken
+        // release stays as a dangling record. Unknown status (no manifest =
+        // legacy release or sr died before writing the manifest) passes
+        // silently — we can't distinguish those remotely. Transport errors
+        // from fetching the manifest bubble up as hard errors because a
+        // release can't proceed without GitHub anyway.
+        if let Some(latest) = all_tags.last() {
             match crate::manifest::check_release_status(&self.vcs, &latest.name)? {
                 crate::manifest::ReleaseStatus::Incomplete {
                     missing_artifacts, ..
                 } => {
-                    return Err(ReleaseError::Vcs(format!(
-                        "previous release {tag} is incomplete: {} declared asset(s) missing ({}). \
-                         Heal it first — `git checkout {tag} && sr release --force` — \
-                         then re-run sr release.",
+                    eprintln!(
+                        "warning: previous release {} is incomplete: {} declared asset(s) missing ({}). \
+                         Continuing — the broken release will remain as a dangling record.",
+                        latest.name,
                         missing_artifacts.len(),
                         missing_artifacts.join(", "),
-                        tag = latest.name,
-                    )));
+                    );
                 }
                 crate::manifest::ReleaseStatus::Complete(_)
                 | crate::manifest::ReleaseStatus::Unknown => {}
@@ -268,31 +266,6 @@ where
         };
 
         if raw_commits.is_empty() {
-            // Force mode: re-release if HEAD is exactly at the latest tag
-            if self.force
-                && let Some(info) = tag_info
-            {
-                let head = self.git.head_sha()?;
-                if head == info.sha {
-                    let floating_tag_name = if self.config.git.floating_tag {
-                        Some(format!(
-                            "{}{}",
-                            self.config.git.tag_prefix, info.version.major
-                        ))
-                    } else {
-                        None
-                    };
-                    return Ok(ReleasePlan {
-                        current_version: Some(info.version.clone()),
-                        next_version: info.version.clone(),
-                        bump: BumpLevel::Patch,
-                        commits: vec![],
-                        tag_name: info.name.clone(),
-                        floating_tag_name,
-                        prerelease: is_prerelease,
-                    });
-                }
-            }
             let (tag, sha) = match tag_info {
                 Some(info) => (info.name.clone(), info.sha.clone()),
                 None => ("(none)".into(), "(none)".into()),
@@ -315,7 +288,6 @@ where
         let commit_count = conventional_commits.len();
         let bump = match determine_bump(&conventional_commits, &classifier) {
             Some(b) => b,
-            None if self.force => BumpLevel::Patch,
             None => {
                 return Err(ReleaseError::NoBump {
                     tag: tag_for_err,
@@ -783,7 +755,6 @@ mod tests {
             parser: TypedCommitParser::default(),
             formatter: DefaultChangelogFormatter::new(None, default_changelog_groups()),
             config,
-            force: false,
             prerelease_id: None,
             draft: false,
         }
@@ -814,24 +785,6 @@ mod tests {
         );
         let err = s.plan().unwrap_err();
         assert!(matches!(err, ReleaseError::NoBump { .. }));
-    }
-
-    #[test]
-    fn force_releases_patch_when_no_releasable_commits() {
-        let tag = TagInfo {
-            name: "v1.2.3".into(),
-            version: Version::new(1, 2, 3),
-            sha: "d".repeat(40),
-        };
-        let mut s = make_strategy(
-            vec![tag],
-            vec![raw_commit("chore: rename package")],
-            Config::default(),
-        );
-        s.force = true;
-        let plan = s.plan().unwrap();
-        assert_eq!(plan.next_version, Version::new(1, 2, 4));
-        assert_eq!(plan.bump, BumpLevel::Patch);
     }
 
     #[test]
@@ -1467,43 +1420,6 @@ mod tests {
         assert_eq!(s.git.force_pushed_tags.lock().unwrap().len(), 2);
     }
 
-    // --- force mode tests ---
-
-    #[test]
-    fn force_rerelease_when_tag_at_head() {
-        let tag = TagInfo {
-            name: "v1.2.3".into(),
-            version: Version::new(1, 2, 3),
-            sha: "a".repeat(40),
-        };
-        let mut s = make_strategy(vec![tag], vec![], Config::default());
-        // HEAD == tag SHA, and no new commits
-        s.git.head = "a".repeat(40);
-        s.force = true;
-
-        let plan = s.plan().unwrap();
-        assert_eq!(plan.next_version, Version::new(1, 2, 3));
-        assert_eq!(plan.tag_name, "v1.2.3");
-        assert!(plan.commits.is_empty());
-        assert_eq!(plan.current_version, Some(Version::new(1, 2, 3)));
-    }
-
-    #[test]
-    fn force_fails_when_tag_not_at_head() {
-        let tag = TagInfo {
-            name: "v1.2.3".into(),
-            version: Version::new(1, 2, 3),
-            sha: "a".repeat(40),
-        };
-        let mut s = make_strategy(vec![tag], vec![], Config::default());
-        // HEAD != tag SHA
-        s.git.head = "b".repeat(40);
-        s.force = true;
-
-        let err = s.plan().unwrap_err();
-        assert!(matches!(err, ReleaseError::NoCommits { .. }));
-    }
-
     // --- build hooks + artifact validation tests ---
 
     /// Build hooks receive SR_VERSION set to the bumped version.
@@ -1809,10 +1725,10 @@ mod tests {
         );
     }
 
-    /// plan() refuses to cut a new version when the latest remote tag has a
-    /// manifest declaring artifacts that aren't present on the release.
+    /// An incomplete prior release warns but does not block. Users recover by
+    /// pushing a new commit; the broken release stays as a dangling record.
     #[test]
-    fn plan_blocks_when_previous_release_incomplete() {
+    fn plan_warns_but_proceeds_when_previous_release_incomplete() {
         let prev_tag = TagInfo {
             name: "v1.0.0".into(),
             version: Version::new(1, 0, 0),
@@ -1839,16 +1755,9 @@ mod tests {
             serde_json::to_vec(&incomplete).unwrap(),
         );
 
-        let err = s.plan().unwrap_err();
-        match err {
-            ReleaseError::Vcs(ref msg) => {
-                assert!(
-                    msg.contains("incomplete") && msg.contains("missing-binary.tar.gz"),
-                    "unexpected error: {msg}"
-                );
-            }
-            other => panic!("expected Vcs error, got {other:?}"),
-        }
+        // Should NOT error — incomplete prior is warning-only.
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.next_version, Version::new(1, 1, 0));
     }
 
     /// Complete manifest on the previous release → plan proceeds.
@@ -1903,34 +1812,71 @@ mod tests {
         assert_eq!(plan.next_version, Version::new(1, 1, 0));
     }
 
-    /// --force bypasses the reconciliation check so a broken tag can be healed
-    /// by re-running the pipeline against it.
+    /// Transport errors reading the manifest bubble up as hard errors —
+    /// nothing the user can do anyway, and the pipeline would fail downstream
+    /// for the same reason. Modeled here by wrapping fetch_asset to return Err.
     #[test]
-    fn plan_with_force_bypasses_reconciliation_block() {
+    fn plan_propagates_transport_error_on_manifest_fetch() {
+        struct ErroringVcs;
+        impl VcsProvider for ErroringVcs {
+            fn create_release(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: bool,
+                _: bool,
+            ) -> Result<String, ReleaseError> {
+                Ok(String::new())
+            }
+            fn compare_url(&self, _: &str, _: &str) -> Result<String, ReleaseError> {
+                Ok(String::new())
+            }
+            fn release_exists(&self, _: &str) -> Result<bool, ReleaseError> {
+                Ok(false)
+            }
+            fn delete_release(&self, _: &str) -> Result<(), ReleaseError> {
+                Ok(())
+            }
+            fn fetch_asset(&self, _: &str, _: &str) -> Result<Option<Vec<u8>>, ReleaseError> {
+                Err(ReleaseError::Vcs("network down".into()))
+            }
+        }
+
         let prev_tag = TagInfo {
             name: "v1.0.0".into(),
             version: Version::new(1, 0, 0),
             sha: "a".repeat(40),
         };
-        let mut s = make_strategy(vec![prev_tag], vec![], test_config());
-        s.git.head = "a".repeat(40); // HEAD at tag → force-rerelease path
-        s.force = true;
-
-        let incomplete = crate::manifest::Manifest {
-            sr_version: "7.1.0".into(),
-            tag: "v1.0.0".into(),
-            commit_sha: "a".repeat(40),
-            artifacts: vec!["missing.tar.gz".into()],
-            completed_at: "2026-04-18T00:00:00Z".into(),
+        let s = TrunkReleaseStrategy {
+            git: FakeGit::new(vec![prev_tag], vec![raw_commit("feat: x")]),
+            vcs: ErroringVcs,
+            parser: TypedCommitParser::default(),
+            formatter: DefaultChangelogFormatter::new(None, default_changelog_groups()),
+            config: test_config(),
+            prerelease_id: None,
+            draft: false,
         };
-        s.vcs.seed_asset(
-            "v1.0.0",
-            crate::manifest::MANIFEST_ASSET_NAME,
-            serde_json::to_vec(&incomplete).unwrap(),
-        );
 
-        // Should NOT error — --force bypasses the reconciliation check.
-        let plan = s.plan().unwrap();
-        assert_eq!(plan.next_version, Version::new(1, 0, 0));
+        let err = s.plan().unwrap_err();
+        match err {
+            ReleaseError::Vcs(ref msg) => assert!(msg.contains("network down"), "{msg}"),
+            other => panic!("expected Vcs error, got {other:?}"),
+        }
+    }
+
+    /// A tag at HEAD with no new commits errors with NoCommits — sr never
+    /// re-releases the same commit.
+    #[test]
+    fn no_new_commits_at_tag_head_errors() {
+        let tag = TagInfo {
+            name: "v1.2.3".into(),
+            version: Version::new(1, 2, 3),
+            sha: "a".repeat(40),
+        };
+        let mut s = make_strategy(vec![tag], vec![], Config::default());
+        s.git.head = "a".repeat(40);
+        let err = s.plan().unwrap_err();
+        assert!(matches!(err, ReleaseError::NoCommits { .. }));
     }
 }

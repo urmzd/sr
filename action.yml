@@ -10,9 +10,6 @@ inputs:
   dry-run:
     description: "Run 'sr status' instead of 'sr release' to preview without making changes"
     default: "false"
-  force:
-    description: "Re-release the current tag (use when a previous release partially failed)"
-    default: "false"
   github-token:
     description: "GitHub token for creating releases"
     default: ${{ github.token }}
@@ -135,9 +132,6 @@ runs:
           CMD="status --format json"
         else
           CMD="release"
-          if [ "${{ inputs.force }}" = "true" ]; then
-            CMD="$CMD --force"
-          fi
           if [ -n "${{ inputs.artifacts }}" ]; then
             for glob in ${{ inputs.artifacts }}; do
               CMD="$CMD --artifacts \"$glob\""
