@@ -14,7 +14,29 @@
 <p align="center">
   <a href="https://github.com/urmzd/sr/actions/workflows/ci.yml"><img src="https://github.com/urmzd/sr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://crates.io/crates/sr-cli"><img src="https://img.shields.io/crates/v/sr-cli" alt="crates.io"></a>
+  &nbsp;
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/urmzd/sr" alt="License"></a>
 </p>
+
+## Contents
+
+- [Why?](#why)
+- [Quick Start](#quick-start)
+- [Installation](#installation)
+- [Prerequisites](#prerequisites)
+- [GitHub Enterprise Server (GHES)](#github-enterprise-server-ghes)
+- [Branch Protection](#branch-protection)
+- [Lifecycle Hooks](#lifecycle-hooks)
+- [Post-release Hooks](#post-release-hooks)
+- [CLI Reference](#cli-reference)
+- [Configuration](#configuration)
+- [FAQ / Troubleshooting](#faq--troubleshooting)
+- [Architecture](#architecture)
+- [Design Philosophy](#design-philosophy)
+- [Development](#development)
+- [Contributing](#contributing)
+- [Agent Skill](#agent-skill)
+- [License](#license)
 
 ## Why?
 
@@ -994,14 +1016,14 @@ cargo clippy --workspace  # lint
 cargo build               # build
 ```
 
-## Agent Skill
-
-This project ships an [Agent Skill](https://github.com/vercel-labs/skills) for use with Claude Code, Cursor, and other compatible agents.
-
-Available as portable agent skills in [`skills/`](skills/).
-
-Once installed, use `/sr` to plan, dry-run, or execute releases from conventional commits.
-
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and PR guidelines.
+
+## Agent Skill
+
+This repo's conventions are available as portable agent skills in [`skills/`](skills/). Once installed, use `/sr` to plan, dry-run, or execute releases from conventional commits.
+
+## License
+
+[Apache-2.0](LICENSE)

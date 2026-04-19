@@ -12,7 +12,7 @@
 If you discover a security vulnerability, please report it responsibly:
 
 1. **Do not** open a public GitHub issue.
-2. Email **theurmzd@gmail.com** with:
+2. Email **hello@urmzd.com** with:
    - A description of the vulnerability
    - Steps to reproduce
    - Affected versions
