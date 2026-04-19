@@ -313,6 +313,15 @@ fn bump_cargo_toml(path: &Path, new_version: &str) -> Result<Vec<PathBuf>, Relea
         .and_then(|p| p.get("version"))
         .is_some();
 
+    let mut bumped_names: Vec<String> = Vec::new();
+    if let Some(name) = doc
+        .get("package")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+    {
+        bumped_names.push(name.to_string());
+    }
+
     if doc.get("package").and_then(|p| p.get("version")).is_some() {
         doc["package"]["version"] = toml_edit::value(new_version);
     } else if is_workspace {
@@ -352,23 +361,46 @@ fn bump_cargo_toml(path: &Path, new_version: &str) -> Result<Vec<PathBuf>, Relea
                 continue;
             }
             match bump_cargo_member(&member_path, new_version) {
-                Ok(true) => extra.push(member_path),
-                Ok(false) => {}
+                Ok((modified, name)) => {
+                    if modified {
+                        extra.push(member_path);
+                    }
+                    if let Some(n) = name {
+                        bumped_names.push(n);
+                    }
+                }
                 Err(e) => eprintln!("warning: {e}"),
             }
         }
     }
 
+    // Rewrite workspace member versions in Cargo.lock so the lockfile lands
+    // in the release commit alongside the bumped manifests. Without this, the
+    // post_release `cargo publish` hook regenerates Cargo.lock on the fly and
+    // aborts with "working directory contains uncommitted changes".
+    refresh_cargo_lock(path, new_version, &bumped_names)?;
+
     Ok(extra)
 }
 
 /// Bump `package.version` in a workspace member Cargo.toml (skip if using `version.workspace = true`).
-/// Returns `true` if the file was actually modified.
-fn bump_cargo_member(path: &Path, new_version: &str) -> Result<bool, ReleaseError> {
+/// Returns `(modified, name)` — `modified` is `true` when the file was rewritten;
+/// `name` is the member's `package.name` (present regardless of whether the
+/// version was inherited, so the caller can update Cargo.lock).
+fn bump_cargo_member(
+    path: &Path,
+    new_version: &str,
+) -> Result<(bool, Option<String>), ReleaseError> {
     let contents = read_file(path)?;
     let mut doc: toml_edit::DocumentMut = contents.parse().map_err(|e| {
         ReleaseError::VersionBump(format!("failed to parse {}: {e}", path.display()))
     })?;
+
+    let name = doc
+        .get("package")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string());
 
     // Skip members that inherit version from workspace
     let version_item = doc.get("package").and_then(|p| p.get("version"));
@@ -376,10 +408,70 @@ fn bump_cargo_member(path: &Path, new_version: &str) -> Result<bool, ReleaseErro
         Some(item) if item.is_value() => {
             doc["package"]["version"] = toml_edit::value(new_version);
             write_file(path, &doc.to_string())?;
-            Ok(true)
+            Ok((true, name))
         }
-        _ => Ok(false), // No version or uses workspace inheritance — skip
+        _ => Ok((false, name)), // No version or uses workspace inheritance
     }
+}
+
+/// Rewrite workspace-member `[[package]]` entries in Cargo.lock to the new
+/// version. Entries with a `source` field (published deps) are ignored.
+/// Silently no-ops when Cargo.lock is absent.
+fn refresh_cargo_lock(
+    manifest_path: &Path,
+    new_version: &str,
+    member_names: &[String],
+) -> Result<(), ReleaseError> {
+    if member_names.is_empty() {
+        return Ok(());
+    }
+
+    // Walk up from the manifest directory to find Cargo.lock.
+    let mut dir = manifest_path.parent();
+    let lock_path = loop {
+        let Some(d) = dir else {
+            return Ok(());
+        };
+        let candidate = d.join("Cargo.lock");
+        if candidate.exists() {
+            break candidate;
+        }
+        if d.join(".git").exists() {
+            return Ok(());
+        }
+        dir = d.parent();
+    };
+
+    let contents = read_file(&lock_path)?;
+    let mut doc: toml_edit::DocumentMut = contents.parse().map_err(|e| {
+        ReleaseError::VersionBump(format!("failed to parse {}: {e}", lock_path.display()))
+    })?;
+
+    let Some(packages) = doc
+        .get_mut("package")
+        .and_then(|p| p.as_array_of_tables_mut())
+    else {
+        return Ok(());
+    };
+
+    let mut changed = false;
+    for pkg in packages.iter_mut() {
+        let Some(name) = pkg.get("name").and_then(|n| n.as_str()) else {
+            continue;
+        };
+        if pkg.contains_key("source") {
+            continue; // Published dep, not a workspace member
+        }
+        if member_names.iter().any(|m| m == name) {
+            pkg.insert("version", toml_edit::value(new_version));
+            changed = true;
+        }
+    }
+
+    if changed {
+        write_file(&lock_path, &doc.to_string())?;
+    }
+    Ok(())
 }
 
 fn bump_package_json(path: &Path, new_version: &str) -> Result<Vec<PathBuf>, ReleaseError> {
@@ -1161,6 +1253,75 @@ version = "1.0.0"
 
         assert_eq!(extra.len(), 1);
         assert_eq!(extra[0], member);
+    }
+
+    #[test]
+    fn bump_cargo_workspace_refreshes_lockfile() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Workspace root
+        let root = dir.path().join("Cargo.toml");
+        fs::write(
+            &root,
+            r#"[workspace]
+members = ["crates/*"]
+
+[workspace.package]
+version = "1.0.0"
+"#,
+        )
+        .unwrap();
+
+        // Member with hardcoded version
+        fs::create_dir_all(dir.path().join("crates/my-core")).unwrap();
+        fs::write(
+            dir.path().join("crates/my-core/Cargo.toml"),
+            r#"[package]
+name = "my-core"
+version = "1.0.0"
+"#,
+        )
+        .unwrap();
+
+        // Cargo.lock with both a workspace member and a published dep
+        let lock = dir.path().join("Cargo.lock");
+        fs::write(
+            &lock,
+            r#"version = 3
+
+[[package]]
+name = "my-core"
+version = "1.0.0"
+
+[[package]]
+name = "serde"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abc123"
+"#,
+        )
+        .unwrap();
+
+        bump_version_file(&root, "2.0.0").unwrap();
+
+        let lock_contents = fs::read_to_string(&lock).unwrap();
+        let doc: toml_edit::DocumentMut = lock_contents.parse().unwrap();
+        let packages = doc["package"].as_array_of_tables().unwrap();
+
+        let my_core = packages
+            .iter()
+            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some("my-core"))
+            .unwrap();
+        assert_eq!(my_core["version"].as_str().unwrap(), "2.0.0");
+
+        // Published dep must NOT be touched
+        let serde = packages
+            .iter()
+            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some("serde"))
+            .unwrap();
+        assert_eq!(serde["version"].as_str().unwrap(), "1.0.0");
+        assert!(serde.contains_key("source"));
+        assert_eq!(serde["checksum"].as_str().unwrap(), "abc123");
     }
 
     #[test]
