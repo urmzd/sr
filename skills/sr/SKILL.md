@@ -1,54 +1,43 @@
 ---
 name: sr
-description: AI-powered release engineering — from commit to release. AI-powered commits, code review, PR generation, version bumping, changelog generation, and GitHub releases from conventional commits.
+description: Semantic release — automated versioning, changelog generation, and GitHub releases from conventional commits. Single binary, zero-config, language-agnostic.
 metadata:
   argument-hint: [command]
 ---
 
-# sr — AI-powered Release Engineering
+# sr — Semantic Release
 
-Use `sr` to manage the full release lifecycle.
+Use `sr` to manage the full release lifecycle from conventional commits.
 
 ## Steps
 
-1. Ensure a `sr.yaml` config exists. If not, run `sr init`. To add new default fields to an existing config, run `sr init --merge`.
+1. Ensure a `sr.yaml` config exists. If not, run `sr init`.
 2. If `$ARGUMENTS` is provided, run `sr $ARGUMENTS` instead of the default flow.
-3. Default flow: preview with `sr plan`, then execute with `sr release`.
+3. Default flow: preview with `sr status`, then execute with `sr release`.
 
-## AI Commands
-
-| Command | Description |
-|---------|-------------|
-| `sr commit` | Generate atomic conventional commits from changes |
-| `sr commit --staged` | Only analyze staged changes |
-| `sr commit --dry-run` | Preview commit plan without executing |
-| `sr review` | AI code review of staged/branch changes |
-| `sr review --base main` | Review against a specific base ref |
-| `sr explain` | Explain recent commits |
-| `sr branch` | Suggest conventional branch name |
-| `sr branch --create` | Create the suggested branch |
-| `sr pr` | Generate PR title + body from branch commits |
-| `sr pr --create` | Create the PR via gh CLI |
-| `sr ask <question>` | Freeform Q&A about the repo |
-| `sr cache status` | Show cached commit plans |
-| `sr cache clear` | Clear cached entries |
-
-## Release Commands
+## Commands
 
 | Command | Description |
 |---------|-------------|
-| `sr plan` | Preview next release (version, commits, changelog) |
-| `sr release` | Execute a full release |
+| `sr release` | Execute a release (tag + GitHub release) |
 | `sr release --dry-run` | Simulate without side effects |
 | `sr release --sign-tags` | Sign tags with GPG/SSH |
 | `sr release --draft` | Create GitHub release as draft |
 | `sr release -p <name>` | Release a specific monorepo package |
-| `sr changelog --write` | Write changelog to disk |
-| `sr version --short` | Print next version number |
+| `sr release -c <channel>` | Release via named channel (e.g. canary, rc) |
+| `sr release --prerelease <id>` | Produce pre-release versions (e.g. 1.2.0-alpha.1) |
+| `sr release --artifacts <glob>` | Upload artifacts matching glob |
+| `sr release --stage-files <glob>` | Stage additional files in the release commit |
+| `sr status` | Show branch, version, unreleased commits, and open PRs |
+| `sr status --format json` | Machine-readable status output |
+| `sr status -p <name>` | Status for a specific package |
+| `sr config` | Validate and display resolved configuration |
 | `sr config --resolved` | Show resolved config with defaults |
-| `sr init` | Generate fully-commented sr.yaml + sync hooks |
-| `sr init --merge` | Add new default fields to existing config |
-| `sr init --force` | Overwrite config with fresh commented template |
+| `sr init` | Create default `sr.yaml` config file |
+| `sr init --force` | Overwrite existing config |
+| `sr completions <shell>` | Generate shell completions |
+| `sr update` | Update sr to the latest version |
+| `sr migrate` | Show migration guide |
 
 ## Monorepo
 
@@ -56,17 +45,8 @@ Use `-p/--package` to target a specific package when `packages` is configured in
 
 ```bash
 sr release -p core          # release only the core package
-sr plan -p cli              # preview next release for cli
+sr status -p cli            # status for cli package
 ```
-
-## Global Flags
-
-| Flag | Env var | Description |
-|------|---------|-------------|
-| `--backend` | `SR_BACKEND` | AI backend: `claude`, `copilot`, or `gemini` |
-| `--model` | `SR_MODEL` | AI model to use |
-| `--budget` | `SR_BUDGET` | Max budget in USD (claude only) |
-| `--debug` | `SR_DEBUG` | Enable debug output |
 
 ## Release Execution Order
 
@@ -76,10 +56,9 @@ sr plan -p cli              # preview next release for cli
 
 - `GH_TOKEN` / `GITHUB_TOKEN` — Required for GitHub releases
 - `SR_VERSION` / `SR_TAG` — Set during hook commands
-- `SR_BACKEND` / `SR_MODEL` / `SR_BUDGET` / `SR_DEBUG` — AI configuration
 
 ## Exit Codes
 
 - `0` — Success
-- `1` — Error (config, git, VCS, AI)
+- `1` — Error (config, git, VCS)
 - `2` — No releasable changes
