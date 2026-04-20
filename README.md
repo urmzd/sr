@@ -87,7 +87,7 @@ The installer automatically adds `~/.local/bin` to your `PATH` in your shell pro
 ### GitHub Action (recommended)
 
 ```yaml
-- uses: urmzd/sr@v7
+- uses: urmzd/sr@v8
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -109,21 +109,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v7
+      - uses: urmzd/sr@v8
 ```
 
-Dry-run on pull requests:
+Plan-only on pull requests (preview the next version without cutting a release):
 
 ```yaml
-      - uses: urmzd/sr@v7
+      - uses: urmzd/sr@v8
         with:
-          dry-run: "true"
+          mode: plan
 ```
 
 Use outputs in subsequent steps:
 
 ```yaml
-      - uses: urmzd/sr@v7
+      - uses: urmzd/sr@v8
         id: sr
       - if: steps.sr.outputs.released == 'true'
         run: echo "Released ${{ steps.sr.outputs.version }}"
@@ -132,7 +132,7 @@ Use outputs in subsequent steps:
 Verify the downloaded sr binary with a SHA256 checksum:
 
 ```yaml
-      - uses: urmzd/sr@v7
+      - uses: urmzd/sr@v8
         with:
           sha256: "abc123..."
 ```
@@ -145,7 +145,7 @@ For maximum security, pin the action to a full-length commit SHA:
           sha256: "abc123..."
 ```
 
-Manual re-trigger with `workflow_dispatch` (useful when a previous release partially failed):
+Manual re-trigger with `workflow_dispatch` (useful when a previous release partially failed — re-runs reconcile any missing state idempotently, no special flag needed):
 
 ```yaml
 name: Release
@@ -153,11 +153,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      force:
-        description: "Re-release the current tag"
-        type: boolean
-        default: false
 
 jobs:
   release:
@@ -168,9 +163,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v7
-        with:
-          force: ${{ github.event.inputs.force || 'false' }}
+      - uses: urmzd/sr@v8
 ```
 
 #### Inputs
@@ -179,15 +172,13 @@ jobs:
 |-------|-------------|---------|
 | `mode` | `plan` \| `prepare` \| `release`. Default `release`. | `release` |
 | `dry-run` | Deprecated alias for `mode: plan`. | `false` |
-| `force` | Re-release the current tag (use when a previous release partially failed) | `false` |
 | `github-token` | GitHub token for creating releases | `${{ github.token }}` |
 | `git-user-name` | Git author/committer name for the release commit and tag. Pass empty to let `sr.yaml` (`git.user.name`) or the repo's git config take over | `sr-releaser[bot]` |
 | `git-user-email` | Git author/committer email for the release commit and tag. Pass empty to let `sr.yaml` (`git.user.email`) or the repo's git config take over | `sr-releaser[bot]@users.noreply.github.com` |
-| `artifacts` | Glob patterns for artifact files to upload (space-separated) | `""` |
-| `package` | Target a specific monorepo package | `""` |
+| `artifacts` | Literal paths to artifact files to upload (space-separated) | `""` |
 | `channel` | Release channel (e.g. canary, rc, stable) | `""` |
 | `prerelease` | Pre-release identifier (e.g. alpha, beta, rc) | `""` |
-| `stage-files` | Additional file globs to stage in the release commit (space-separated) | `""` |
+| `stage-files` | Additional literal paths to stage in the release commit (space-separated) | `""` |
 | `sign-tags` | Sign tags with GPG/SSH | `false` |
 | `draft` | Create GitHub release as a draft | `false` |
 | `sha256` | Expected SHA256 checksum of the sr binary (hex string) | `""` |
@@ -321,7 +312,7 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - uses: urmzd/sr@v7
+      - uses: urmzd/sr@v8
         with:
           github-token: ${{ steps.app-token.outputs.token }}
 ```
