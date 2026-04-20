@@ -110,22 +110,169 @@ Workspace member discovery inside `Cargo.toml` / `package.json` / `pyproject.tom
 
 Previously sr uploaded `sr-manifest.json` to every release as a completion marker. 8.x relies on tag presence + release asset list + registry version queries to determine state. Existing releases with the old manifest keep working; no migration step needed.
 
-### CI workflow changes
+### CI workflow: the three-verb model
 
-Builds that embed a version (Rust binaries, Python wheels, packed tarballs) must run between `sr prepare` and `sr release`:
+`sr` exposes three verbs. Compose them in CI based on whether your build embeds a version:
+
+| Verb | Flag | Side effects | Outputs |
+|---|---|---|---|
+| `sr plan` | `mode: plan` | None — pure preview | `version`, `tag`, `bump`, `commit_count` |
+| `sr prepare` | `mode: prepare` | Writes bumped `version_files` + changelog to disk. **No commit, no tag, no push.** | Same as `plan` |
+| `sr release` | `mode: release` (default) | Full reconcile: commits staged files, tags, pushes, creates GitHub release, uploads artifacts, publishes to registry | All outputs; `released: true` |
+
+**Idempotence contract.** `sr release` is the complete pipeline. If `sr prepare` already bumped manifests on disk, `sr release`'s internal bump stage is a noop. Re-running on a converged release (tag exists, assets uploaded, packages published) is also a noop. No local state files — state lives in VCS + registries.
+
+### When do I need `sr prepare` before builds?
+
+**Use `sr prepare`** when the build embeds a version that must match the tag:
+
+| Build type | Why prepare is needed |
+|---|---|
+| Rust binaries (`cargo build --release`) | `env!("CARGO_PKG_VERSION")` reads `Cargo.toml` at compile time |
+| Python wheels (`uv build`, `python -m build`) | Wheel filename + metadata come from `pyproject.toml` |
+| Node packages that compile/bundle before publish (`tsc`, `rollup`, `vite build`) | Compiled output embeds `package.json` version |
+| Tarballs, zips, custom packaging | Filename and contents reference the version |
+| Docker images with `ARG VERSION` + `COPY` of a version file | Image layers see the bumped file |
+
+**Skip `sr prepare`** (single `sr release` step is enough) when:
+
+| Pattern | Why |
+|---|---|
+| `cargo publish` without binary artifacts | cargo reads the already-bumped `Cargo.toml` from disk during `sr release`'s bump stage |
+| `npm publish` of a pure-JS package | npm packs at publish time from the already-bumped `package.json` |
+| Docker image that only reads the version indirectly (git tag, env) | sr's internal bump happens before the publisher runs |
+
+### Patterns
+
+#### Single job, no build (just publish to a registry)
 
 ```yaml
-# 7.x — hooks.build ran inside sr
-- uses: urmzd/sr@v7    # runs cargo build as hooks.build
+# examples/ci/cargo-single.yml, npm.yml, docker.yml
+- uses: actions/checkout@v4
+  with: { fetch-depth: 0 }
+- uses: urmzd/sr@v8    # plan → bump → commit → tag → push → publish
+  env:
+    CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+```
 
-# 8.x — build lives in CI
+See [`cargo-single.yml`](../../../examples/ci/cargo-single.yml), [`npm.yml`](../../../examples/ci/npm.yml), [`docker.yml`](../../../examples/ci/docker.yml).
+
+#### Single job, one build step (wheels, bundled JS)
+
+```yaml
+# examples/ci/uv-workspace.yml
+- uses: actions/checkout@v4
+  with: { fetch-depth: 0 }
+- uses: astral-sh/setup-uv@v5
+
+- uses: urmzd/sr@v8
+  with: { mode: prepare }   # writes bumped pyproject.toml(s) + CHANGELOG.md
+
+- run: uv build --all       # wheels now embed the new version
+
+- uses: urmzd/sr@v8          # sees pre-bumped manifests → skips bump → publishes
+  env:
+    UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+```
+
+See [`uv-workspace.yml`](../../../examples/ci/uv-workspace.yml), [`pnpm-workspace.yml`](../../../examples/ci/pnpm-workspace.yml).
+
+#### Three-job matrix (multi-platform binaries)
+
+Split `prepare → build (matrix) → release` across jobs so every build runner compiles against the same bumped manifest:
+
+```yaml
+# examples/ci/cargo-multi-platform.yml — abridged
+jobs:
+  prepare:
+    outputs: { version: ${{ steps.sr.outputs.version }} }
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: urmzd/sr@v8
+        id: sr
+        with: { mode: prepare }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prepared-manifests
+          path: |
+            Cargo.toml
+            Cargo.lock
+            CHANGELOG.md
+            crates/**/Cargo.toml
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.version != ''   # skip when nothing to release
+    strategy:
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-apple-darwin,      os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/download-artifact@v4
+        with: { name: prepared-manifests, path: . }
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/sr
+
+  release:
+    needs: [prepare, build]
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/download-artifact@v4
+        with: { name: prepared-manifests, path: . }
+      - uses: actions/download-artifact@v4
+        with: { path: release-assets, pattern: binary-*, merge-multiple: true }
+      - uses: urmzd/sr@v8    # commits the prepared files, tags, uploads binaries, publishes
+```
+
+Full workflow: [`cargo-multi-platform.yml`](../../../examples/ci/cargo-multi-platform.yml).
+
+**Why each job re-checks out the repo.** GitHub Actions gives each job a fresh runner. `prepare` ships the *bumped* files as a workflow artifact; `build` and `release` download that artifact on top of a clean checkout so they see the exact same disk state.
+
+**Why `if: needs.prepare.outputs.version != ''`.** `sr prepare` outputs an empty `version` when there are no releasable commits. The `if:` gate skips the matrix (and the whole build cost) when a push contains only non-releasing commits (docs, chore, etc.).
+
+### Migrating from 7.x `hooks.build` to 8.x CI steps
+
+```yaml
+# 7.x — build inside sr.yaml
+packages:
+  - path: .
+    artifacts: ["release-assets/*.tar.gz"]
+    hooks:
+      build:
+        - cargo build --release
+        - tar czf release-assets/sr.tar.gz target/release/sr
+# CI: one step
+- uses: urmzd/sr@v7
+
+# 8.x — build moves to CI; sr.yaml just declares final artifacts
+# sr.yaml
+packages:
+  - path: .
+    artifacts:
+      - release-assets/sr.tar.gz
+# CI: prepare → build → release
 - uses: urmzd/sr@v8
   with: { mode: prepare }
 - run: cargo build --release
-- uses: urmzd/sr@v8    # uploads the binary
+- run: |
+    mkdir -p release-assets
+    tar czf release-assets/sr.tar.gz target/release/sr
+- uses: urmzd/sr@v8
 ```
 
-For multi-platform matrix builds (impossible under 7.x), see [examples/ci/cargo-multi-platform.yml](../../../examples/ci/cargo-multi-platform.yml).
+### `sr prepare` outputs
+
+Every mode populates the same outputs (`version`, `tag`, `bump`, `previous-version`, `floating-tag`, `commit-count`, `json`). Consume them in downstream jobs to decide whether to build, to name artifacts, or to gate the release job. `released` is `true` only when `mode: release` actually cut a release.
 
 ### Action input changes
 
