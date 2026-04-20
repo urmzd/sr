@@ -1,0 +1,24 @@
+# uv Python workspace — every `[tool.uv.workspace].members` member
+# publishes at one shared version.
+#
+# Each release:
+#   - bumps root `pyproject.toml` and every member's pyproject.toml
+#   - stages `uv.lock` alongside
+#   - iterates members and runs `uv publish` in each
+#
+# Wheels must exist in each member's `dist/` before `sr release` — build
+# them in CI between `sr prepare` and `sr release` (see
+# `examples/ci/uv-workspace.yml`).
+
+git:
+  tag_prefix: "v"
+
+packages:
+  - path: .
+    version_files:
+      - pyproject.toml
+    stage_files:
+      - uv.lock
+    publish:
+      type: pypi
+      workspace: true

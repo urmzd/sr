@@ -1,14 +1,1 @@
-# Go module — "published" by pushing a git tag (Go modules require no
-# registry upload). sr already cuts the tag in the release pipeline,
-# so the `go` publisher is a no-op; it exists to document the package
-# in the release's per-package breakdown.
-
-git:
-  tag_prefix: "v"
-
-packages:
-  - path: .
-    version_files:
-      - version.go           # your var/const Version = "..." file
-    publish:
-      type: go
+../crates/cli/templates/go.yaml

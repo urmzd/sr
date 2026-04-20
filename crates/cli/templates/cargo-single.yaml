@@ -1,0 +1,19 @@
+# Single-crate Rust project publishing to crates.io.
+#
+# Each release:
+#   - cuts one tag (v<version>)
+#   - bumps Cargo.toml and Cargo.lock
+#   - creates a GitHub release with the changelog
+#   - publishes the crate to crates.io (idempotent — noops if already there)
+
+git:
+  tag_prefix: "v"
+
+packages:
+  - path: .
+    version_files:
+      - Cargo.toml
+    stage_files:
+      - Cargo.lock
+    publish:
+      type: cargo

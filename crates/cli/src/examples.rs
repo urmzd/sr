@@ -14,52 +14,52 @@ pub const EXAMPLES: &[Example] = &[
     Example {
         name: "cargo-single",
         description: "single Rust crate → crates.io",
-        body: include_str!("../../../examples/cargo-single.yaml"),
+        body: include_str!("../templates/cargo-single.yaml"),
     },
     Example {
         name: "cargo-workspace",
         description: "Rust workspace (every member at shared version)",
-        body: include_str!("../../../examples/cargo-workspace.yaml"),
+        body: include_str!("../templates/cargo-workspace.yaml"),
     },
     Example {
         name: "npm-single",
         description: "single npm package → registry.npmjs.org",
-        body: include_str!("../../../examples/npm-single.yaml"),
+        body: include_str!("../templates/npm-single.yaml"),
     },
     Example {
         name: "npm-workspace",
         description: "npm workspaces (`npm publish --workspaces`)",
-        body: include_str!("../../../examples/npm-workspace.yaml"),
+        body: include_str!("../templates/npm-workspace.yaml"),
     },
     Example {
         name: "pnpm-workspace",
         description: "pnpm monorepo (`pnpm publish -r`)",
-        body: include_str!("../../../examples/pnpm-workspace.yaml"),
+        body: include_str!("../templates/pnpm-workspace.yaml"),
     },
     Example {
         name: "uv-workspace",
         description: "uv / Python monorepo → PyPI",
-        body: include_str!("../../../examples/uv-workspace.yaml"),
+        body: include_str!("../templates/uv-workspace.yaml"),
     },
     Example {
         name: "go",
         description: "Go module (tag-only)",
-        body: include_str!("../../../examples/go.yaml"),
+        body: include_str!("../templates/go.yaml"),
     },
     Example {
         name: "docker",
         description: "container image → OCI registry",
-        body: include_str!("../../../examples/docker.yaml"),
+        body: include_str!("../templates/docker.yaml"),
     },
     Example {
         name: "multi-language",
         description: "Rust core + Node CLI, one tag",
-        body: include_str!("../../../examples/multi-language.yaml"),
+        body: include_str!("../templates/multi-language.yaml"),
     },
     Example {
         name: "custom",
         description: "arbitrary publish command + state check",
-        body: include_str!("../../../examples/custom.yaml"),
+        body: include_str!("../templates/custom.yaml"),
     },
 ];
 
