@@ -151,7 +151,7 @@ fn build_npm_workspace_cmd(registry: &Option<String>, access: &Option<String>) -
 }
 
 fn probe_npm(registry: &str, name: &str, version: &str) -> Result<bool, String> {
-    let encoded_name = name.replacen('/', "%2F", 1);
+    let encoded_name = encode_package_name(name);
     let url = format!("{registry}/{encoded_name}/{version}");
     match ureq::get(&url)
         .header("User-Agent", "sr (+https://github.com/urmzd/sr)")
@@ -186,6 +186,22 @@ fn read_package_json_private(manifest: &Path) -> Result<bool, String> {
         .get("private")
         .and_then(|v| v.as_bool())
         .unwrap_or(false))
+}
+
+// Percent-encode the characters that matter in an npm package name for a
+// URL path segment: `@` (scope prefix) and `/` (scope separator). Registry
+// servers accept both encoded and unencoded `@`, but custom registries
+// (Artifactory, Verdaccio, GitHub Packages) vary — encode it explicitly.
+fn encode_package_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for ch in name.chars() {
+        match ch {
+            '@' => out.push_str("%40"),
+            '/' => out.push_str("%2F"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn shell_word(s: &str) -> String {
@@ -267,5 +283,12 @@ mod tests {
         assert!(build_pnpm_workspace_cmd(&None, &None).starts_with("pnpm publish -r"));
         assert!(build_yarn_workspace_cmd(&None).starts_with("yarn workspaces foreach"));
         assert!(build_npm_workspace_cmd(&None, &None).contains("--workspaces"));
+    }
+
+    #[test]
+    fn encodes_scope_prefix_and_separator() {
+        assert_eq!(encode_package_name("@scope/pkg"), "%40scope%2Fpkg");
+        assert_eq!(encode_package_name("plain"), "plain");
+        assert_eq!(encode_package_name("@only-scope"), "%40only-scope");
     }
 }

@@ -27,8 +27,14 @@ pub enum PublishState {
     Completed,
     /// Version is absent from the registry — run() should execute.
     Needed,
-    /// Could not determine (network error, auth failure, unsupported).
-    /// `run()` should still execute; the publish command is authoritative.
+    /// Could not determine (network error, auth failure, registry 5xx,
+    /// rate limit, unsupported). `run()` should still execute: the publish
+    /// command itself is the authoritative check, and every built-in
+    /// publish tool (`cargo publish`, `npm publish`, `uv publish`,
+    /// `docker push`) is idempotent against an already-published version
+    /// and exits non-zero with a distinct "already exists" message that
+    /// surfaces in the job log. That trade-off is deliberate: a transient
+    /// crates.io 503 should not block a release.
     Unknown(String),
 }
 

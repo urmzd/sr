@@ -41,6 +41,15 @@ impl Stage for LocalTag {
 
 /// Force-create and force-push the floating major-version tag (e.g. `v3`).
 /// Always runs when configured — floating tags are meant to move.
+///
+/// Intentionally overrides no `is_complete`: unlike `LocalTag` (immutable,
+/// idempotent after first write), the floating tag must move to the new
+/// release commit on every run. On a partial-failure re-run this means the
+/// floating tag advances before downstream stages (`vcs_release`, `upload`,
+/// `publish`) finish; a subsequent re-run will noop the floating tag move
+/// itself but complete the remaining stages. Ordering is safe because the
+/// floating tag's only consumer is `@latest`-style action references, which
+/// pin to the underlying commit — never to in-progress asset state.
 pub struct FloatingTag;
 
 impl Stage for FloatingTag {

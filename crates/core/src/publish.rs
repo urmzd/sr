@@ -183,6 +183,29 @@ mod tests {
     }
 
     #[test]
+    fn unknown_check_still_runs() {
+        // `custom` with no `check` returns PublishState::Unknown — the
+        // same state any built-in publisher returns for a registry 5xx,
+        // rate-limit, or auth failure. Verify the dispatcher does NOT
+        // skip: Unknown → proceed to run(), relying on the publish tool's
+        // own idempotency to handle "already published" cleanly.
+        let pkg = PackageConfig {
+            path: ".".into(),
+            publish: Some(PublishConfig::Custom {
+                command: "true".into(),
+                check: None,
+                cwd: Some(".".into()),
+            }),
+            ..Default::default()
+        };
+        let outcome = run_package_publish(&pkg, "1.0.0", "v1.0.0", false, &[]);
+        assert!(
+            matches!(outcome, PublishOutcome::Succeeded { .. }),
+            "Unknown state should proceed to run, got {outcome:?}"
+        );
+    }
+
+    #[test]
     fn dry_run_skips_execution() {
         // Command would fail, but dry-run returns a synthetic Succeeded.
         let pkg = PackageConfig {

@@ -1698,6 +1698,61 @@ mod tests {
         );
     }
 
+    /// After a release runs, `build_diff` against the same plan must
+    /// report already-uploaded assets as `NoChange` (and the release as
+    /// present). Protects against drift between what `sr plan` shows and
+    /// what `sr release` does: a converged repo should show noops in the
+    /// diff, not false `Create` actions.
+    #[test]
+    fn build_diff_sees_existing_release_and_assets_as_no_change() {
+        use crate::diff::{Action, ResourceKind, build_diff};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("app.tar.gz"), "fake tarball").unwrap();
+
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                version_files: vec!["__sr_test_dummy_no_bump__".into()],
+                artifacts: vec![dir.path().join("app.tar.gz").to_str().unwrap().to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config.clone());
+        let plan = s.plan().unwrap();
+        s.execute(&plan, false).unwrap();
+
+        let diff = build_diff(&plan, &s.git, &s.vcs, &config, &[]).unwrap();
+
+        let release_row = diff
+            .resources
+            .iter()
+            .find(|r| r.kind == ResourceKind::Release)
+            .expect("release row present");
+        assert_eq!(
+            release_row.action,
+            Action::Update,
+            "existing release should diff as Update (body may be rewritten)"
+        );
+
+        let asset_row = diff
+            .resources
+            .iter()
+            .find(|r| r.kind == ResourceKind::Asset)
+            .expect("asset row present");
+        assert_eq!(
+            asset_row.action,
+            Action::NoChange,
+            "already-uploaded asset must render as NoChange, not Create"
+        );
+    }
+
     /// A tag at HEAD with no new commits errors with NoCommits — sr never
     /// re-releases the same commit.
     #[test]

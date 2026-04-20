@@ -135,54 +135,72 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        SR_MODE: ${{ inputs.mode }}
+        SR_DRY_RUN: ${{ inputs.dry-run }}
+        SR_ARTIFACTS: ${{ inputs.artifacts }}
+        SR_CHANNEL: ${{ inputs.channel }}
+        SR_PRERELEASE: ${{ inputs.prerelease }}
+        SR_STAGE_FILES: ${{ inputs.stage-files }}
+        SR_SIGN_TAGS: ${{ inputs.sign-tags }}
+        SR_DRAFT: ${{ inputs.draft }}
+        SR_GIT_USER_NAME: ${{ inputs.git-user-name }}
+        SR_GIT_USER_EMAIL: ${{ inputs.git-user-email }}
       run: |
         set -uo pipefail
 
         # Resolve mode. `dry-run: true` is a back-compat alias for `mode: plan`.
-        MODE="${{ inputs.mode }}"
-        if [ "${{ inputs.dry-run }}" = "true" ]; then
+        MODE="$SR_MODE"
+        if [ "$SR_DRY_RUN" = "true" ]; then
           MODE="plan"
         fi
 
+        # Build argv as an array so user-supplied values are never re-parsed
+        # by the shell. Inputs are passed through env vars (above) for the
+        # same reason — interpolating ${{ inputs.* }} into a shell string
+        # and eval'ing it would be a shell-injection vector.
+        ARGS=()
         case "$MODE" in
           plan)
-            CMD="plan --format json"
+            ARGS+=(plan --format json)
             ;;
           prepare)
-            CMD="prepare"
-            if [ -n "${{ inputs.prerelease }}" ]; then
-              CMD="$CMD --prerelease ${{ inputs.prerelease }}"
+            ARGS+=(prepare)
+            if [ -n "$SR_PRERELEASE" ]; then
+              ARGS+=(--prerelease "$SR_PRERELEASE")
             fi
             ;;
           release)
-            CMD="release"
-            if [ -n "${{ inputs.artifacts }}" ]; then
-              for p in ${{ inputs.artifacts }}; do
-                CMD="$CMD --artifacts \"$p\""
+            ARGS+=(release)
+            if [ -n "$SR_ARTIFACTS" ]; then
+              # Space-separated list; each token becomes one --artifacts arg.
+              read -r -a _artifacts <<<"$SR_ARTIFACTS"
+              for p in "${_artifacts[@]}"; do
+                ARGS+=(--artifacts "$p")
               done
             fi
-            if [ -n "${{ inputs.channel }}" ]; then
-              CMD="$CMD --channel ${{ inputs.channel }}"
+            if [ -n "$SR_CHANNEL" ]; then
+              ARGS+=(--channel "$SR_CHANNEL")
             fi
-            if [ -n "${{ inputs.prerelease }}" ]; then
-              CMD="$CMD --prerelease ${{ inputs.prerelease }}"
+            if [ -n "$SR_PRERELEASE" ]; then
+              ARGS+=(--prerelease "$SR_PRERELEASE")
             fi
-            if [ -n "${{ inputs.stage-files }}" ]; then
-              for p in ${{ inputs.stage-files }}; do
-                CMD="$CMD --stage-files \"$p\""
+            if [ -n "$SR_STAGE_FILES" ]; then
+              read -r -a _stage <<<"$SR_STAGE_FILES"
+              for p in "${_stage[@]}"; do
+                ARGS+=(--stage-files "$p")
               done
             fi
-            if [ "${{ inputs.sign-tags }}" = "true" ]; then
-              CMD="$CMD --sign-tags"
+            if [ "$SR_SIGN_TAGS" = "true" ]; then
+              ARGS+=(--sign-tags)
             fi
-            if [ "${{ inputs.draft }}" = "true" ]; then
-              CMD="$CMD --draft"
+            if [ "$SR_DRAFT" = "true" ]; then
+              ARGS+=(--draft)
             fi
-            if [ -n "${{ inputs.git-user-name }}" ]; then
-              CMD="$CMD --git-user-name \"${{ inputs.git-user-name }}\""
+            if [ -n "$SR_GIT_USER_NAME" ]; then
+              ARGS+=(--git-user-name "$SR_GIT_USER_NAME")
             fi
-            if [ -n "${{ inputs.git-user-email }}" ]; then
-              CMD="$CMD --git-user-email \"${{ inputs.git-user-email }}\""
+            if [ -n "$SR_GIT_USER_EMAIL" ]; then
+              ARGS+=(--git-user-email "$SR_GIT_USER_EMAIL")
             fi
             ;;
           *)
@@ -191,10 +209,16 @@ runs:
             ;;
         esac
 
+        # Capture sr's real exit code. A pipeline inside $(…) hides the
+        # left-hand status behind the subshell, so run sr to a temp file
+        # and tail afterward.
+        TMP_OUT=$(mktemp)
+        trap 'rm -f "$TMP_OUT"' EXIT
         set +e
-        JSON_OUTPUT=$(eval sr $CMD | tail -1)
-        EXIT_CODE=${PIPESTATUS[0]}
+        sr "${ARGS[@]}" >"$TMP_OUT"
+        EXIT_CODE=$?
         set -e
+        JSON_OUTPUT=$(tail -1 "$TMP_OUT")
 
         if [ "$EXIT_CODE" -eq 0 ]; then
           echo "json=${JSON_OUTPUT}" >> "$GITHUB_OUTPUT"

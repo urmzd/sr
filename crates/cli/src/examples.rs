@@ -75,3 +75,97 @@ pub fn list_formatted() -> String {
     }
     out
 }
+
+/// Pure decision for `sr init`: whether to skip, write, or error on an
+/// unknown example name. Extracted so overwrite semantics (`--force`) and
+/// the bundled-example whitelist are exercisable without touching disk.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InitDecision {
+    /// Config file already exists and `--force` was not set.
+    Skip,
+    /// Write this body to the config path.
+    Write(String),
+    /// `--example <name>` did not match any bundled template.
+    UnknownExample(String),
+}
+
+pub fn decide_init<F>(
+    example: Option<&str>,
+    path_exists: bool,
+    force: bool,
+    default_template: F,
+) -> InitDecision
+where
+    F: FnOnce() -> String,
+{
+    if path_exists && !force {
+        return InitDecision::Skip;
+    }
+    match example {
+        Some(name) => match find(name) {
+            Some(e) => InitDecision::Write(e.body.to_string()),
+            None => InitDecision::UnknownExample(name.to_string()),
+        },
+        None => InitDecision::Write(default_template()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_name_returns_none() {
+        // Path-traversal safety: example lookup is a compile-time
+        // whitelist, so user-supplied names can't escape.
+        assert!(find("../../etc/passwd").is_none());
+        assert!(find("").is_none());
+        assert!(find("nonexistent").is_none());
+    }
+
+    #[test]
+    fn known_names_resolve() {
+        for e in EXAMPLES {
+            assert!(find(e.name).is_some(), "missing example: {}", e.name);
+        }
+    }
+
+    #[test]
+    fn skips_when_exists_without_force() {
+        let d = decide_init(None, true, false, || "DEFAULT".into());
+        assert_eq!(d, InitDecision::Skip);
+    }
+
+    #[test]
+    fn overwrites_when_force_set() {
+        let d = decide_init(None, true, true, || "DEFAULT".into());
+        assert_eq!(d, InitDecision::Write("DEFAULT".into()));
+    }
+
+    #[test]
+    fn writes_default_when_absent() {
+        let d = decide_init(None, false, false, || "DEFAULT".into());
+        assert_eq!(d, InitDecision::Write("DEFAULT".into()));
+    }
+
+    #[test]
+    fn writes_example_body_when_known() {
+        let d = decide_init(Some("cargo-single"), false, false, || "DEFAULT".into());
+        match d {
+            InitDecision::Write(body) => assert!(!body.is_empty()),
+            other => panic!("expected Write, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_example_reports_name() {
+        let d = decide_init(Some("no-such-thing"), false, false, || "DEFAULT".into());
+        assert_eq!(d, InitDecision::UnknownExample("no-such-thing".into()));
+    }
+
+    #[test]
+    fn force_applies_to_example_path_too() {
+        let d = decide_init(Some("cargo-single"), true, true, || "DEFAULT".into());
+        assert!(matches!(d, InitDecision::Write(_)));
+    }
+}

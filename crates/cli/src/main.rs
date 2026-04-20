@@ -131,7 +131,24 @@ enum PlanFormat {
     Json,
 }
 
-use sr_core::release::NoopVcsProvider;
+use sr_core::release::{NoopVcsProvider, VcsProvider};
+
+/// Pick the best VCS provider available for a read-only plan query.
+///
+/// Prefers a real `GitHubProvider` when a token is present and the repo's
+/// remote is parseable — that way `sr plan` sees existing releases/assets
+/// and renders `NoChange` for them, matching what `sr release` will do.
+/// Falls back to `NoopVcsProvider` (everything reports Absent) when no
+/// credentials are available, so `plan` still works offline.
+fn build_plan_vcs(git: &NativeGitRepository) -> Box<dyn VcsProvider> {
+    let Ok((hostname, owner, repo)) = git.parse_remote_full() else {
+        return Box::new(NoopVcsProvider);
+    };
+    let Ok(token) = std::env::var("GH_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN")) else {
+        return Box::new(NoopVcsProvider);
+    };
+    Box::new(GitHubProvider::new(owner, repo, hostname, token))
+}
 
 fn build_local_strategy(
     config: Config,
@@ -381,30 +398,30 @@ fn run() -> anyhow::Result<()> {
             }
 
             let path = Path::new(DEFAULT_CONFIG_FILE);
-            if path.exists() && !force {
-                eprintln!(
-                    "{DEFAULT_CONFIG_FILE} already exists (skipping, use --force to overwrite)"
-                );
-                return Ok(());
-            }
-
-            let body = if let Some(name) = example {
-                match examples::find(&name) {
-                    Some(e) => e.body.to_string(),
-                    None => {
-                        eprintln!("error: unknown example '{name}'\n");
-                        eprint!("{}", examples::list_formatted());
-                        return Err(anyhow::anyhow!("unknown example '{name}'"));
-                    }
+            let detected = if example.is_none() {
+                let d = sr_core::version_files::detect_version_files(Path::new("."));
+                for f in &d {
+                    eprintln!("detected version file: {f}");
                 }
+                d
             } else {
-                let detected = sr_core::version_files::detect_version_files(Path::new("."));
-                if !detected.is_empty() {
-                    for f in &detected {
-                        eprintln!("detected version file: {f}");
-                    }
-                }
+                Vec::new()
+            };
+            let body = match examples::decide_init(example.as_deref(), path.exists(), force, || {
                 sr_core::config::default_config_template(&detected)
+            }) {
+                examples::InitDecision::Skip => {
+                    eprintln!(
+                        "{DEFAULT_CONFIG_FILE} already exists (skipping, use --force to overwrite)"
+                    );
+                    return Ok(());
+                }
+                examples::InitDecision::UnknownExample(name) => {
+                    eprintln!("error: unknown example '{name}'\n");
+                    eprint!("{}", examples::list_formatted());
+                    return Err(anyhow::anyhow!("unknown example '{name}'"));
+                }
+                examples::InitDecision::Write(body) => body,
             };
             std::fs::write(path, body)?;
             eprintln!("wrote {DEFAULT_CONFIG_FILE}");
@@ -460,6 +477,7 @@ fn run() -> anyhow::Result<()> {
 
             let strategy = build_local_strategy(config.clone(), None, false)?;
             let plan_result = strategy.plan();
+            let plan_vcs = build_plan_vcs(&strategy.git);
 
             match (format, plan_result) {
                 (PlanFormat::Json, Ok(plan)) => {
@@ -472,7 +490,7 @@ fn run() -> anyhow::Result<()> {
                     let diff = sr_core::diff::build_diff(
                         &plan,
                         &strategy.git,
-                        &strategy.vcs,
+                        plan_vcs.as_ref(),
                         &config,
                         &env_refs,
                     )?;
@@ -516,7 +534,7 @@ fn run() -> anyhow::Result<()> {
                     let diff = sr_core::diff::build_diff(
                         &plan,
                         &strategy.git,
-                        &strategy.vcs,
+                        plan_vcs.as_ref(),
                         &config,
                         &env_refs,
                     )?;
