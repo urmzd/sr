@@ -37,12 +37,9 @@ packages:
       - "release-assets/sr-x86_64-apple-darwin"
       - "release-assets/sr-aarch64-apple-darwin"
       - "release-assets/sr-x86_64-pc-windows-msvc.exe"
-    hooks:
-      # Tests run in CI on the PR — no need to re-run them here. cargo
-      # publish runs after the tag/release/uploads succeed; if a publish
-      # fails the next sr run rolls forward to a new version (sr never
-      # re-publishes the same version, so "already exists" never fires).
-      post_release:
-        - cargo publish -p sr-core
-        - sleep 30
-        - cargo publish -p sr-cli
+    # Typed cargo publisher, iterated in `[workspace].members` order
+    # (sr-core before sr-cli). `check` probes crates.io; already-published
+    # versions are skipped, so re-runs are noops.
+    publish:
+      type: cargo
+      workspace: true

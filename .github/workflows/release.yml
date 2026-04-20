@@ -128,7 +128,7 @@ jobs:
           install -m 0755 release-assets/sr-x86_64-unknown-linux-gnu /usr/local/bin/sr
           sr --version
 
-      # Toolchain only needed for cargo publish (called from sr.yaml hooks.post_release).
+      # Toolchain only needed for cargo publish (invoked by sr's typed cargo publisher).
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
