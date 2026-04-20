@@ -1,5 +1,14 @@
 # Changelog
 
+## 8.0.6 (2026-04-20)
+
+### Bug Fixes
+
+- **docs**: expand 8.x migration guide with sr prepare patterns ([ce43546](https://github.com/urmzd/sr/commit/ce43546c1a81091983d5c953c58634dbc5002d96))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v8.0.5...v8.0.6)
+
+
 ## 8.0.5 (2026-04-20)
 
 ### Bug Fixes
