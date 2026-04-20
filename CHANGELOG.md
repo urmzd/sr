@@ -1,5 +1,18 @@
 # Changelog
 
+## 8.0.3 (2026-04-20)
+
+### Bug Fixes
+
+- **pypi**: resolve artifacts from shared dist root ([4cbbdc4](https://github.com/urmzd/sr/commit/4cbbdc4eedf6c0276c65be19dc43da63d247f5eb))
+
+### Misc
+
+- **readme**: update action usage to v8 (remove force/package/dry-run, literal paths, mode) ([634912f](https://github.com/urmzd/sr/commit/634912fa5acc303afa7be23b9e90669a3537ad43))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v8.0.2...v8.0.3)
+
+
 ## 8.0.2 (2026-04-20)
 
 ### Bug Fixes
