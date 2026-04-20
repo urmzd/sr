@@ -1,5 +1,14 @@
 # Changelog
 
+## 8.0.4 (2026-04-20)
+
+### Bug Fixes
+
+- **docs**: remove broken migration.md symlink ([8f011a1](https://github.com/urmzd/sr/commit/8f011a1bfc603ed9cc1ce08ebdd52218ca2aec73))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v8.0.3...v8.0.4)
+
+
 ## 8.0.3 (2026-04-20)
 
 ### Bug Fixes
