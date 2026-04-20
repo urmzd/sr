@@ -30,7 +30,13 @@ packages:
     # uploads them — no `hooks.build` because the matrix can't run in one
     # process.
     artifacts:
-      - "release-assets/sr-*"
+      - "release-assets/sr-x86_64-unknown-linux-gnu"
+      - "release-assets/sr-aarch64-unknown-linux-gnu"
+      - "release-assets/sr-x86_64-unknown-linux-musl"
+      - "release-assets/sr-aarch64-unknown-linux-musl"
+      - "release-assets/sr-x86_64-apple-darwin"
+      - "release-assets/sr-aarch64-apple-darwin"
+      - "release-assets/sr-x86_64-pc-windows-msvc.exe"
     hooks:
       # Tests run in CI on the PR — no need to re-run them here. cargo
       # publish runs after the tag/release/uploads succeed; if a publish
