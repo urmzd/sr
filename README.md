@@ -996,7 +996,7 @@ Set `git.sign_tags: true` in `sr.yaml` or pass `--sign-tags`. You must have a GP
 
 ### Migrating from v6.x
 
-Run `sr migrate` to see the full migration guide, or read [migration.md](crates/sr-cli/docs/migration.md).
+Run `sr migrate` to see the full migration guide, or read [migration.md](crates/cli/docs/migration.md).
 <!-- /fsrc -->
 
 ## Architecture
