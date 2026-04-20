@@ -1,0 +1,21 @@
+# Single Rust crate — no binary artifacts attached to the GitHub release.
+# `cargo publish` builds + publishes internally, so no build step is needed.
+
+name: Release
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: urmzd/sr@v8
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

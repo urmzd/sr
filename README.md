@@ -26,8 +26,8 @@
 - [Prerequisites](#prerequisites)
 - [GitHub Enterprise Server (GHES)](#github-enterprise-server-ghes)
 - [Branch Protection](#branch-protection)
-- [Lifecycle Hooks](#lifecycle-hooks)
-- [Post-release Hooks](#post-release-hooks)
+- [Three verbs: plan, prepare, release](#three-verbs-plan-prepare-release)
+- [Publishers](#publishers)
 - [CLI Reference](#cli-reference)
 - [Configuration](#configuration)
 - [FAQ / Troubleshooting](#faq--troubleshooting)
@@ -40,33 +40,39 @@
 
 ## Why?
 
-Most release tools require Node.js, a pile of plugins, and still only handle the tagging step. **sr** is a single static binary that handles everything:
+Most release tools require Node.js, a pile of plugins, and still only handle the tagging step. **sr** is a single static binary that treats releases as state to reconcile — declare desired state in `sr.yaml`, let commits describe the diff, apply.
 
-- **Automated releases** — bumps versions, generates changelogs, tags, and publishes GitHub releases
-- **Release channels** — named channels (canary, rc, stable) for trunk-based promotion
-- **Agent skill** — ships as a portable [Agent Skill](https://agentskills.io) for Claude Code, Gemini CLI, Cursor, and other AI tools
-- **Single static binary** — no runtime, no package manager, no async runtime
-- **Language-agnostic** — works with any project that uses git tags for versioning
-- **Zero-config defaults** — conventional commits + semver + GitHub releases out of the box
+- **Terraform-shaped verbs** — `sr plan` previews, `sr prepare` writes manifests + changelog, `sr release` applies. Idempotent; safe to re-run.
+- **Typed publishers** — built-in cargo / npm / docker / pypi / go. Each queries its registry before publishing, skips when already there.
+- **Workspace-aware** — cargo / npm / pnpm / yarn / uv monorepos publish every member in one go; one tag, one version.
+- **Release channels** — named channels (canary, rc, stable) for trunk-based promotion.
+- **Agent skill** — ships as a portable [Agent Skill](https://agentskills.io) for Claude Code, Gemini CLI, Cursor, and other AI tools.
+- **Single static binary** — no runtime, no plugins, no async runtime.
 
 ## Quick Start
 
 ```bash
-# Initialize config (creates sr.yaml)
+# Initialize config. Pass an example name to scaffold from a template.
 sr init
+sr init --list                # show bundled templates
+sr init pnpm-workspace        # write a specific example
 
-# Check status — version, unreleased commits, PRs
-sr status
+# Preview the next release (version, tag, resource diff)
+sr plan
+sr plan --format json
 
-# Execute the release
+# Bump manifest files + write changelog (no commit, no tag)
+sr prepare
+
+# Execute the release (bump if needed, commit, tag, push, release, publish)
 sr release
-
-# Preview without making changes
 sr release --dry-run
 
 # Set up shell completions (bash)
 sr completions bash >> ~/.bashrc
 ```
+
+Most users run just `sr release` in CI. Use `sr prepare` when you need pre-built artifacts to embed the new version — see [`examples/ci/`](examples/ci/).
 
 ## Installation
 
@@ -171,7 +177,8 @@ jobs:
 
 | Input | Description | Default |
 |-------|-------------|---------|
-| `dry-run` | Run `sr status` instead of `sr release` to preview without making changes | `false` |
+| `mode` | `plan` \| `prepare` \| `release`. Default `release`. | `release` |
+| `dry-run` | Deprecated alias for `mode: plan`. | `false` |
 | `force` | Re-release the current tag (use when a previous release partially failed) | `false` |
 | `github-token` | GitHub token for creating releases | `${{ github.token }}` |
 | `git-user-name` | Git author/committer name for the release commit and tag. Pass empty to let `sr.yaml` (`git.user.name`) or the repo's git config take over | `sr-releaser[bot]` |
@@ -319,87 +326,100 @@ jobs:
           github-token: ${{ steps.app-token.outputs.token }}
 ```
 
-## Lifecycle Hooks
+## Three verbs: plan, prepare, release
 
-sr runs per-package hooks at key points in the release lifecycle. Each hook event is configured under `packages[].hooks` in `sr.yaml`:
+`sr` is a release-state reconciler, not a task runner. Three verbs:
+
+| Verb | Reads | Writes |
+|---|---|---|
+| `sr plan` | VCS + registries | — (preview only) |
+| `sr prepare` | config + commits | manifest files + changelog (no git) |
+| `sr release` | everything | commit, tag, push, release, upload, publish |
+
+sr does not run user shell commands. Artifact builds happen in CI between `sr prepare` and `sr release` so binaries / wheels / packed tarballs embed the newly-bumped version.
+
+### Single-job release
+
+For repos where `cargo publish` / `npm publish` builds and uploads internally, one verb is enough:
+
+```yaml
+- uses: urmzd/sr@v8
+```
+
+### Multi-platform binaries (prepare → build matrix → release)
+
+When you need pre-built binaries for multiple targets, split into three jobs:
+
+```yaml
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.sr.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: urmzd/sr@v8
+        id: sr
+        with: { mode: prepare }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prepared-manifests
+          path: "**/Cargo.toml CHANGELOG.md"
+
+  build:
+    needs: prepare
+    strategy:
+      matrix: { target: [x86_64-linux, aarch64-linux, x86_64-darwin, aarch64-darwin] }
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: prepared-manifests, path: . }
+      - run: cargo build --release --target ${{ matrix.target }}
+      # Binary now has the correct version baked in from the bumped Cargo.toml.
+      - uses: actions/upload-artifact@v4
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: . }
+      - uses: urmzd/sr@v8
+```
+
+Full worked examples per ecosystem live in [`examples/ci/`](examples/ci/).
+
+## Publishers
+
+Every package's `publish:` is a typed variant — sr handles the registry check + publish command internally, so users never write shell.
 
 ```yaml
 packages:
   - path: .
-    hooks:
-      pre_release:
-        - "cargo test --workspace"
-      build:
-        - "cargo build --release"
-      post_release:
-        - "cargo publish"
+    version_files: [Cargo.toml]
+    publish:
+      type: cargo                 # cargo publish to crates.io
+
+  - path: packages/web
+    version_files: [packages/web/package.json]
+    publish:
+      type: npm                   # npm publish; auto-detects pnpm / yarn
+      workspace: true             # pnpm publish -r / npm publish --workspaces
+
+  - path: services/api
+    publish:
+      type: docker
+      image: ghcr.io/urmzd/api
+      platforms: [linux/amd64, linux/arm64]
 ```
 
-**Available events** (in execution order):
-
-| Event | When it runs |
-|-------|-------------|
-| `pre_release` | Before any mutation — tests, lints, validations that may abort the release |
-| `build` | After version files are bumped, before git commit/tag — compile artifacts from bumped sources |
-| `post_release` | After GitHub release and artifact upload — publish to registries |
-
-Hooks receive `SR_VERSION` and `SR_TAG` environment variables. When `hooks.build` is set, every declared `artifacts` glob must resolve to ≥1 file before the tag is created.
-
-### Build strategy
-
-sr runs as a single process on one runner. Pick the pattern that matches what you ship:
-
-| Scenario | `hooks.build` | `artifacts` | External matrix |
-|----------|--------------|-------------|-----------------|
-| Pure library (no binaries) | — | — | — |
-| Single-platform binary (CLI for current runner) | `cargo build --release` | `target/release/mytool` | — |
-| Multi-platform binaries (cross-compile) | — | `release-assets/*` | **runs in CI before sr** |
-
-**When `hooks.build` isn't enough:** sr can't orchestrate a cross-platform matrix — that requires multiple runners (macOS for darwin, Windows for windows, etc.). Run your matrix in CI (GitHub Actions `strategy.matrix`, [cargo-dist], [goreleaser], Nix, etc.), deposit outputs in a known directory, then call sr. sr is agnostic to how artifacts are produced — the contract ends at the `artifacts` glob.
-
-[cargo-dist]: https://github.com/axodotdev/cargo-dist
-[goreleaser]: https://goreleaser.com/
-
-## Post-release Hooks
-
-`sr` outputs structured JSON to stdout, making it easy to trigger post-release actions.
-
-### GitHub Actions
-
-Use the action outputs to run steps conditionally:
-
-```yaml
-- uses: urmzd/sr@v7
-  id: sr
-- if: steps.sr.outputs.released == 'true'
-  run: ./deploy.sh ${{ steps.sr.outputs.version }}
-- if: steps.sr.outputs.released == 'true'
-  run: |
-    curl -X POST "$SLACK_WEBHOOK" \
-      -d "{\"text\": \"Released v${{ steps.sr.outputs.version }}\"}"
-```
-
-### CLI
-
-Pipe `sr release` output to downstream scripts:
-
-```bash
-# Extract the version
-VERSION=$(sr release | jq -r '.version')
-
-# Feed JSON into a custom script
-sr release | my-post-release-hook.sh
-
-# Publish to a package registry after release
-VERSION=$(sr release | jq -r '.version')
-if [ -n "$VERSION" ]; then
-  npm publish
-fi
-```
+Supported types: `cargo`, `npm`, `docker`, `pypi`, `go`, `custom`. Each publisher queries its registry's API to decide if work is needed (e.g. `GET https://crates.io/api/v1/crates/<name>/<version>` — 200 means already published, skip). Re-running `sr release` on an already-published package is a noop. See [`examples/`](examples/) for one complete config per ecosystem.
 
 ### JSON output schema
 
-`sr release` prints a JSON object to stdout on success:
+All three verbs emit the same flat JSON to stdout on success:
 
 ```json
 {
@@ -412,7 +432,7 @@ fi
 }
 ```
 
-All diagnostic messages go to stderr, so stdout is always clean JSON (or empty on exit code 2).
+`sr plan` additionally includes a `resources` array (Terraform-style resource diff). Diagnostic messages go to stderr; stdout is always clean JSON (or empty on exit code 2, "no releasable changes").
 
 ## CLI Reference
 
@@ -420,45 +440,46 @@ All diagnostic messages go to stderr, so stdout is always clean JSON (or empty o
 
 | Command | Description |
 |---------|-------------|
-| `sr release` | Execute a release (tag + GitHub release) |
-| `sr status` | Show branch, version, unreleased commits, and open PRs |
-| `sr config` | Validate and display resolved configuration |
-| `sr init` | Create default config file (`sr.yaml`) |
-| `sr completions` | Generate shell completions (bash, zsh, fish, powershell, elvish) |
-| `sr update` | Update sr to the latest version |
-| `sr migrate` | Show migration guide to the latest sr version |
+| `sr plan` | Preview the next release — version, tag, resource diff. No side effects. |
+| `sr prepare` | Bump version files + write changelog to disk. No commit, tag, or push. |
+| `sr release` | Execute the release — commit, tag, push, create GH release, upload, publish. Idempotent. |
+| `sr config` | Validate and display resolved configuration. |
+| `sr init [example]` | Create `sr.yaml`. Pass an example name to scaffold from a template (`sr init --list`). |
+| `sr completions` | Generate shell completions (bash, zsh, fish, powershell, elvish). |
+| `sr update` | Update sr to the latest version. |
+| `sr migrate` | Show migration guide. |
 
 ### Common flags
 
 ```bash
-sr release -p core              # target a specific monorepo package
-sr release -c canary            # release via named channel
+sr plan --format json           # machine-readable plan output
+sr prepare --prerelease alpha   # bump to a prerelease (1.2.0-alpha.1)
 sr release --dry-run            # preview without making changes
-sr release --prerelease alpha   # produce pre-release versions (e.g. 1.2.0-alpha.1)
+sr release -c canary            # release via named channel
+sr release --prerelease rc      # produce 1.2.0-rc.1
 sr release --sign-tags          # sign tags with GPG/SSH (git tag -s)
 sr release --draft              # create GitHub release as a draft
-sr release --artifacts "dist/*" # upload artifacts to the release
-sr release --stage-files Lock   # stage additional files in the release commit
-sr status --format json         # machine-readable status output
-sr status -p cli                # status for a specific package
+sr release --artifacts dist/app.tar.gz   # upload literal path as release asset
+sr release --stage-files Cargo.lock      # stage additional files in the release commit
 sr config --resolved            # show config with defaults applied
-sr init --force                 # overwrite existing config files
-sr completions bash             # generate Bash completions
+sr init pnpm-workspace          # scaffold from a bundled example
+sr init --list                  # list available examples
+sr init --force                 # overwrite existing config
 ```
 
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
-| `0` | Success — a release was created (or dry-run completed). The released version is printed to stdout. |
-| `1` | Real error — configuration issue, git failure, VCS provider error, etc. |
+| `0` | Success. The planned/released metadata is printed to stdout as JSON. |
+| `1` | Real error — configuration issue, git failure, VCS provider error, publish failure, etc. |
 | `2` | No releasable changes — no new commits or no releasable commit types since the last tag. |
 
 ### Recovery from a broken release
 
-sr never re-releases the same commit. If a release breaks mid-pipeline (artifact upload died, post-release hook failed, CI runner dropped), the tag and partial release stay on GitHub as a dangling record. To recover, push a new commit — sr cuts the next version on top, the floating major tag moves to the new release, and users installing get the good one.
+The pipeline is idempotent. Re-running `sr release` after any mid-flight failure picks up exactly where it left off — tag created but release object missing? The next run creates the release object and skips tag creation. Assets uploaded but publish failed? The next run skips the upload and retries the publish.
 
-The next `sr release` invocation will print a warning if the prior release is incomplete (manifest declares assets that aren't on the release), but never blocks. Roll forward is the only recovery path.
+No state files, no local checkpoints. Actual state lives in git + GitHub + registries; sr reads and converges. See [Architecture](#architecture) for the reconciler contract.
 
 ## Configuration
 
@@ -520,16 +541,30 @@ The config has 6 top-level sections — `git`, `commit`, `changelog`, `channels`
 
 #### `packages`
 
+Monorepos list one entry per package. Every package shares the same global version — `packages[]` describes *where to write versions, what to upload, and how to publish*, not *how to version*.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `packages[].path` | `string` | — (required) | Directory path relative to repo root. Only commits touching this path trigger a release. Package name is derived from the path |
-| `packages[].tag_prefix` | `string?` | derived from path | Tag prefix override |
-| `packages[].independent` | `bool` | `true` | Independent versioning per package (`true`) vs. all packages sharing one version (`false`) |
-| `packages[].version_files` | `string[]` | `[]` | Manifest files to bump |
-| `packages[].artifacts` | `string[]` | `[]` | Glob patterns for files to upload to the GitHub release |
-| `packages[].stage_files` | `string[]` | `[]` | Additional file globs to stage in the release commit (e.g. `["Cargo.lock"]`) |
-| `packages[].hooks.pre_release` | `string[]` | `[]` | Commands to run after version bump, before git commit (e.g. build) |
-| `packages[].hooks.post_release` | `string[]` | `[]` | Commands to run after GitHub release and artifact upload (e.g. publish) |
+| `packages[].path` | `string` | — (required) | Directory path relative to repo root. Used for per-package changelog sections and as the working directory for typed publishers. |
+| `packages[].version_files` | `string[]` | `[]` (autodetected) | Manifest files to bump. **Literal paths, not globs.** |
+| `packages[].version_files_strict` | `bool` | `false` | Fail on unsupported version file formats. |
+| `packages[].stage_files` | `string[]` | `[]` | Additional literal paths to stage in the release commit (e.g. `["Cargo.lock"]`). |
+| `packages[].artifacts` | `string[]` | `[]` | Literal paths to files to upload as release assets. Every entry must exist on disk before the tag is created. |
+| `packages[].changelog` | `ChangelogConfig?` | inherits top-level | Changelog config override for this package. |
+| `packages[].publish` | `PublishConfig?` | `null` | Publish target. See [Publishers](#publishers). |
+
+#### `packages[].publish`
+
+Typed enum — pick the registry type and sr handles the check + publish command. No user shell required.
+
+| Type | Fields | Notes |
+|---|---|---|
+| `cargo` | `features: string[]`, `registry: string?`, `workspace: bool` | `cargo publish -p <name>`. `workspace: true` iterates `[workspace].members`. |
+| `npm` | `registry: string?`, `access: "public"\|"restricted"?`, `workspace: bool` | Auto-detects pnpm / yarn / npm by lockfile. `workspace: true` uses `pnpm publish -r` / `npm publish --workspaces` / `yarn workspaces foreach`. |
+| `docker` | `image: string`, `platforms: string[]`, `dockerfile: string?` | `docker buildx build --push` with multi-platform support. |
+| `pypi` | `repository: string?`, `workspace: bool` | Auto-detects `uv` vs `twine`. `workspace: true` iterates `[tool.uv.workspace].members`. |
+| `go` | — | No-op. Go modules publish via git tag, which sr already cuts. |
+| `custom` | `command: string`, `check: string?`, `cwd: string?` | Escape hatch for registries without built-in support (helm, private Maven, etc.). |
 
 ### Example config
 
@@ -618,26 +653,16 @@ packages:
       - Cargo.toml
     stage_files:
       - Cargo.lock
-    artifacts:
-      - "target/release/sr-*"
-    hooks:
-      pre_release:
-        - cargo build --release
-      post_release:
-        - cargo publish
-
-# Monorepo packages (optional)
-# packages:
-#   - path: crates/core
-#     version_files:
-#       - crates/core/Cargo.toml
-#     stage_files:
-#       - crates/core/Cargo.lock
-#   - path: crates/cli
-#     tag_prefix: "cli-v"
-#     version_files:
-#       - crates/cli/Cargo.toml
+    # artifacts: literal paths, built in CI between `sr prepare` and `sr release`
+    # artifacts:
+    #   - release-assets/sr-x86_64-unknown-linux-musl
+    #   - release-assets/sr-aarch64-apple-darwin
+    publish:
+      type: cargo
+      workspace: true    # iterates every [workspace].members crate
 ```
+
+More complete examples (pnpm, uv, docker, multi-language, custom) live in [`examples/`](examples/).
 
 ### Supported version files
 
@@ -781,18 +806,18 @@ changelog:
 
 ### Release execution order
 
-1. **Parse commits** — determine version bump from commits since last tag
-2. **Bump version files** — all configured `packages[].version_files` are updated on disk
-3. **Write changelog** — the changelog file is written (if configured)
-4. **Package `pre_release` hooks** — build or prepare artifacts with the bumped versions (e.g. `cargo build --release`)
-5. **Git commit** — version files + changelog + `stage_files` are staged and committed as `chore(release): <tag> [skip ci]`
+1. **Parse commits** — determine version bump from commits since the last tag
+2. **Bump version files** — every `packages[].version_files` entry across every package is rewritten on disk to the new version (workspace roots auto-expand to members)
+3. **Write changelog** — `changelog.file` is updated (if configured)
+4. **Validate artifacts** — every declared `artifacts` path must exist on disk (built in CI between `sr prepare` and `sr release`)
+5. **Git commit** — bumped manifests + changelog + `stage_files` are committed as `chore(release): <tag> [skip ci]`
 6. **Create and push tag** — annotated tag at HEAD (signed with GPG/SSH when `git.sign_tags: true`)
 7. **Create/update floating tag** (if `git.floating_tag: true`)
-8. **Create or update GitHub release** — uses PATCH to preserve existing assets on re-runs; supports `draft` mode
-9. **Upload artifacts** — MIME-type-aware uploads to the GitHub release (collected from all packages)
-10. **Package `post_release` hooks** — publish to registries, send notifications (e.g. `cargo publish`)
+8. **Create or update GitHub release** — PATCH-semantic update preserves existing assets on re-runs
+9. **Upload artifacts** — MIME-type-aware uploads to the GitHub release (aggregated from every package)
+10. **Publish** — typed publishers run per package; each queries its registry first and skips if already published
 
-Tag, push, release create, and asset upload steps are idempotent — sr skips work that's already reflected on the remote.
+Every stage's `is_complete` check reads external state (tag existence, release object, asset basenames, registry versions) and short-circuits when converged. Re-running a completed release is a full noop.
 
 ### Release channels
 
@@ -851,33 +876,37 @@ Or via CLI: `sr release --prerelease alpha`
 
 ### Monorepo support
 
-For repositories containing multiple independently versioned packages, use the `packages` config:
+One tag, one version, every package. Multiple packages in `packages[]` share the same global version — each one's `version_files` are bumped in lockstep on release.
 
 ```yaml
 packages:
   - path: crates/core
-    version_files:
-      - crates/core/Cargo.toml
+    version_files: [crates/core/Cargo.toml]
+    publish:
+      type: cargo
+
   - path: crates/cli
-    tag_prefix: "cli-v"              # default: derived from path
-    version_files:
-      - crates/cli/Cargo.toml
-    stage_files:
-      - crates/cli/Cargo.lock
+    version_files: [crates/cli/Cargo.toml]
+    stage_files: [crates/cli/Cargo.lock]
+    publish:
+      type: cargo
 ```
 
-Each package is released independently — commits are filtered by path, so only changes touching a package's directory trigger its release. Tags are scoped per package (e.g. `core/v1.2.0`, `cli-v3.0.0`).
+For workspace-aware ecosystems, one entry at the root is enough — `sr` walks the workspace:
 
-Use `-p/--package` to target a specific package:
-
-```bash
-sr release -p core                # release only the core package
-sr status -p cli --format json    # preview next release for cli
+```yaml
+packages:
+  - path: .
+    version_files: [Cargo.toml]       # sr finds every [workspace].members crate
+    stage_files: [Cargo.lock]
+    publish:
+      type: cargo
+      workspace: true                  # publishes every member
 ```
 
-All other config fields (`commit.types`, `channels`, etc.) are shared across all packages.
+Per-package changelog sections render automatically when more than one package has commits. The tag is always repo-wide (`git.tag_prefix` + semver); there are no per-package tags.
 
-When `packages` is empty or absent, `sr` behaves as a single-package tool.
+See [`examples/`](examples/) for cargo/npm/pnpm/uv workspace templates.
 
 ### Limitations
 
@@ -998,15 +1027,19 @@ Run `sr migrate` to see the full migration guide, or read [migration.md](crates/
 | `VcsProvider` | Remote release creation, updates, asset uploads, verification |
 | `CommitParser` | Raw commit to conventional commit |
 | `ChangelogFormatter` | Render changelog entries to text |
-| `ReleaseStrategy` | Orchestrate plan + execute |
+| `Publisher` | Registry-aware publish (cargo, npm, docker, pypi, go, custom) |
+| `ReleaseStrategy` | Orchestrate plan / prepare / release |
 
 ## Design Philosophy
 
-1. **Trunk-based flow** — releases happen from a single branch; no release branches.
-2. **Conventional commits as source of truth** — commit messages drive versioning.
-3. **Zero-config** — works out of the box with reasonable defaults.
-4. **Language-agnostic** — sr knows about git and semver, not about cargo or npm.
-5. **Skills-native** — AI assistants use sr through portable [Agent Skills](https://agentskills.io), not baked-in AI backends or protocol servers.
+1. **VCS is state, commits are the diff.** Current state lives in git + GitHub + registries — never in an sr-managed file. The commits since the last tag define what changes we want to release. `sr` applies the diff.
+2. **Reconciler, not task runner.** Every stage reads external state via `is_complete`, runs only when actual ≠ desired, and re-running a converged release is a noop. Partial failure recovery is automatic: re-run and `sr` picks up wherever reality diverges from the plan.
+3. **No user shell hooks.** `sr` does not run arbitrary pre/post/build commands. Builds belong in CI between `sr prepare` and `sr release`; publishing is handled by typed registry publishers. The only user-shell escape hatch is `publish: custom`.
+4. **Literal paths, not globs.** `artifacts`, `stage_files`, and `version_files` list exact filenames. Workspace member discovery inside Cargo.toml/package.json/pyproject.toml uses those tools' native manifest globs.
+5. **Trunk-based flow.** Releases happen from a single branch; no release branches.
+6. **Conventional commits as the versioning contract.** Commit messages drive the bump decision.
+7. **Language-agnostic at the core.** `sr` knows git and semver; registry specifics live in the typed publishers.
+8. **Skills-native.** AI assistants use sr through portable [Agent Skills](https://agentskills.io), not baked-in AI backends.
 
 ## Development
 

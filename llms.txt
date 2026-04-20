@@ -1,28 +1,32 @@
-# sr — Semantic Release
+# sr — Release-state reconciler
 
-> An AI-powered release engineering CLI — from commit to release. AI-powered commits, code review, PR generation, branch naming, and freeform Q&A with sandboxed read-only agents. Parses conventional commits, computes semver bumps (with v0 protection), generates changelogs, creates GitHub releases with artifact uploads, and bumps version files across Cargo.toml, package.json, pyproject.toml, pom.xml, Gradle, and Go. Supports monorepos with per-package independent versioning. Ships as both a CLI and a GitHub Action.
+> Declarative change + release management. VCS + registries are the actual state; sr.yaml + conventional commits describe the desired state; sr computes the diff and applies. Three verbs: `sr plan` (preview), `sr prepare` (write version files + changelog), `sr release` (commit + tag + push + GitHub release + upload + publish). Typed publishers for cargo / npm / docker / pypi / go with registry-aware state checks; `publish: custom` as the escape hatch. One global version per monorepo, shared across every package. No user shell hooks — builds live in CI between `sr prepare` and `sr release`.
 
 ## Docs
 
-- [README](https://github.com/urmzd/sr/blob/main/README.md): Installation, CLI reference, configuration, and GitHub Action usage
+- [README](https://github.com/urmzd/sr/blob/main/README.md): Installation, three-verb workflow, configuration reference, publishers
+- [examples/](https://github.com/urmzd/sr/tree/main/examples): Complete `sr.yaml` per ecosystem (cargo, npm, pnpm, uv, docker, multi-language, custom)
+- [examples/ci/](https://github.com/urmzd/sr/tree/main/examples/ci): GitHub Actions workflows showing single-job and multi-platform matrix shapes
 - [AGENTS.md](https://github.com/urmzd/sr/blob/main/AGENTS.md): Architecture and development guide
 - [CHANGELOG](https://github.com/urmzd/sr/blob/main/CHANGELOG.md): Version history
 
-## API / Key Files
+## Key modules
 
-- [crates/sr-core/src/release.rs](https://github.com/urmzd/sr/blob/main/crates/sr-core/src/release.rs): Release orchestration (plan + execute)
-- [crates/sr-core/src/config.rs](https://github.com/urmzd/sr/blob/main/crates/sr-core/src/config.rs): YAML config parsing and defaults
-- [crates/sr-core/src/commit.rs](https://github.com/urmzd/sr/blob/main/crates/sr-core/src/commit.rs): Conventional commit parsing
-- [crates/sr-core/src/changelog.rs](https://github.com/urmzd/sr/blob/main/crates/sr-core/src/changelog.rs): Changelog generation with minijinja templates
-- [crates/sr-core/src/version_files.rs](https://github.com/urmzd/sr/blob/main/crates/sr-core/src/version_files.rs): Multi-language version file bumping
-- [crates/sr-github/src/lib.rs](https://github.com/urmzd/sr/blob/main/crates/sr-github/src/lib.rs): GitHub REST API provider
-- [crates/sr-cli/src/main.rs](https://github.com/urmzd/sr/blob/main/crates/sr-cli/src/main.rs): CLI entry point
+- [crates/core/src/release.rs](https://github.com/urmzd/sr/blob/main/crates/core/src/release.rs): `plan()`, `prepare()`, `execute()` — the three verbs
+- [crates/core/src/diff.rs](https://github.com/urmzd/sr/blob/main/crates/core/src/diff.rs): Terraform-style resource diff for `sr plan`
+- [crates/core/src/config.rs](https://github.com/urmzd/sr/blob/main/crates/core/src/config.rs): YAML schema — `git`, `commit`, `changelog`, `channels`, `vcs`, `packages`
+- [crates/core/src/publishers/](https://github.com/urmzd/sr/tree/main/crates/core/src/publishers): Typed publishers (cargo, npm, docker, pypi, go, custom)
+- [crates/core/src/workspaces.rs](https://github.com/urmzd/sr/blob/main/crates/core/src/workspaces.rs): Cargo / npm / pnpm / uv workspace member discovery
+- [crates/core/src/stages/](https://github.com/urmzd/sr/tree/main/crates/core/src/stages): Reconciler pipeline — each stage is idempotent
+- [crates/core/src/commit.rs](https://github.com/urmzd/sr/blob/main/crates/core/src/commit.rs): Conventional-commit parsing
+- [crates/core/src/changelog.rs](https://github.com/urmzd/sr/blob/main/crates/core/src/changelog.rs): Per-package changelog sections with minijinja templates
+- [crates/core/src/version_files.rs](https://github.com/urmzd/sr/blob/main/crates/core/src/version_files.rs): Multi-language manifest bumping
+- [crates/cli/src/main.rs](https://github.com/urmzd/sr/blob/main/crates/cli/src/main.rs): CLI entry point
 
-## Guides
+## Action
 
-- Branch protection with signed commits: use a GitHub App + repository rulesets. See the "Branch Protection" section in the README.
+- [action.yml](https://github.com/urmzd/sr/blob/main/action.yml): `mode: plan|prepare|release` input, normalized JSON outputs (`version`, `tag`, `bump`, `floating_tag`, `commit_count`)
 
-## Optional
+## Skill
 
-- [CONTRIBUTING](https://github.com/urmzd/sr/blob/main/CONTRIBUTING.md): How to contribute
-- [Skill](https://github.com/urmzd/sr/blob/main/skills/sr/SKILL.md): Agent skill for planning and executing releases
+- [Skill](https://github.com/urmzd/sr/blob/main/skills/sr/SKILL.md): Agent Skill for planning + executing releases with sr

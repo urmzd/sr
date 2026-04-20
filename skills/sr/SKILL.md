@@ -1,64 +1,76 @@
 ---
 name: sr
-description: Semantic release — automated versioning, changelog generation, and GitHub releases from conventional commits. Single binary, zero-config, language-agnostic.
+description: Release-state reconciler — declarative change + release management. Single binary, one global version per repo, typed publishers (cargo/npm/docker/pypi/go), no user shell hooks.
 metadata:
   argument-hint: [command]
 ---
 
-# sr — Semantic Release
+# sr — Release-state reconciler
 
-Use `sr` to manage the full release lifecycle from conventional commits.
+`sr` treats releases as state to reconcile. The VCS + registries are the actual state; `sr.yaml` + conventional commits are the desired state; `sr` computes the diff and applies.
 
 ## Steps
 
-1. Ensure a `sr.yaml` config exists. If not, run `sr init`.
-2. If `$ARGUMENTS` is provided, run `sr $ARGUMENTS` instead of the default flow.
-3. Default flow: preview with `sr status`, then execute with `sr release`.
+1. Ensure `sr.yaml` exists. If not, run `sr init` (or `sr init <example>` — see `sr init --list`).
+2. If `$ARGUMENTS` is provided, run `sr $ARGUMENTS`.
+3. Default flow: preview with `sr plan`, then execute with `sr release`.
 
-## Commands
+## Three verbs
 
-| Command | Description |
+| Command | What it does |
 |---------|-------------|
-| `sr release` | Execute a release (tag + GitHub release) |
-| `sr release --dry-run` | Simulate without side effects |
-| `sr release --sign-tags` | Sign tags with GPG/SSH |
-| `sr release --draft` | Create GitHub release as draft |
-| `sr release -p <name>` | Release a specific monorepo package |
-| `sr release -c <channel>` | Release via named channel (e.g. canary, rc) |
-| `sr release --prerelease <id>` | Produce pre-release versions (e.g. 1.2.0-alpha.1) |
-| `sr release --artifacts <glob>` | Upload artifacts matching glob |
-| `sr release --stage-files <glob>` | Stage additional files in the release commit |
-| `sr status` | Show branch, version, unreleased commits, and open PRs |
-| `sr status --format json` | Machine-readable status output |
-| `sr status -p <name>` | Status for a specific package |
-| `sr config` | Validate and display resolved configuration |
-| `sr config --resolved` | Show resolved config with defaults |
-| `sr init` | Create default `sr.yaml` config file |
-| `sr init --force` | Overwrite existing config |
-| `sr completions <shell>` | Generate shell completions |
-| `sr update` | Update sr to the latest version |
-| `sr migrate` | Show migration guide |
+| `sr plan` | Preview — next version, tag, Terraform-style resource diff. No side effects. |
+| `sr prepare` | Write bumped version files + changelog to disk. No commit, tag, or push. Use when CI needs the bumped manifest before a build step (so binaries embed the correct version). |
+| `sr release` | Full apply — commit, tag, push, create GH release, upload, publish. Idempotent. |
 
-## Monorepo
+## Flags
 
-Use `-p/--package` to target a specific package when `packages` is configured in `sr.yaml`:
+| Flag | Usage |
+|---|---|
+| `sr plan --format json` | Machine-readable plan + diff |
+| `sr release --dry-run` | Preview without side effects (equivalent to `sr plan`) |
+| `sr release -c <channel>` | Release via named channel (canary, rc, stable) |
+| `sr release --prerelease <id>` | Produce 1.2.0-alpha.1 |
+| `sr release --sign-tags` | GPG/SSH tag signing |
+| `sr release --draft` | Draft GitHub release |
+| `sr release --artifacts <path>` | Upload a literal path as a release asset |
+| `sr release --stage-files <path>` | Stage extra file in release commit |
+| `sr prepare --prerelease <id>` | Bump to a prerelease version |
+| `sr config --resolved` | Show config with defaults applied |
+| `sr init <example>` | Scaffold from bundled example (`sr init --list`) |
 
-```bash
-sr release -p core          # release only the core package
-sr status -p cli            # status for cli package
-```
+## Monorepos
 
-## Release Execution Order
+One global version for every package. Every `packages[].version_files` is bumped to the same version on each release. For workspace ecosystems, one root entry with `publish.workspace: true` covers every member (cargo/npm/pnpm/uv).
 
-1. Pre-release command → 2. Bump version files → 3. Write changelog → 4. Build command → 5. Git commit → 6. Create/push tag (signed if configured) → 7. Floating tag → 8. Create/update GitHub release (draft if configured) → 9. Upload artifacts → 10. Verify release → 11. Post-release command
+Monorepo-specific targeting (`-p/--package`) does not exist — `sr release` is whole-repo.
+
+## Publishers
+
+Typed. `publish: { type: cargo | npm | docker | pypi | go | custom }`. Built-ins query the registry before publishing; already-published versions are skipped. No user shell required.
+
+## Release execution order
+
+1. Parse commits → determine bump
+2. Bump version files (every package's `version_files`) + write changelog
+3. Validate artifacts — every `artifacts` path must exist on disk
+4. Commit release files
+5. Create + push annotated tag
+6. Update floating major tag (e.g. `v3`)
+7. Create or update GitHub release
+8. Upload artifacts
+9. Run typed publishers (cargo/npm/etc.) — each skips if already published
+
+Every stage has a strict `is_complete` check. Re-running on a converged release is a noop. Partial failures recover by re-running — there's no state file.
 
 ## Environment
 
-- `GH_TOKEN` / `GITHUB_TOKEN` — Required for GitHub releases
-- `SR_VERSION` / `SR_TAG` — Set during hook commands
+- `GH_TOKEN` / `GITHUB_TOKEN` — required for GitHub releases
+- `SR_VERSION` / `SR_TAG` — set when `publish: custom` commands run
+- Registry tokens (`CARGO_REGISTRY_TOKEN`, `NODE_AUTH_TOKEN`, `UV_PUBLISH_TOKEN`, etc.) — consumed by the typed publishers
 
-## Exit Codes
+## Exit codes
 
-- `0` — Success
-- `1` — Error (config, git, VCS)
-- `2` — No releasable changes
+- `0` — success (JSON printed to stdout)
+- `1` — error (config, git, VCS, publisher failure)
+- `2` — no releasable changes

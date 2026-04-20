@@ -1,0 +1,29 @@
+[package]
+name = "sr-core"
+version = "7.1.2"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+description = "Core library for sr — a release-state reconciler"
+readme = "README.md"
+keywords = ["release", "reconciler", "changelog", "conventional-commits", "versioning"]
+categories = ["development-tools"]
+
+[dependencies]
+serde = { workspace = true }
+serde_yaml_ng = { workspace = true }
+semver = { workspace = true }
+regex = { workspace = true }
+minijinja = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+toml_edit = { workspace = true }
+serde_json = { workspace = true }
+glob = { workspace = true }
+base64 = { workspace = true }
+ureq = { workspace = true }
+sha2 = { workspace = true }
+dirs = { workspace = true }
+tempfile = { workspace = true }

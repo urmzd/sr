@@ -1,0 +1,29 @@
+[package]
+name = "sr"
+version = "7.1.2"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+description = "sr — a release-state reconciler. Define desired state; sr reconciles."
+readme = "README.md"
+keywords = ["release", "reconciler", "changelog", "conventional-commits", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "sr"
+path = "src/main.rs"
+
+[dependencies]
+sr-core = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+serde_yaml_ng = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+glob = { workspace = true }
+ureq = { workspace = true }
+sha2 = { workspace = true }

@@ -1,0 +1,35 @@
+# Docker image release. The docker publisher inside sr runs
+# `docker buildx build --push` itself — Dockerfiles that read the version
+# from the repo (e.g. `ARG VERSION` + `COPY` of a just-bumped file) pick up
+# the new version because `sr release`'s internal Bump stage runs first.
+#
+# If your Dockerfile embeds the version some other way (ldflags etc),
+# split into prepare → build image → release using the cargo multi-platform
+# shape as a template.
+
+name: Release
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: urmzd/sr@v8

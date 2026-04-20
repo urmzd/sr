@@ -1,0 +1,31 @@
+# uv Python workspace release — each member builds its wheel, then
+# `uv publish` uploads to PyPI. Wheels need the bumped version embedded,
+# so `sr prepare` runs before `uv build`.
+
+name: Release
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: urmzd/sr@v8
+        with:
+          mode: prepare
+
+      # uv build reads version from pyproject.toml — which sr just bumped.
+      - run: uv build --all
+
+      - uses: urmzd/sr@v8
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
