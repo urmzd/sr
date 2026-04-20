@@ -1,5 +1,14 @@
 # Changelog
 
+## 8.0.5 (2026-04-20)
+
+### Bug Fixes
+
+- **release**: bump version files before build so binaries embed correct version ([4344bb2](https://github.com/urmzd/sr/commit/4344bb2f802b9b6f4c8a4b099079a9278e159d73))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v8.0.4...v8.0.5)
+
+
 ## 8.0.4 (2026-04-20)
 
 ### Bug Fixes
