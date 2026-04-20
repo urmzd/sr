@@ -60,6 +60,33 @@ packages:
 
 Supported publisher types: `cargo`, `npm`, `docker`, `pypi`, `go`, `custom`. Each queries its registry's API to decide if work is needed. See [examples/](../../../examples/) for one complete config per ecosystem.
 
+### PyPI artifact resolution
+
+The `pypi` publisher resolves each workspace member's wheel + sdist from a **single shared `dist/` directory** under the package path — it does not `cd` into members and rely on `uv publish`'s cwd glob. This matches `uv build --all`'s actual output layout (one workspace-root `dist/` for the whole workspace), and matches `poetry build` / `python -m build` when run at the root.
+
+```yaml
+# Single package — artifacts at `./dist/<name>-<version>*`
+packages:
+  - path: .
+    publish:
+      type: pypi
+
+# Workspace — `uv build --all` writes every member to `./dist/`; sr resolves
+# per member by filename (PEP 625 stem + version) and calls
+# `uv publish <files>` once per member.
+packages:
+  - path: .
+    publish:
+      type: pypi
+      workspace: true
+```
+
+`dist_dir:` overrides the default `dist/` location (e.g. `.dist`, `build/wheels`). Artifacts are matched by PEP 625 filename stem and exact version, so mixed-package dist dirs are safe — sr only picks up the files that belong to the current member.
+
+Fallback order: `uv publish <files>` when `uv` is on `$PATH`, else `twine upload <files>`. Both accept positional file arguments; shell expansion is not involved.
+
+**Upgrading from 8.0.x to 8.0.y:** if you previously built wheels inside each workspace member's own `dist/` directory, either switch to `uv build --all` at the workspace root, or keep per-member builds and rely on the default behavior — `<package_path>/dist` resolves to the member's dist when `path:` points at the member.
+
 ### Config: literal paths only
 
 ```yaml

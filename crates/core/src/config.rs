@@ -435,6 +435,10 @@ pub enum PublishConfig {
         dockerfile: Option<String>,
     },
     /// Publish to PyPI via `twine upload` or `uv publish` (auto-detected).
+    ///
+    /// Artifacts are resolved per-member from `<package_path>/<dist_dir>` by
+    /// filename prefix (PEP 625 stem + version) — matching `uv build --all`'s
+    /// workspace-root dist layout rather than assuming per-member dist dirs.
     Pypi {
         /// Repository name (matches `[tool.twine.repository]` or env).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -443,6 +447,10 @@ pub enum PublishConfig {
         /// (`[tool.uv.workspace].members`). Check aggregates across members.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         workspace: bool,
+        /// Directory (relative to the package path) where built wheels/sdists
+        /// live. Defaults to `dist` — matches `uv build --all` output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dist_dir: Option<String>,
     },
     /// Go modules publish by git-tag; sr already cuts the tag, so this is
     /// effectively a noop documenting the package's presence in the manifest.

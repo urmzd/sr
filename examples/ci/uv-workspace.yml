@@ -1,6 +1,7 @@
-# uv Python workspace release — each member builds its wheel, then
-# `uv publish` uploads to PyPI. Wheels need the bumped version embedded,
-# so `sr prepare` runs before `uv build`.
+# uv Python workspace release — `uv build --all` writes every member's
+# wheel + sdist to the workspace-root `dist/`, then sr resolves each
+# member's artifacts by filename and runs `uv publish <files>`. Wheels
+# need the bumped version embedded, so `sr prepare` runs before `uv build`.
 
 name: Release
 on:

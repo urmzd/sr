@@ -4,11 +4,13 @@
 # Each release:
 #   - bumps root `pyproject.toml` and every member's pyproject.toml
 #   - stages `uv.lock` alongside
-#   - iterates members and runs `uv publish` in each
+#   - resolves each member's wheel + sdist from the workspace-root `dist/`
+#     by filename (PEP 625 stem + version) and runs `uv publish <files>`
 #
-# Wheels must exist in each member's `dist/` before `sr release` — build
-# them in CI between `sr prepare` and `sr release` (see
-# `examples/ci/uv-workspace.yml`).
+# Build artifacts must live under `<repo-root>/dist/` before `sr release` —
+# `uv build --all` puts them there. Run it in CI between `sr prepare` and
+# `sr release` (see `examples/ci/uv-workspace.yml`). Override the path with
+# `dist_dir:` if you build into a non-default location.
 
 git:
   tag_prefix: "v"

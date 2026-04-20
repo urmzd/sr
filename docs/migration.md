@@ -1,1 +1,1 @@
-../crates/sr-cli/docs/migration.md
+../crates/cli/docs/migration.md

@@ -553,7 +553,7 @@ Typed enum — pick the registry type and sr handles the check + publish command
 | `cargo` | `features: string[]`, `registry: string?`, `workspace: bool` | `cargo publish -p <name>`. `workspace: true` iterates `[workspace].members`. |
 | `npm` | `registry: string?`, `access: "public"\|"restricted"?`, `workspace: bool` | Auto-detects pnpm / yarn / npm by lockfile. `workspace: true` uses `pnpm publish -r` / `npm publish --workspaces` / `yarn workspaces foreach`. |
 | `docker` | `image: string`, `platforms: string[]`, `dockerfile: string?` | `docker buildx build --push` with multi-platform support. |
-| `pypi` | `repository: string?`, `workspace: bool` | Auto-detects `uv` vs `twine`. `workspace: true` iterates `[tool.uv.workspace].members`. |
+| `pypi` | `repository: string?`, `workspace: bool`, `dist_dir: string?` | Auto-detects `uv` vs `twine`. `workspace: true` iterates `[tool.uv.workspace].members`; each member's wheel + sdist are resolved from `<package_path>/<dist_dir>` (default `dist/` — matches `uv build --all`). |
 | `go` | — | No-op. Go modules publish via git tag, which sr already cuts. |
 | `custom` | `command: string`, `check: string?`, `cwd: string?` | Escape hatch for registries without built-in support (helm, private Maven, etc.). |
 

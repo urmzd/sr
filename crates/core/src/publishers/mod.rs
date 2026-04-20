@@ -101,9 +101,11 @@ pub fn publisher_for(cfg: &PublishConfig) -> Box<dyn Publisher> {
         PublishConfig::Pypi {
             repository,
             workspace,
+            dist_dir,
         } => Box::new(pypi::PypiPublisher {
             repository: repository.clone(),
             workspace: *workspace,
+            dist_dir: dist_dir.clone(),
         }),
         PublishConfig::Go => Box::new(go::GoPublisher),
         PublishConfig::Custom {

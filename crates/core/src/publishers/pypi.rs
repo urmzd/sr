@@ -1,17 +1,18 @@
-//! PyPI publisher: push a wheel/sdist to pypi.org (or a configured repo).
+//! PyPI publisher: push wheel+sdist artifacts to pypi.org (or a configured repo).
 //!
 //! - `check`: `GET https://pypi.org/pypi/<name>/<version>/json` per target
 //!   package (PEP 503 normalized). Completed iff every target is already
 //!   on the registry. Custom `repository` → Unknown (fall through to run()).
-//! - `run`: auto-detect `uv` → `uv publish`, else `twine upload dist/*`.
-//!   In workspace mode, iterates `[tool.uv.workspace].members` and runs
-//!   the publish command in each (uv publishes the current project, so
-//!   we cd per-member rather than using a single recursive command).
+//! - `run`: auto-detect `uv` → `uv publish <files>`, else `twine upload <files>`.
+//!   Both tools accept explicit file arguments, so sr resolves each member's
+//!   artifacts by filename prefix (PEP 625 stem + version) under a shared
+//!   `<package_path>/<dist_dir>` — matching `uv build --all`'s output layout
+//!   (one workspace-root `dist/`) rather than assuming per-member dist dirs.
 //!
-//! Assumes the build has populated `dist/` in each target (user's
-//! responsibility via a build hook). We don't drive wheel/sdist builds.
+//! Assumes the build step (`uv build --all`, `poetry build`, `python -m build`)
+//! has populated `dist/` before sr runs. sr does not drive wheel/sdist builds.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::{PublishCtx, PublishState, Publisher};
 use crate::error::ReleaseError;
@@ -21,6 +22,7 @@ use crate::workspaces::discover_uv_members;
 pub struct PypiPublisher {
     pub repository: Option<String>,
     pub workspace: bool,
+    pub dist_dir: Option<String>,
 }
 
 impl Publisher for PypiPublisher {
@@ -72,22 +74,35 @@ impl Publisher for PypiPublisher {
             ));
         }
 
+        let dist_dir = self.dist_dir.as_deref().unwrap_or("dist");
+        let dist_root = Path::new(&ctx.package.path).join(dist_dir);
+
         for manifest in &targets {
-            // Publish is run from the member directory (where dist/ lives).
-            let pkg_dir = manifest
-                .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| ctx.package.path.clone());
-            let cmd = build_cmd(uv_available, &self.repository);
+            let name =
+                read_pyproject_name(manifest).map_err(|e| ReleaseError::Config(format!("pypi publish: {e}")))?;
+            let stem = filename_stem(&name);
+            let artifacts = find_artifacts(&dist_root, &stem, ctx.version)
+                .map_err(|e| ReleaseError::Config(format!("pypi publish: {e}")))?;
+
+            if artifacts.is_empty() {
+                return Err(ReleaseError::Config(format!(
+                    "pypi publish: no artifacts for {name} {} in {} (expected `{stem}-{}*.whl` or `{stem}-{}.tar.gz`)",
+                    ctx.version,
+                    dist_root.display(),
+                    ctx.version,
+                    ctx.version,
+                )));
+            }
+
+            let cmd = build_cmd(uv_available, &self.repository, &artifacts);
 
             if ctx.dry_run {
-                eprintln!("[dry-run] pypi ({pkg_dir}): {cmd}");
+                eprintln!("[dry-run] pypi ({name}): {cmd}");
                 continue;
             }
 
-            eprintln!("pypi ({pkg_dir}): {cmd}");
-            let wrapped = format!("cd {} && {cmd}", shell_word(&pkg_dir));
-            run_shell(&wrapped, None, ctx.env)?;
+            eprintln!("pypi ({name}): {cmd}");
+            run_shell(&cmd, None, ctx.env)?;
         }
         Ok(())
     }
@@ -101,18 +116,51 @@ fn resolve_targets(pkg_path: &str, workspace: bool) -> Vec<std::path::PathBuf> {
     }
 }
 
-fn build_cmd(uv_available: bool, repository: &Option<String>) -> String {
+fn build_cmd(uv_available: bool, repository: &Option<String>, files: &[PathBuf]) -> String {
+    let files_str = files
+        .iter()
+        .map(|p| shell_word(&p.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ");
     if uv_available {
         match repository {
-            Some(r) => format!("uv publish --publish-url {}", shell_word(r)),
-            None => "uv publish".to_string(),
+            Some(r) => format!("uv publish --publish-url {} {files_str}", shell_word(r)),
+            None => format!("uv publish {files_str}"),
         }
     } else {
         match repository {
-            Some(r) => format!("twine upload --repository {} dist/*", shell_word(r)),
-            None => "twine upload dist/*".to_string(),
+            Some(r) => format!("twine upload --repository {} {files_str}", shell_word(r)),
+            None => format!("twine upload {files_str}"),
         }
     }
+}
+
+/// Find wheels + sdists for a package in `dist_root`, matched by filename stem
+/// and exact version. Guards against version-prefix collisions (e.g. `1.0` vs
+/// `1.0.1`) by requiring the character after `<stem>-<version>` be `-` (wheel)
+/// or the suffix to be exactly `.tar.gz` (sdist).
+fn find_artifacts(dist_root: &Path, stem: &str, version: &str) -> Result<Vec<PathBuf>, String> {
+    let entries = match std::fs::read_dir(dist_root) {
+        Ok(e) => e,
+        Err(e) => return Err(format!("read {}: {e}", dist_root.display())),
+    };
+    let prefix = format!("{stem}-{version}");
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let name = fname.to_string_lossy();
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let rest = &name[prefix.len()..];
+        let is_wheel = rest.starts_with('-') && name.ends_with(".whl");
+        let is_sdist = rest == ".tar.gz";
+        if is_wheel || is_sdist {
+            out.push(entry.path());
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 fn probe_pypi(normalized_name: &str, version: &str) -> Result<bool, String> {
@@ -159,14 +207,25 @@ fn read_pyproject_name(manifest: &Path) -> Result<String, String> {
 }
 
 /// PEP 503 name normalization — lowercase + collapse runs of [._-] into '-'.
+/// Used for PyPI URL paths (`/pypi/<name>/<version>/json`).
 fn normalize_pypi_name(name: &str) -> String {
+    collapse_seps(name, '-')
+}
+
+/// PEP 625 filename stem — lowercase + collapse runs of [._-] into '_'.
+/// Used to match built wheel/sdist filenames, which use underscore separators.
+fn filename_stem(name: &str) -> String {
+    collapse_seps(name, '_')
+}
+
+fn collapse_seps(name: &str, sep: char) -> String {
     let lower = name.to_lowercase();
     let mut out = String::with_capacity(lower.len());
     let mut last_sep = false;
     for ch in lower.chars() {
         if ch == '.' || ch == '_' || ch == '-' {
             if !last_sep {
-                out.push('-');
+                out.push(sep);
                 last_sep = true;
             }
         } else {
@@ -253,6 +312,15 @@ name = "poetry-name"
     }
 
     #[test]
+    fn filename_stem_uses_underscore() {
+        // PEP 625 / PEP 427: filenames use `_` as the separator, not `-`.
+        assert_eq!(filename_stem("my-pkg"), "my_pkg");
+        assert_eq!(filename_stem("My.Package"), "my_package");
+        assert_eq!(filename_stem("my_pkg"), "my_pkg");
+        assert_eq!(filename_stem("Already_Normal"), "already_normal");
+    }
+
+    #[test]
     fn resolve_targets_uv_workspace() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -276,9 +344,63 @@ name = "poetry-name"
     }
 
     #[test]
-    fn build_cmd_shapes() {
-        assert_eq!(build_cmd(true, &None), "uv publish");
-        assert!(build_cmd(false, &None).starts_with("twine upload"));
-        assert!(build_cmd(true, &Some("private".into())).contains("--publish-url"));
+    fn build_cmd_uv_default() {
+        let files = vec![PathBuf::from("/w/dist/foo-1.0.0.tar.gz")];
+        assert_eq!(
+            build_cmd(true, &None, &files),
+            "uv publish '/w/dist/foo-1.0.0.tar.gz'"
+        );
+    }
+
+    #[test]
+    fn build_cmd_uv_with_repo() {
+        let files = vec![PathBuf::from("/w/dist/foo-1.0.0-py3-none-any.whl")];
+        let cmd = build_cmd(true, &Some("https://private".into()), &files);
+        assert!(cmd.starts_with("uv publish --publish-url 'https://private'"));
+        assert!(cmd.ends_with("'/w/dist/foo-1.0.0-py3-none-any.whl'"));
+    }
+
+    #[test]
+    fn build_cmd_twine_fallback() {
+        let files = vec![PathBuf::from("/w/dist/foo-1.0.0.tar.gz")];
+        assert!(build_cmd(false, &None, &files).starts_with("twine upload "));
+    }
+
+    #[test]
+    fn find_artifacts_matches_wheel_and_sdist() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("my_pkg-1.0.0.tar.gz"), "").unwrap();
+        std::fs::write(dir.path().join("my_pkg-1.0.0-py3-none-any.whl"), "").unwrap();
+        std::fs::write(dir.path().join("other_pkg-1.0.0.tar.gz"), "").unwrap();
+        std::fs::write(dir.path().join("README.md"), "").unwrap();
+
+        let found = find_artifacts(dir.path(), "my_pkg", "1.0.0").unwrap();
+        assert_eq!(found.len(), 2);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"my_pkg-1.0.0.tar.gz".into()));
+        assert!(names.contains(&"my_pkg-1.0.0-py3-none-any.whl".into()));
+    }
+
+    #[test]
+    fn find_artifacts_rejects_version_prefix_collision() {
+        // `foo-1.0` must NOT match `foo-1.0.1-py3...whl` or `foo-1.0.1.tar.gz`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("foo-1.0.1.tar.gz"), "").unwrap();
+        std::fs::write(dir.path().join("foo-1.0.1-py3-none-any.whl"), "").unwrap();
+        std::fs::write(dir.path().join("foo-1.0.tar.gz"), "").unwrap();
+
+        let found = find_artifacts(dir.path(), "foo", "1.0").unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].ends_with("foo-1.0.tar.gz"));
+    }
+
+    #[test]
+    fn find_artifacts_empty_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let found = find_artifacts(dir.path(), "foo", "1.0.0").unwrap();
+        assert!(found.is_empty());
     }
 }
