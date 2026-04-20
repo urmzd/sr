@@ -1,5 +1,14 @@
 # Changelog
 
+## 8.0.1 (2026-04-20)
+
+### Bug Fixes
+
+- **release**: switch to typed cargo publisher ([fe8599e](https://github.com/urmzd/sr/commit/fe8599efe8ef029813e566e36244cc3ad4c04ec3))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v8.0.0...v8.0.1)
+
+
 ## 8.0.0 (2026-04-20)
 
 ### Breaking
