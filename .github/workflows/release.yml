@@ -9,8 +9,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: sr
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Bootstrap sr from crates.io (dogfood previous release)
+        run: cargo install sr-cli --locked
+
+      - name: Bump version files (sr prepare)
+        working-directory: sr
+        run: sr prepare
+
+      - name: Upload prepared manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: prepared-manifest
+          path: |
+            sr/Cargo.toml
+            sr/Cargo.lock
+            sr/**/Cargo.toml
+            sr/CHANGELOG.md
+
   build:
     name: Build (${{ matrix.target }})
+    needs: prepare
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -39,6 +68,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          path: sr
+
+      - name: Apply prepared manifest
+        uses: actions/download-artifact@v8
+        with:
+          name: prepared-manifest
           path: sr
 
       - uses: dtolnay/rust-toolchain@stable
