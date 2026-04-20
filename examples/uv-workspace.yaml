@@ -6,8 +6,9 @@
 #   - stages `uv.lock` alongside
 #   - iterates members and runs `uv publish` in each
 #
-# Assumes wheels/sdists are built into each member's `dist/` before
-# publish. Add a `build` step if you want sr to build for you.
+# Wheels must exist in each member's `dist/` before `sr release` — build
+# them in CI between `sr prepare` and `sr release` (see
+# `examples/ci/uv-workspace.yml`).
 
 git:
   tag_prefix: "v"
@@ -18,8 +19,6 @@ packages:
       - pyproject.toml
     stage_files:
       - uv.lock
-    build:
-      - "uv build --all"
     publish:
       type: pypi
       workspace: true

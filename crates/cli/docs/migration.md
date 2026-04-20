@@ -10,6 +10,117 @@
 | **6.x** | MCP-first workflows | PR, worktree, and breaking-commit tools added to MCP server; `sr init` improved |
 | **7.x** | Config redesign | Entire config structure rewritten; 6 top-level sections; MCP server removed; agentspec removed; file snapshot/rollback removed |
 | **7.1** | Build stage + roll-forward recovery | New `hooks.build` phase runs after bump before tag; declared artifacts validated before tagging; `sr-manifest.json` proves completion; idempotent uploads; reconciliation warns (never blocks); `--force` flag removed — recovery is push a new commit |
+| **8.x** | Reconciler model + typed publishers + three verbs | `plan` / `prepare` / `release`; typed publishers (cargo/npm/docker/pypi/go/custom); workspace-aware publishes; shell hooks removed (builds live in CI); `sr-manifest.json` removed; monorepos collapse to one global version; literal paths only (no globs) |
+
+---
+
+## Migrating from 7.x to 8.x (breaking)
+
+**8.x is a scope reduction**: `sr` stops running user shell commands and becomes a pure release-state reconciler. The VCS + registries are the only state; sr reads them and applies what's missing.
+
+### Verb changes
+
+| 7.x | 8.x |
+|---|---|
+| `sr status` | **`sr plan`** (Terraform-style resource diff; same data, richer output) |
+| `sr release` | `sr release` (unchanged entrypoint; internally a reconciler now) |
+| *(new)* | **`sr prepare`** — bump version files + write changelog on disk, no commit/tag. Use between `sr plan` and `sr release` in multi-job CI so artifact builds pick up the new version. |
+| `sr release -p <name>` | **removed** — `sr release` is whole-repo; monorepos share one version. |
+
+### Config: removed fields
+
+```yaml
+# 7.x — all of these are gone in 8.x
+packages:
+  - path: .
+    independent: true          # ← removed (one global version for all)
+    tag_prefix: "cli-v"        # ← removed (git.tag_prefix is the only prefix)
+    hooks:                     # ← removed entirely
+      pre_release: [...]
+      build: [...]
+      post_release: [...]
+```
+
+### Config: new `publish:` (typed)
+
+```yaml
+# 7.x
+packages:
+  - path: .
+    hooks:
+      post_release:
+        - cargo publish
+
+# 8.x — typed publisher
+packages:
+  - path: .
+    publish:
+      type: cargo
+```
+
+Supported publisher types: `cargo`, `npm`, `docker`, `pypi`, `go`, `custom`. Each queries its registry's API to decide if work is needed. See [examples/](../../../examples/) for one complete config per ecosystem.
+
+### Config: literal paths only
+
+```yaml
+# 7.x — globs allowed
+artifacts:
+  - "target/release/sr-*"
+stage_files:
+  - "Cargo.lock"
+
+# 8.x — literal paths only
+artifacts:
+  - target/release/sr-x86_64-unknown-linux-musl
+  - target/release/sr-aarch64-apple-darwin
+stage_files:
+  - Cargo.lock
+```
+
+Workspace member discovery inside `Cargo.toml` / `package.json` / `pyproject.toml` still uses those tools' native globs — that's unchanged.
+
+### `sr-manifest.json` removed
+
+Previously sr uploaded `sr-manifest.json` to every release as a completion marker. 8.x relies on tag presence + release asset list + registry version queries to determine state. Existing releases with the old manifest keep working; no migration step needed.
+
+### CI workflow changes
+
+Builds that embed a version (Rust binaries, Python wheels, packed tarballs) must run between `sr prepare` and `sr release`:
+
+```yaml
+# 7.x — hooks.build ran inside sr
+- uses: urmzd/sr@v7    # runs cargo build as hooks.build
+
+# 8.x — build lives in CI
+- uses: urmzd/sr@v8
+  with: { mode: prepare }
+- run: cargo build --release
+- uses: urmzd/sr@v8    # uploads the binary
+```
+
+For multi-platform matrix builds (impossible under 7.x), see [examples/ci/cargo-multi-platform.yml](../../../examples/ci/cargo-multi-platform.yml).
+
+### Action input changes
+
+- `mode: plan | prepare | release` — new. Default `release`.
+- `dry-run: true` — deprecated alias for `mode: plan`. Kept for back-compat.
+- `package` input — removed.
+
+### Field-by-field migration table
+
+| 7.x | 8.x |
+|---|---|
+| `packages[].independent` | **removed** — one global version |
+| `packages[].tag_prefix` | **removed** — use `git.tag_prefix` |
+| `packages[].hooks.pre_release` | **removed** — run in CI before `sr release` |
+| `packages[].hooks.build` | **removed** — run in CI between `sr prepare` and `sr release` |
+| `packages[].hooks.post_release` | **removed** — use typed `publish:` or CI steps |
+| `packages[].publish.command: "cargo publish"` | `publish: { type: cargo }` |
+| `artifacts: ["dist/*"]` | `artifacts: [dist/app.tar.gz]` (literal) |
+| `stage_files: ["*.lock"]` | `stage_files: [Cargo.lock]` (literal) |
+| `sr release -p core` | `sr release` (whole-repo; no `-p`) |
+| `sr status` | `sr plan` |
+| `SR_VERSION` / `SR_TAG` (in user hooks) | set only for `publish: custom` commands |
 
 ---
 

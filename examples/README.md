@@ -18,6 +18,16 @@ Copy the closest match into your repo and adjust paths.
 | [`multi-language.yaml`](multi-language.yaml) | Rust core + Node CLI, one tag |
 | [`custom.yaml`](custom.yaml) | Escape hatch — arbitrary publish command + state check |
 
+## CI workflows
+
+See [`ci/`](ci/) for complete `.github/workflows/release.yml` examples that pair with each `sr.yaml`. These show the three-verb pattern:
+
+- **`sr plan`** (preview; no side effects)
+- **`sr prepare`** (bump manifest files + write changelog; no commit/tag)
+- **`sr release`** (commit, tag, push, create GH release, upload, publish)
+
+Most users only need `sr release`. Split into `prepare` + `build` + `release` when producing binaries that embed a version at build time (e.g. Rust binaries, Python wheels).
+
 ## Rules that apply to all configs
 
 - **One global version for the whole repo.** Every package bumps to the

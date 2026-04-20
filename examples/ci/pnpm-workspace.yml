@@ -1,0 +1,43 @@
+# pnpm workspace release — `pnpm publish -r` handles the recursive publish.
+# `sr prepare` bumps every member's package.json first so pnpm sees the new
+# versions when it packs.
+
+name: Release
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org/"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - run: pnpm install --frozen-lockfile
+
+      # If your workspace builds TypeScript or bundles before publishing,
+      # run it *after* `sr prepare` so the compiled output ships with the
+      # bumped version baked in. Pattern:
+      #
+      #   - uses: urmzd/sr@v8
+      #     with: { mode: prepare }
+      #   - run: pnpm -r build
+      #   - uses: urmzd/sr@v8
+      #
+      # For a simple JS-only workspace, skip the split:
+      - uses: urmzd/sr@v8
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

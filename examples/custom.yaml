@@ -1,10 +1,12 @@
 # Custom publish command — escape hatch for registries sr doesn't have
 # a built-in publisher for (helm charts, private maven, Debian repos, etc.)
 #
-# `check` is optional: if provided, it runs first and exit 0 means
-# "already published, skip". Without a `check`, the publish command is
-# always attempted — rely on its own idempotency (e.g. server 409 on
-# duplicate).
+# `command` runs in `cwd` (defaults to package path). `check` is optional —
+# exit 0 means "already published at this version, skip." Without `check`
+# the publish is always attempted, relying on the target's idempotency.
+#
+# Build the artifact in CI between `sr prepare` and `sr release` so the
+# artifact filename embeds the correct version.
 
 git:
   tag_prefix: "v"
@@ -14,9 +16,9 @@ packages:
     version_files:
       - Chart.yaml
     artifacts:
-      - dist/mychart-0.0.0.tgz   # literal path, will be bumped by sr
-    build:
-      - "helm package . --version $SR_VERSION --destination dist/"
+      # Literal path — build this in CI before `sr release`:
+      #   helm package . --version "$SR_VERSION" --destination dist/
+      - dist/mychart-0.0.0.tgz
     publish:
       type: custom
       command: "helm push dist/mychart-$SR_VERSION.tgz oci://ghcr.io/urmzd/charts"
