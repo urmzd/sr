@@ -1,0 +1,22 @@
+# Docker image publishing — container released to a registry per release.
+#
+# sr queries the registry's v2 API to check if the tag already exists,
+# then runs `docker buildx build --push` with the requested platforms.
+# :latest is also tagged for stable (non-prerelease) versions.
+
+git:
+  tag_prefix: "v"
+
+packages:
+  - path: .
+    version_files:
+      # Optional — only if you keep the version in a file for your app
+      # to read at runtime. Remove this block if not applicable.
+      - VERSION
+    publish:
+      type: docker
+      image: ghcr.io/urmzd/myapp
+      platforms:
+        - linux/amd64
+        - linux/arm64
+      # dockerfile: Dockerfile       # default

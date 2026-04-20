@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::process::ExitCode;
 
+mod examples;
+
 use clap::{CommandFactory, Parser, Subcommand};
 use sr_core::changelog::DefaultChangelogFormatter;
 use sr_core::commit::TypedCommitParser;
@@ -77,9 +79,20 @@ enum Commands {
         resolved: bool,
     },
 
-    /// Create default configuration files (sr.yaml)
+    /// Create a `sr.yaml` config. With no argument, auto-detects
+    /// version files and writes the default template. With an example
+    /// name, writes that example verbatim so you can edit it.
     Init {
-        /// Overwrite config files if they already exist
+        /// Name of a bundled example (e.g. "cargo-workspace", "pnpm-workspace",
+        /// "uv-workspace", "docker", "multi-language", "custom"). Omit to
+        /// use auto-detection. Use `--list` to see available examples.
+        example: Option<String>,
+
+        /// List available examples and exit.
+        #[arg(long)]
+        list: bool,
+
+        /// Overwrite `sr.yaml` if it already exists.
         #[arg(long)]
         force: bool,
     },
@@ -313,23 +326,44 @@ fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { force } => {
+        Commands::Init {
+            example,
+            list,
+            force,
+        } => {
+            if list {
+                print!("{}", examples::list_formatted());
+                return Ok(());
+            }
+
             let path = Path::new(DEFAULT_CONFIG_FILE);
-            if !path.exists() || force {
+            if path.exists() && !force {
+                eprintln!(
+                    "{DEFAULT_CONFIG_FILE} already exists (skipping, use --force to overwrite)"
+                );
+                return Ok(());
+            }
+
+            let body = if let Some(name) = example {
+                match examples::find(&name) {
+                    Some(e) => e.body.to_string(),
+                    None => {
+                        eprintln!("error: unknown example '{name}'\n");
+                        eprint!("{}", examples::list_formatted());
+                        return Err(anyhow::anyhow!("unknown example '{name}'"));
+                    }
+                }
+            } else {
                 let detected = sr_core::version_files::detect_version_files(Path::new("."));
                 if !detected.is_empty() {
                     for f in &detected {
                         eprintln!("detected version file: {f}");
                     }
                 }
-                let template = sr_core::config::default_config_template(&detected);
-                std::fs::write(path, template)?;
-                eprintln!("wrote {DEFAULT_CONFIG_FILE}");
-            } else {
-                eprintln!(
-                    "{DEFAULT_CONFIG_FILE} already exists (skipping, use --force to overwrite)"
-                );
-            }
+                sr_core::config::default_config_template(&detected)
+            };
+            std::fs::write(path, body)?;
+            eprintln!("wrote {DEFAULT_CONFIG_FILE}");
 
             let gitignore = Path::new(".gitignore");
             let needs_entry = if gitignore.exists() {

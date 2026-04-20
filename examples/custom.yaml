@@ -1,0 +1,23 @@
+# Custom publish command — escape hatch for registries sr doesn't have
+# a built-in publisher for (helm charts, private maven, Debian repos, etc.)
+#
+# `check` is optional: if provided, it runs first and exit 0 means
+# "already published, skip". Without a `check`, the publish command is
+# always attempted — rely on its own idempotency (e.g. server 409 on
+# duplicate).
+
+git:
+  tag_prefix: "v"
+
+packages:
+  - path: .
+    version_files:
+      - Chart.yaml
+    artifacts:
+      - dist/mychart-0.0.0.tgz   # literal path, will be bumped by sr
+    build:
+      - "helm package . --version $SR_VERSION --destination dist/"
+    publish:
+      type: custom
+      command: "helm push dist/mychart-$SR_VERSION.tgz oci://ghcr.io/urmzd/charts"
+      check: "helm show chart oci://ghcr.io/urmzd/charts/mychart --version $SR_VERSION >/dev/null 2>&1"
