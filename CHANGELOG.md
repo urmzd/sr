@@ -1,5 +1,14 @@
 # Changelog
 
+## 8.0.2 (2026-04-20)
+
+### Bug Fixes
+
+- **cli**: move sr init templates inside the crate ([4ed7484](https://github.com/urmzd/sr/commit/4ed74842b51c6aec5b40acf3f28daed034568566))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v8.0.1...v8.0.2)
+
+
 ## 8.0.1 (2026-04-20)
 
 ### Bug Fixes
