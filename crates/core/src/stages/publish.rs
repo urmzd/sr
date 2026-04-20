@@ -39,8 +39,7 @@ impl Stage for Publish {
             outcomes.push(outcome);
         }
 
-        let failures: Vec<&PublishOutcome> =
-            outcomes.iter().filter(|o| o.is_failure()).collect();
+        let failures: Vec<&PublishOutcome> = outcomes.iter().filter(|o| o.is_failure()).collect();
 
         if ctx.dry_run {
             return Ok(());

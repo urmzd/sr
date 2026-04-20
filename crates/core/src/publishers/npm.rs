@@ -168,8 +168,8 @@ fn probe_npm(registry: &str, name: &str, version: &str) -> Result<bool, String> 
 fn read_package_json_name(manifest: &Path) -> Result<String, String> {
     let text = std::fs::read_to_string(manifest)
         .map_err(|e| format!("read {}: {e}", manifest.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("parse {}: {e}", manifest.display()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", manifest.display()))?;
     value
         .get("name")
         .and_then(|v| v.as_str())
@@ -180,8 +180,8 @@ fn read_package_json_name(manifest: &Path) -> Result<String, String> {
 fn read_package_json_private(manifest: &Path) -> Result<bool, String> {
     let text = std::fs::read_to_string(manifest)
         .map_err(|e| format!("read {}: {e}", manifest.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("parse {}: {e}", manifest.display()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", manifest.display()))?;
     Ok(value
         .get("private")
         .and_then(|v| v.as_bool())

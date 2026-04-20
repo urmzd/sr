@@ -52,12 +52,16 @@ impl ResourceKind {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ResourceState {
     Absent,
-    Present { value: String },
+    Present {
+        value: String,
+    },
     /// Present but its shape is opaque to sr (e.g. a remote release
     /// exists; we haven't fetched the body to compare).
     PresentOpaque,
     /// State query failed or unsupported. Carries a reason for the user.
-    Unknown { reason: String },
+    Unknown {
+        reason: String,
+    },
 }
 
 impl ResourceState {
@@ -306,8 +310,13 @@ pub fn build_diff<G: GitRepository, V: VcsProvider + ?Sized>(
         let Some(cfg) = pkg.publish.as_ref() else {
             continue;
         };
-        let rows =
-            publish_diff_rows(pkg, cfg, &plan.next_version.to_string(), &plan.tag_name, env)?;
+        let rows = publish_diff_rows(
+            pkg,
+            cfg,
+            &plan.next_version.to_string(),
+            &plan.tag_name,
+            env,
+        )?;
         resources.extend(rows);
     }
 
@@ -397,7 +406,9 @@ fn publish_diff_rows(
                 Action::NoChange,
             ),
             Ok(PublishState::Needed) => (ResourceState::Absent, Action::Create),
-            Ok(PublishState::Unknown(r)) => (ResourceState::Unknown { reason: r }, Action::Uncertain),
+            Ok(PublishState::Unknown(r)) => {
+                (ResourceState::Unknown { reason: r }, Action::Uncertain)
+            }
             Err(e) => (
                 ResourceState::Unknown {
                     reason: e.to_string(),
@@ -422,26 +433,23 @@ fn publish_diff_rows(
     for target in targets {
         let (kind_label, id, action, current) = match &target {
             PublishTarget::Cargo { name } => {
-                let present = probe_registry(&format!(
-                    "https://crates.io/api/v1/crates/{name}/{version}"
-                ))
-                .unwrap_or(None);
+                let present =
+                    probe_registry(&format!("https://crates.io/api/v1/crates/{name}/{version}"))
+                        .unwrap_or(None);
                 state_from_probe("cargo", name, version, present)
             }
             PublishTarget::Npm { name } => {
                 let encoded = name.replacen('/', "%2F", 1);
-                let present = probe_registry(&format!(
-                    "https://registry.npmjs.org/{encoded}/{version}"
-                ))
-                .unwrap_or(None);
+                let present =
+                    probe_registry(&format!("https://registry.npmjs.org/{encoded}/{version}"))
+                        .unwrap_or(None);
                 state_from_probe("npm", name, version, present)
             }
             PublishTarget::Pypi { name } => {
                 let norm = normalize_pypi_name(name);
-                let present = probe_registry(&format!(
-                    "https://pypi.org/pypi/{norm}/{version}/json"
-                ))
-                .unwrap_or(None);
+                let present =
+                    probe_registry(&format!("https://pypi.org/pypi/{norm}/{version}/json"))
+                        .unwrap_or(None);
                 state_from_probe("pypi", name, version, present)
             }
             PublishTarget::Docker { image } => {
@@ -511,7 +519,12 @@ fn state_from_probe(
                 value: version.to_string(),
             },
         ),
-        Some(false) => (publisher.to_string(), id, Action::Create, ResourceState::Absent),
+        Some(false) => (
+            publisher.to_string(),
+            id,
+            Action::Create,
+            ResourceState::Absent,
+        ),
         None => (
             publisher.to_string(),
             id,
@@ -549,7 +562,9 @@ fn read_cargo_name(manifest: &Path) -> Option<String> {
 fn read_npm_name(manifest: &Path) -> Option<String> {
     let text = std::fs::read_to_string(manifest).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())
+    v.get("name")
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string())
 }
 
 fn read_pyproject_name(manifest: &Path) -> Option<String> {
@@ -806,18 +821,14 @@ mod tests {
                     kind: ResourceKind::Tag,
                     id: "v1".into(),
                     current: ResourceState::Absent,
-                    desired: ResourceState::Present {
-                        value: "v1".into(),
-                    },
+                    desired: ResourceState::Present { value: "v1".into() },
                     action: Action::Create,
                 },
                 ResourceDiff {
                     kind: ResourceKind::Release,
                     id: "v1".into(),
                     current: ResourceState::PresentOpaque,
-                    desired: ResourceState::Present {
-                        value: "v1".into(),
-                    },
+                    desired: ResourceState::Present { value: "v1".into() },
                     action: Action::Update,
                 },
             ],
