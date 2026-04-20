@@ -7,26 +7,24 @@ use crate::error::ReleaseError;
 use crate::version::BumpLevel;
 use crate::version_files::detect_version_files;
 
-/// Preferred config file name for new projects.
+/// Preferred config file name.
 pub const DEFAULT_CONFIG_FILE: &str = "sr.yaml";
 
-/// Legacy config file name (deprecated, will be removed in a future release).
-pub const LEGACY_CONFIG_FILE: &str = ".urmzd.sr.yml";
-
 /// Config file candidates, checked in priority order.
-pub const CONFIG_CANDIDATES: &[&str] = &["sr.yaml", "sr.yml", LEGACY_CONFIG_FILE];
+pub const CONFIG_CANDIDATES: &[&str] = &["sr.yaml", "sr.yml"];
 
 // ---------------------------------------------------------------------------
 // Top-level config
 // ---------------------------------------------------------------------------
 
-/// Root configuration. Six top-level concerns:
+/// Root configuration. Seven top-level concerns:
 /// - `git` — tag prefix, floating tags, signing
 /// - `commit` — type→bump classification
 /// - `changelog` — file, template, groups
 /// - `channels` — branch→release mapping
 /// - `vcs` — provider-specific config
-/// - `packages` — version files, artifacts, hooks
+/// - `packages` — version files, artifacts, build/publish targets
+/// - `hooks` — repo-wide pre/post release commands
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -37,6 +35,8 @@ pub struct Config {
     pub vcs: VcsConfig,
     #[serde(default = "default_packages")]
     pub packages: Vec<PackageConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HooksConfig>,
 }
 
 impl Default for Config {
@@ -48,6 +48,7 @@ impl Default for Config {
             channels: ChannelsConfig::default(),
             vcs: VcsConfig::default(),
             packages: default_packages(),
+            hooks: None,
         }
     }
 }
@@ -337,65 +338,145 @@ pub struct GitHubConfig {
 // Package config
 // ---------------------------------------------------------------------------
 
-/// A releasable package — version files, artifacts, build/publish hooks.
+/// A releasable package — version files, artifacts, build/publish targets.
+///
+/// All packages share one global release tag (`git.tag_prefix` + semver) and
+/// one version line. Each package's `version_files` are bumped to that same
+/// global version on every release; `packages[]` controls *where to write,
+/// what to build, and how to publish*, not *how to version*.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PackageConfig {
-    /// Directory path relative to repo root.
+    /// Directory path relative to repo root. Used for organizing changelog
+    /// sections and scoping per-package build/publish commands.
     pub path: String,
-    /// Whether this package versions independently in a monorepo.
-    pub independent: bool,
-    /// Tag prefix override (default: derived from git.tag_prefix or "{dir}/v").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tag_prefix: Option<String>,
-    /// Manifest files to bump.
+    /// Manifest files to bump with the global release version. Literal
+    /// paths only — no glob expansion.
     pub version_files: Vec<String>,
     /// Fail on unsupported version file formats.
     pub version_files_strict: bool,
-    /// Additional files to stage in the release commit.
+    /// Additional files to stage in the release commit. Literal paths only.
     pub stage_files: Vec<String>,
-    /// Glob patterns for artifact files to upload to the release.
+    /// Artifact files to upload as release assets. Literal paths only —
+    /// every entry must exist on disk before the tag is created.
     pub artifacts: Vec<String>,
     /// Changelog config override for this package.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changelog: Option<ChangelogConfig>,
-    /// Package-level lifecycle hooks.
+    /// Shell commands that produce this package's declared `artifacts`.
+    /// Runs after version bump, before commit. Every declared artifact
+    /// must exist on disk before the tag is created.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub build: Vec<String>,
+    /// Per-package publish configuration (invoked by `sr publish`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hooks: Option<HooksConfig>,
+    pub publish: Option<PublishConfig>,
 }
 
 impl Default for PackageConfig {
     fn default() -> Self {
         Self {
             path: ".".into(),
-            independent: false,
-            tag_prefix: None,
             version_files: vec![],
             version_files_strict: false,
             stage_files: vec![],
             artifacts: vec![],
             changelog: None,
-            hooks: None,
+            build: vec![],
+            publish: None,
         }
     }
 }
 
-/// Package lifecycle hooks — shell commands at release events.
+/// Repo-wide lifecycle hooks. Run once per release, not per package.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct HooksConfig {
     /// Runs before any mutation — tests, lints, validations that may abort the release.
     pub pre_release: Vec<String>,
-    /// Runs after version files are bumped on disk, before the release is
-    /// committed or tagged. Commands here read the new version from the
-    /// manifest and produce the declared `artifacts`. A failure leaves the
-    /// workspace dirty but no commit/tag/push — `git checkout .` heals it.
-    ///
-    /// When set, sr enforces that every declared artifact glob resolves to
-    /// ≥1 file before the tag is created.
-    pub build: Vec<String>,
-    /// Runs after tag + GitHub release (publish to registries).
+    /// Runs after tag + GitHub release. Kept for parity with pre_release;
+    /// per-package publishing belongs under `packages[].publish` instead.
     pub post_release: Vec<String>,
+}
+
+/// Per-package publish configuration. Typed enum — the user picks a
+/// known publisher (`cargo`, `npm`, `docker`, `pypi`, `go`) and sr handles
+/// both the "is it already published?" check (registry API call) and the
+/// actual publish command (shelled out). The `custom` variant is the escape
+/// hatch for arbitrary shell commands + a user-supplied state check.
+///
+/// Deserializes as an internally-tagged enum: `{ type: <publisher>, ... }`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum PublishConfig {
+    /// `cargo publish` to crates.io (or a custom registry).
+    Cargo {
+        /// Feature flags forwarded to `cargo publish --features ...`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+        /// Cargo registry name (defined in ~/.cargo/config.toml). None =
+        /// default registry (crates.io).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        registry: Option<String>,
+        /// When true, publish every `[workspace].members` crate, not just
+        /// the one at `path`. Check aggregates across members (completed
+        /// iff every member is already on the registry).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        workspace: bool,
+    },
+    /// `npm publish` to registry.npmjs.org (or a custom registry).
+    /// Auto-detects pnpm / yarn / npm from lockfiles at `path`.
+    Npm {
+        /// Registry URL. None = default (https://registry.npmjs.org/).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        registry: Option<String>,
+        /// Access level for scoped packages: "public" or "restricted".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access: Option<String>,
+        /// When true, publish every workspace member (from `package.json`
+        /// `workspaces` or `pnpm-workspace.yaml`). Uses the tool's native
+        /// recursive publish where available.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        workspace: bool,
+    },
+    /// Push a container image to a registry using `docker buildx build --push`.
+    Docker {
+        /// Fully-qualified image name (e.g. `ghcr.io/owner/repo`).
+        image: String,
+        /// Target platforms for buildx (e.g. `["linux/amd64", "linux/arm64"]`).
+        /// When empty, buildx picks the default.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        platforms: Vec<String>,
+        /// Path to Dockerfile relative to the package dir. Default: `Dockerfile`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dockerfile: Option<String>,
+    },
+    /// Publish to PyPI via `twine upload` or `uv publish` (auto-detected).
+    Pypi {
+        /// Repository name (matches `[tool.twine.repository]` or env).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repository: Option<String>,
+        /// When true, publish every uv workspace member
+        /// (`[tool.uv.workspace].members`). Check aggregates across members.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        workspace: bool,
+    },
+    /// Go modules publish by git-tag; sr already cuts the tag, so this is
+    /// effectively a noop documenting the package's presence in the manifest.
+    Go,
+    /// Arbitrary shell command with a user-supplied state check.
+    Custom {
+        /// Shell command that performs the publish.
+        command: String,
+        /// Shell command that returns exit 0 iff the package is already
+        /// published at the current version. Optional — when absent, the
+        /// publisher always runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        check: Option<String>,
+        /// Working directory. Defaults to the package path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -404,12 +485,11 @@ pub struct HooksConfig {
 
 impl Config {
     /// Find the first config file that exists in the given directory.
-    pub fn find_config(dir: &Path) -> Option<(std::path::PathBuf, bool)> {
+    pub fn find_config(dir: &Path) -> Option<std::path::PathBuf> {
         for &candidate in CONFIG_CANDIDATES {
             let path = dir.join(candidate);
             if path.exists() {
-                let is_legacy = candidate == LEGACY_CONFIG_FILE;
-                return Some((path, is_legacy));
+                return Some(path);
             }
         }
         None
@@ -530,19 +610,6 @@ impl Config {
             })
     }
 
-    /// Resolve effective tag prefix for a package.
-    pub fn tag_prefix_for(&self, pkg: &PackageConfig) -> String {
-        if let Some(ref prefix) = pkg.tag_prefix {
-            return prefix.clone();
-        }
-        if pkg.path == "." {
-            self.git.tag_prefix.clone()
-        } else {
-            let dir_name = pkg.path.rsplit('/').next().unwrap_or(&pkg.path);
-            format!("{}/v", dir_name)
-        }
-    }
-
     /// Resolve effective changelog config for a package.
     pub fn changelog_for<'a>(&'a self, pkg: &'a PackageConfig) -> &'a ChangelogConfig {
         pkg.changelog.as_ref().unwrap_or(&self.changelog)
@@ -562,16 +629,6 @@ impl Config {
                 .map(|f| format!("{}/{f}", pkg.path))
                 .collect()
         }
-    }
-
-    /// Get all non-independent packages (for fixed versioning).
-    pub fn fixed_packages(&self) -> Vec<&PackageConfig> {
-        self.packages.iter().filter(|p| !p.independent).collect()
-    }
-
-    /// Get all independent packages.
-    pub fn independent_packages(&self) -> Vec<&PackageConfig> {
-        self.packages.iter().filter(|p| p.independent).collect()
     }
 
     /// Collect all artifacts glob patterns from all packages.
@@ -673,23 +730,27 @@ channels:
 #   github:
 #     release_name_template: "{{{{ tag_name }}}}"
 
+# Repo-wide lifecycle hooks. Run once per release.
+# hooks:
+#   # Runs before any mutation: tests, lints. May abort the release.
+#   pre_release:
+#     - cargo test
+#   # Runs after tag + GitHub release.
+#   post_release:
+#     - echo "released $SR_VERSION"
+
 packages:
   - path: .
 {vf}    # version_files_strict: false
     # stage_files: []
     # artifacts: []
-    # hooks:
-    #   # Runs before any mutation: tests, lints. May abort the release.
-    #   pre_release:
-    #     - cargo test
-    #   # Runs after version bump, before tag/commit. Produces the declared
-    #   # `artifacts` with the new version embedded. sr verifies every
-    #   # artifact glob resolves to >=1 file before tagging.
-    #   build:
-    #     - cargo build --release
-    #   # Runs after tag + GitHub release. Must be idempotent.
-    #   post_release:
-    #     - cargo publish
+    # # Build commands produce this package's declared `artifacts`.
+    # # Runs after version bump, before commit.
+    # build:
+    #   - cargo build --release
+    # # Per-package publish target for `sr publish`. Idempotent.
+    # publish:
+    #   command: cargo publish
 "#
     )
 }
@@ -787,34 +848,6 @@ mod tests {
     fn resolve_channel_not_found() {
         let config = Config::default();
         assert!(config.resolve_channel("missing").is_err());
-    }
-
-    #[test]
-    fn tag_prefix_root_package() {
-        let config = Config::default();
-        let pkg = &config.packages[0];
-        assert_eq!(config.tag_prefix_for(pkg), "v");
-    }
-
-    #[test]
-    fn tag_prefix_subpackage() {
-        let config = Config::default();
-        let pkg = PackageConfig {
-            path: "crates/core".into(),
-            ..Default::default()
-        };
-        assert_eq!(config.tag_prefix_for(&pkg), "core/v");
-    }
-
-    #[test]
-    fn tag_prefix_override() {
-        let config = Config::default();
-        let pkg = PackageConfig {
-            path: "crates/cli".into(),
-            tag_prefix: Some("cli-v".into()),
-            ..Default::default()
-        };
-        assert_eq!(config.tag_prefix_for(&pkg), "cli-v");
     }
 
     #[test]

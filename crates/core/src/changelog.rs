@@ -9,9 +9,26 @@ use crate::error::ReleaseError;
 pub struct ChangelogEntry {
     pub version: String,
     pub date: String,
+    /// All commits in this release, flat. Used when rendering a single-package
+    /// repo or when `package_sections` is empty (flat layout).
     pub commits: Vec<ConventionalCommit>,
     pub compare_url: Option<String>,
     pub repo_url: Option<String>,
+    /// Optional per-package sections (path + its commits). When `len() > 1`,
+    /// the default formatter renders per-package subsections under the
+    /// version header instead of a flat list. Ignored for single-package
+    /// repos or when only one package had commits.
+    #[serde(default)]
+    pub package_sections: Vec<PackageSection>,
+}
+
+/// One package's commits under a release entry. Used for per-package
+/// sectioning in monorepos.
+#[derive(Debug, Clone, Serialize)]
+pub struct PackageSection {
+    /// Package path (matches `Config.packages[].path`).
+    pub path: String,
+    pub commits: Vec<ConventionalCommit>,
 }
 
 /// A rendered group of commits for template context.
@@ -116,29 +133,35 @@ impl ChangelogFormatter for DefaultChangelogFormatter {
         for entry in entries {
             output.push_str(&format!("## {} ({})\n", entry.version, entry.date));
 
-            let groups = self.build_groups(&entry.commits);
-            for group in &groups {
-                if group.commits.is_empty() {
-                    continue;
-                }
-                // Convert group name to title case for heading.
-                let title = group
-                    .name
-                    .split('-')
-                    .map(|w| {
-                        let mut c = w.chars();
-                        match c.next() {
-                            None => String::new(),
-                            Some(f) => f.to_uppercase().to_string() + c.as_str(),
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
+            // Decide: per-package sections vs. flat.
+            //
+            // Use per-package sections when more than one package has commits
+            // in this release. Single-package repos (or releases where only
+            // one package changed) render flat for readability.
+            let non_empty_sections: Vec<&PackageSection> = entry
+                .package_sections
+                .iter()
+                .filter(|s| !s.commits.is_empty())
+                .collect();
+            let multi_package = non_empty_sections.len() > 1;
 
-                output.push_str(&format!("\n### {title}\n\n"));
-                for commit in &group.commits {
-                    format_commit_line(&mut output, commit, entry.repo_url.as_deref());
+            if multi_package {
+                for section in &non_empty_sections {
+                    output.push_str(&format!("\n### {}\n", section.path));
+                    render_groups(
+                        &mut output,
+                        &self.build_groups(&section.commits),
+                        entry.repo_url.as_deref(),
+                        /*heading_level=*/ 4,
+                    );
                 }
+            } else {
+                render_groups(
+                    &mut output,
+                    &self.build_groups(&entry.commits),
+                    entry.repo_url.as_deref(),
+                    /*heading_level=*/ 3,
+                );
             }
 
             if let Some(url) = &entry.compare_url {
@@ -149,6 +172,36 @@ impl ChangelogFormatter for DefaultChangelogFormatter {
         }
 
         Ok(output.trim_end().to_string())
+    }
+}
+
+fn render_groups(
+    output: &mut String,
+    groups: &[RenderedGroup],
+    repo_url: Option<&str>,
+    heading_level: usize,
+) {
+    let heading_marker = "#".repeat(heading_level);
+    for group in groups {
+        if group.commits.is_empty() {
+            continue;
+        }
+        let title = group
+            .name
+            .split('-')
+            .map(|w| {
+                let mut c = w.chars();
+                match c.next() {
+                    None => String::new(),
+                    Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        output.push_str(&format!("\n{heading_marker} {title}\n\n"));
+        for commit in &group.commits {
+            format_commit_line(output, commit, repo_url);
+        }
     }
 }
 
@@ -196,6 +249,7 @@ mod tests {
             commits,
             compare_url: compare_url.map(Into::into),
             repo_url: None,
+            package_sections: Vec::new(),
         }
     }
 

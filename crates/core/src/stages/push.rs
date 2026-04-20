@@ -11,6 +11,15 @@ impl Stage for PushCommit {
         "push_commit"
     }
 
+    /// Idempotent recovery: if the tag is already on the remote, the commit
+    /// it points to must also be there (tags require their target commit).
+    fn is_complete(&self, ctx: &StageContext<'_>) -> Result<bool, ReleaseError> {
+        if ctx.dry_run {
+            return Ok(false);
+        }
+        ctx.git.remote_tag_exists(&ctx.plan.tag_name)
+    }
+
     fn run(&self, ctx: &mut StageContext<'_>) -> Result<(), ReleaseError> {
         if ctx.dry_run {
             return Ok(());

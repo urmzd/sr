@@ -1,6 +1,8 @@
-//! Bump version files and write changelog to disk.
+//! Bump every package's version files and write the changelog to disk.
 //!
-//! Populates `ctx.bumped_files` so [`super::commit::Commit`] can stage them.
+//! Writes the same global version to every `packages[].version_files` entry.
+//! Populates `ctx.bumped_files` so [`super::commit::Commit`] can stage them
+//! all in a single release commit.
 
 use std::fs;
 use std::path::Path;
@@ -17,19 +19,32 @@ impl Stage for Bump {
     }
 
     fn run(&self, ctx: &mut StageContext<'_>) -> Result<(), ReleaseError> {
-        let version_files = ctx.config.version_files_for(ctx.active_package);
-        let version_files_strict = ctx.active_package.version_files_strict;
-        let changelog_file = ctx.config.changelog_for(ctx.active_package).file.clone();
+        // Gather every manifest file across all packages. A file that appears
+        // under multiple packages is deduped — no double-write.
+        let mut all_version_files: Vec<(String, bool)> = Vec::new(); // (file, strict)
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for pkg in &ctx.config.packages {
+            let strict = pkg.version_files_strict;
+            for f in ctx.config.version_files_for(pkg) {
+                if seen.insert(f.clone()) {
+                    all_version_files.push((f, strict));
+                }
+            }
+        }
+
+        // Changelog path: use the repo-level config (per-package overrides are
+        // still available, but the default is one changelog per repo).
+        let changelog_file = ctx.config.changelog.file.clone();
 
         if ctx.dry_run {
-            for file in &version_files {
+            for (file, strict) in &all_version_files {
                 let filename = Path::new(file)
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or_default();
                 if is_supported_version_file(filename) {
                     eprintln!("[dry-run] Would bump version in: {file}");
-                } else if version_files_strict {
+                } else if *strict {
                     return Err(ReleaseError::VersionBump(format!(
                         "unsupported version file: {filename}"
                     )));
@@ -37,17 +52,23 @@ impl Stage for Bump {
                     eprintln!("[dry-run] warning: unsupported version file, would skip: {file}");
                 }
             }
-            if !ctx.active_package.stage_files.is_empty() {
+            let stage_files: Vec<String> = ctx
+                .config
+                .packages
+                .iter()
+                .flat_map(|p| p.stage_files.clone())
+                .collect();
+            if !stage_files.is_empty() {
                 eprintln!(
                     "[dry-run] Would stage additional files: {}",
-                    ctx.active_package.stage_files.join(", ")
+                    stage_files.join(", ")
                 );
             }
             return Ok(());
         }
 
         let mut files_to_stage: Vec<String> = Vec::new();
-        for file in &version_files {
+        for (file, strict) in &all_version_files {
             match bump_version_file(Path::new(file), ctx.version_str) {
                 Ok(extra) => {
                     files_to_stage.push(file.clone());
@@ -55,14 +76,14 @@ impl Stage for Bump {
                         files_to_stage.push(extra_path.to_string_lossy().into_owned());
                     }
                 }
-                Err(e) if !version_files_strict => {
+                Err(e) if !*strict => {
                     eprintln!("warning: {e} — skipping {file}");
                 }
                 Err(e) => return Err(e),
             }
         }
 
-        // Auto-discover and stage lock files associated with bumped manifests
+        // Auto-discover and stage lock files associated with bumped manifests.
         for lock_file in discover_lock_files(&files_to_stage) {
             let lock_str = lock_file.to_string_lossy().into_owned();
             if !files_to_stage.contains(&lock_str) {

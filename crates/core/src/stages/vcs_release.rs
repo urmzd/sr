@@ -1,4 +1,11 @@
 //! Create (or update-in-place) the GitHub release for the pushed tag.
+//!
+//! Reconciler contract: `run()` uses PATCH semantics when the release
+//! already exists, which is idempotent — repeated updates with the same
+//! body produce no observable change beyond `updated_at`. We could skip
+//! the update entirely when the body matches, but that would require a
+//! body-fetch round-trip; the current trade-off favors one write over two
+//! reads + conditional write. The stage is still safe to re-run.
 
 use super::{Stage, StageContext};
 use crate::error::ReleaseError;

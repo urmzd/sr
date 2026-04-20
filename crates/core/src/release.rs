@@ -3,13 +3,18 @@ use serde::Serialize;
 
 use crate::changelog::{ChangelogEntry, ChangelogFormatter};
 use crate::commit::{CommitParser, ConventionalCommit, DefaultCommitClassifier};
-use crate::config::{Config, PackageConfig};
+use crate::config::Config;
 use crate::error::ReleaseError;
 use crate::git::GitRepository;
 use crate::stages::{StageContext, default_pipeline};
 use crate::version::{BumpLevel, apply_bump, apply_prerelease_bump, determine_bump};
 
 /// The computed plan for a release, before execution.
+///
+/// One version, one tag, one release event. All packages in `packages` get
+/// their version files bumped to the same `next_version`. The per-package
+/// `commits` slice is path-partitioned for readable changelog sections only —
+/// the global bump decision does not depend on paths.
 #[derive(Debug, Serialize)]
 pub struct ReleasePlan {
     pub current_version: Option<Version>,
@@ -19,6 +24,25 @@ pub struct ReleasePlan {
     pub tag_name: String,
     pub floating_tag_name: Option<String>,
     pub prerelease: bool,
+    /// Per-package breakdown (stable order = `config.packages`). Used by
+    /// stages that iterate packages (Bump, Build, UploadManifest) and by the
+    /// changelog formatter for optional per-package sectioning.
+    pub packages: Vec<PackagePlan>,
+}
+
+/// A per-package slice of a release plan. Every package in `config.packages`
+/// produces one `PackagePlan`, even if no commits touched its path.
+#[derive(Debug, Clone, Serialize)]
+pub struct PackagePlan {
+    pub path: String,
+    /// Manifest files to bump (resolved via `Config::version_files_for`).
+    pub version_files: Vec<String>,
+    /// Artifact glob patterns declared for this package.
+    pub artifacts: Vec<String>,
+    /// Commits whose files fall under this package's path (for changelog
+    /// sectioning). Empty for the root package (`path == "."`) when more than
+    /// one package is configured, to avoid double-counting.
+    pub commits: Vec<ConventionalCommit>,
 }
 
 /// Orchestrates the release flow.
@@ -85,7 +109,7 @@ pub trait VcsProvider: Send + Sync {
 
     /// Fetch the content of a named asset on the release for `tag`.
     /// Returns `Ok(None)` if the asset doesn't exist or the provider doesn't
-    /// support it. Used by the reconciler to read `sr-manifest.json`.
+    /// support it. Unused today — retained on the trait for future readers.
     fn fetch_asset(&self, _tag: &str, _name: &str) -> Result<Option<Vec<u8>>, ReleaseError> {
         Ok(None)
     }
@@ -157,12 +181,21 @@ where
             }
             None => None,
         };
+        let package_sections: Vec<crate::changelog::PackageSection> = plan
+            .packages
+            .iter()
+            .map(|pp| crate::changelog::PackageSection {
+                path: pp.path.clone(),
+                commits: pp.commits.clone(),
+            })
+            .collect();
         let entry = ChangelogEntry {
             version: plan.next_version.to_string(),
             date: today,
             commits: plan.commits.clone(),
             compare_url,
             repo_url: self.vcs.repo_url(),
+            package_sections,
         };
         self.formatter.format(&[entry])
     }
@@ -186,14 +219,92 @@ where
         plan.tag_name.clone()
     }
 
-    /// Return the active package for a single-package release (the root package or the only one).
-    /// Returns the root package (".") if present, otherwise the first package.
-    fn active_package(&self) -> Option<&PackageConfig> {
-        self.config
-            .packages
-            .iter()
-            .find(|p| p.path == ".")
-            .or_else(|| self.config.packages.first())
+    /// Build the per-package breakdown for a release plan. Each package gets
+    /// the commits whose files fall under its `path` (via the git repo's
+    /// path filter). The root package (`.`) is treated as "everything else" —
+    /// it gets commits that didn't fall under any other configured package —
+    /// so that setups mixing root and sub-packages don't double-count.
+    fn build_package_plans(
+        &self,
+        from_sha: Option<&str>,
+        all_conventional: &[ConventionalCommit],
+    ) -> Result<Vec<PackagePlan>, ReleaseError> {
+        let packages = &self.config.packages;
+
+        // Fast path: single package. All commits belong to it.
+        if packages.len() == 1 {
+            let pkg = &packages[0];
+            return Ok(vec![PackagePlan {
+                path: pkg.path.clone(),
+                version_files: self.config.version_files_for(pkg),
+                artifacts: pkg.artifacts.clone(),
+                commits: all_conventional.to_vec(),
+            }]);
+        }
+
+        // Multi-package: attribute commits by path. For each non-root package,
+        // ask git for commits touching its path and match back to our
+        // already-parsed ConventionalCommits by SHA.
+        let skip_patterns = &self.config.git.skip_patterns;
+        let mut plans: Vec<PackagePlan> = Vec::with_capacity(packages.len());
+        let mut attributed_shas: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        // Reserve the root-package slot to fill last (it catches unattributed commits).
+        let root_index = packages.iter().position(|p| p.path == ".");
+
+        for (idx, pkg) in packages.iter().enumerate() {
+            if Some(idx) == root_index {
+                plans.push(PackagePlan {
+                    path: pkg.path.clone(),
+                    version_files: self.config.version_files_for(pkg),
+                    artifacts: pkg.artifacts.clone(),
+                    commits: Vec::new(), // filled in after loop
+                });
+                continue;
+            }
+
+            let raw = self.git.commits_since_in_path(from_sha, &pkg.path)?;
+            let pkg_shas: std::collections::HashSet<&str> =
+                raw.iter().map(|c| c.sha.as_str()).collect();
+            let pkg_commits: Vec<ConventionalCommit> = all_conventional
+                .iter()
+                .filter(|c| pkg_shas.contains(c.sha.as_str()))
+                .filter(|c| !c.description.is_empty())
+                .filter(|c| {
+                    !skip_patterns
+                        .iter()
+                        .any(|p| c.description.contains(p.as_str()))
+                })
+                .cloned()
+                .collect();
+
+            for c in &pkg_commits {
+                attributed_shas.insert(c.sha.clone());
+            }
+
+            plans.push(PackagePlan {
+                path: pkg.path.clone(),
+                version_files: self.config.version_files_for(pkg),
+                artifacts: pkg.artifacts.clone(),
+                commits: pkg_commits,
+            });
+        }
+
+        // Fill the root package's commits with everything not attributed to
+        // a sub-package. If there is no root package, unattributed commits
+        // still contribute to the global bump but won't appear in any
+        // per-package section.
+        if let Some(idx) = root_index {
+            let unattributed: Vec<ConventionalCommit> = all_conventional
+                .iter()
+                .filter(|c| !attributed_shas.contains(c.sha.as_str()))
+                .cloned()
+                .collect();
+            plans[idx].commits = unattributed;
+        }
+
+        Ok(plans)
     }
 }
 
@@ -207,39 +318,16 @@ where
     fn plan(&self) -> Result<ReleasePlan, ReleaseError> {
         let is_prerelease = self.prerelease_id.is_some();
 
-        // For stable releases, find the latest stable tag (skip pre-release tags).
-        // For pre-releases, find the latest tag of any kind to determine commits since.
+        // State model: the tag is the only source of truth. Prior releases
+        // — complete, partial, or abandoned — are archaeology. We compute
+        // the next release relative to the latest tag and move forward.
+        // Stable releases use the latest stable tag; pre-releases use the
+        // latest tag of any kind (stable or pre) so the pre-release counter
+        // doesn't collide with earlier pre-release tags.
         let all_tags = self.git.all_tags(&self.config.git.tag_prefix)?;
         let latest_stable = all_tags.iter().rev().find(|t| t.version.pre.is_empty());
         let latest_any = all_tags.last();
 
-        // Reconciliation: warn if the latest remote tag's release is
-        // incomplete (manifest says declared artifacts are missing), but
-        // never block. Users recover by pushing a new commit; the broken
-        // release stays as a dangling record. Unknown status (no manifest =
-        // legacy release or sr died before writing the manifest) passes
-        // silently — we can't distinguish those remotely. Transport errors
-        // from fetching the manifest bubble up as hard errors because a
-        // release can't proceed without GitHub anyway.
-        if let Some(latest) = all_tags.last() {
-            match crate::manifest::check_release_status(&self.vcs, &latest.name)? {
-                crate::manifest::ReleaseStatus::Incomplete {
-                    missing_artifacts, ..
-                } => {
-                    eprintln!(
-                        "warning: previous release {} is incomplete: {} declared asset(s) missing ({}). \
-                         Continuing — the broken release will remain as a dangling record.",
-                        latest.name,
-                        missing_artifacts.len(),
-                        missing_artifacts.join(", "),
-                    );
-                }
-                crate::manifest::ReleaseStatus::Complete(_)
-                | crate::manifest::ReleaseStatus::Unknown => {}
-            }
-        }
-
-        // Use the latest tag (any kind) for commit range, but the latest stable for base version
         let tag_info = if is_prerelease {
             latest_any
         } else {
@@ -251,19 +339,11 @@ where
             None => (None, None),
         };
 
-        let default_pkg = PackageConfig::default();
-        let pkg = self.active_package().unwrap_or(&default_pkg);
-        let path_filter = if pkg.path != "." {
-            Some(pkg.path.as_str())
-        } else {
-            None
-        };
-
-        let raw_commits = if let Some(path) = path_filter {
-            self.git.commits_since_in_path(from_sha, path)?
-        } else {
-            self.git.commits_since(from_sha)?
-        };
+        // Scan commits repo-wide. Strict monorepo model: one version for all
+        // packages, so the global bump is decided over every commit since the
+        // last tag — not filtered by package path. Per-package path attribution
+        // happens later, for changelog sectioning only.
+        let raw_commits = self.git.commits_since(from_sha)?;
 
         if raw_commits.is_empty() {
             let (tag, sha) = match tag_info {
@@ -295,6 +375,8 @@ where
                 });
             }
         };
+
+        let package_plans = self.build_package_plans(from_sha, &conventional_commits)?;
 
         // For pre-releases, base the version on the latest *stable* tag
         let base_version = if is_prerelease {
@@ -348,6 +430,7 @@ where
             tag_name,
             floating_tag_name,
             prerelease: is_prerelease,
+            packages: package_plans,
         })
     }
 
@@ -360,15 +443,11 @@ where
         let env_refs: Vec<(&str, &str)> =
             env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
-        let default_pkg = PackageConfig::default();
-        let active_package = self.active_package().unwrap_or(&default_pkg);
-
         let mut ctx = StageContext {
             plan,
             config: &self.config,
             git: &self.git,
             vcs: &self.vcs,
-            active_package,
             changelog_body: &changelog_body,
             release_name: &release_name,
             version_str: &version_str,
@@ -402,25 +481,42 @@ fn release_env(version: &str, tag: &str) -> Vec<(String, String)> {
     ]
 }
 
-/// Resolve glob patterns into a deduplicated, sorted list of file paths.
-pub(crate) fn resolve_globs(patterns: &[String]) -> Result<Vec<String>, String> {
+/// Verify each listed path exists on disk and return them in a
+/// deduplicated, sorted order. No glob expansion: users must list every
+/// file they want staged/uploaded explicitly so the config's declaration
+/// matches reality 1:1.
+pub(crate) fn resolve_paths(paths: &[String]) -> Result<Vec<String>, String> {
     let mut files = std::collections::BTreeSet::new();
-    for pattern in patterns {
-        let paths =
-            glob::glob(pattern).map_err(|e| format!("invalid glob pattern '{pattern}': {e}"))?;
-        for entry in paths {
-            match entry {
-                Ok(path) if path.is_file() => {
-                    files.insert(path.to_string_lossy().into_owned());
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    return Err(format!("glob error for pattern '{pattern}': {e}"));
-                }
-            }
+    for p in paths {
+        let pb = std::path::Path::new(p);
+        if !pb.exists() {
+            return Err(format!("path does not exist: {p}"));
         }
+        if !pb.is_file() {
+            return Err(format!("not a file: {p}"));
+        }
+        files.insert(p.clone());
     }
     Ok(files.into_iter().collect())
+}
+
+/// Check which of the listed paths exist as files. Returns (existing, missing).
+/// Used by preview paths (`relstate plan`) where missing files are diagnostic,
+/// not errors.
+pub(crate) fn partition_paths(paths: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut existing = Vec::new();
+    let mut missing = Vec::new();
+    for p in paths {
+        let pb = std::path::Path::new(p);
+        if pb.is_file() {
+            existing.push(p.clone());
+        } else {
+            missing.push(p.clone());
+        }
+    }
+    existing.sort();
+    existing.dedup();
+    (existing, missing)
 }
 
 pub fn today_string() -> String {
@@ -453,7 +549,7 @@ mod tests {
     use crate::changelog::DefaultChangelogFormatter;
     use crate::commit::{Commit, TypedCommitParser};
     use crate::config::{
-        ChangelogConfig, Config, GitConfig, HooksConfig, PackageConfig, default_changelog_groups,
+        ChangelogConfig, Config, GitConfig, PackageConfig, default_changelog_groups,
     };
     use crate::git::{GitRepository, TagInfo};
 
@@ -604,15 +700,6 @@ mod tests {
                 uploaded_assets: Mutex::new(Vec::new()),
                 stored_assets: Mutex::new(Vec::new()),
             }
-        }
-
-        /// Pre-seed an asset on a release — for reconciliation tests where the
-        /// starting state already has a manifest.
-        fn seed_asset(&self, tag: &str, name: &str, content: Vec<u8>) {
-            self.stored_assets
-                .lock()
-                .unwrap()
-                .push((tag.to_string(), name.to_string(), content));
         }
     }
 
@@ -1061,25 +1148,35 @@ mod tests {
         // First run
         s.execute(&plan, false).unwrap();
 
-        // Second run should also succeed (idempotent)
+        // Second run should also succeed (reconciler converges on noop).
         s.execute(&plan, false).unwrap();
 
-        // Tag should only have been created once (second run skips because tag_exists)
+        // Tag should only have been created once (second run skips because tag_exists).
         assert_eq!(s.git.created_tags.lock().unwrap().len(), 1);
 
-        // Tag push should only happen once (second run skips because remote_tag_exists)
+        // Tag push should only happen once (second run skips because remote_tag_exists).
         assert_eq!(s.git.pushed_tags.lock().unwrap().len(), 1);
 
-        // Push (commit) should happen twice (always safe)
-        assert_eq!(*s.git.push_count.lock().unwrap(), 2);
+        // Commit push should only happen once — PushCommit::is_complete sees
+        // the remote tag and correctly skips the second run.
+        assert_eq!(*s.git.push_count.lock().unwrap(), 1);
 
-        // Release should be updated in place on second run (no delete)
+        // test_config has no real version files (dummy skipped on bump), so
+        // bumped_files is empty and stage_and_commit is never called.
+        assert_eq!(s.git.committed.lock().unwrap().len(), 0);
+
+        // Release should be updated in place on second run (no delete).
         let deleted = s.vcs.deleted_releases.lock().unwrap();
         assert!(deleted.is_empty(), "update should not delete");
 
         let releases = s.vcs.releases.lock().unwrap();
         assert_eq!(releases.len(), 1);
         assert_eq!(releases[0].0, "v0.1.0");
+
+        // Artifact uploads should only happen once per declared artifact.
+        // test_config declares none, so uploaded_assets stays empty.
+        let uploaded = s.vcs.uploaded_assets.lock().unwrap();
+        assert!(uploaded.is_empty());
     }
 
     #[test]
@@ -1184,8 +1281,8 @@ mod tests {
                 path: ".".into(),
                 version_files: vec!["__sr_test_dummy_no_bump__".into()],
                 artifacts: vec![
-                    dir.path().join("*.tar.gz").to_str().unwrap().to_string(),
-                    dir.path().join("*.zip").to_str().unwrap().to_string(),
+                    dir.path().join("app.tar.gz").to_str().unwrap().to_string(),
+                    dir.path().join("app.zip").to_str().unwrap().to_string(),
                 ],
                 ..Default::default()
             }],
@@ -1197,8 +1294,8 @@ mod tests {
         s.execute(&plan, false).unwrap();
 
         let uploaded = s.vcs.uploaded_assets.lock().unwrap();
-        // UploadArtifacts call + UploadManifest call
-        assert_eq!(uploaded.len(), 2);
+        // One UploadArtifacts call carrying both user artifacts.
+        assert_eq!(uploaded.len(), 1);
         let artifact_call = uploaded
             .iter()
             .find(|(_tag, files)| files.iter().any(|f| f.ends_with("app.tar.gz")))
@@ -1222,7 +1319,7 @@ mod tests {
             packages: vec![PackageConfig {
                 path: ".".into(),
                 version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                artifacts: vec![dir.path().join("*.tar.gz").to_str().unwrap().to_string()],
+                artifacts: vec![dir.path().join("app.tar.gz").to_str().unwrap().to_string()],
                 ..Default::default()
             }],
             ..Default::default()
@@ -1243,46 +1340,65 @@ mod tests {
         let plan = s.plan().unwrap();
         s.execute(&plan, false).unwrap();
 
-        // No user-declared artifacts → no user-artifact upload call. The
-        // manifest stage still uploads sr-manifest.json.
+        // No user-declared artifacts → no upload call at all.
         let uploaded = s.vcs.uploaded_assets.lock().unwrap();
-        let user_uploads: Vec<_> = uploaded
-            .iter()
-            .filter(|(_tag, files)| {
-                !files
-                    .iter()
-                    .all(|f| f.ends_with(crate::manifest::MANIFEST_ASSET_NAME))
-            })
-            .collect();
         assert!(
-            user_uploads.is_empty(),
-            "unexpected non-manifest uploads: {user_uploads:?}"
+            uploaded.is_empty(),
+            "unexpected uploads with no declared artifacts: {uploaded:?}"
         );
     }
 
     #[test]
-    fn resolve_globs_basic() {
+    fn resolve_paths_literal_existing() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
-        std::fs::write(dir.path().join("b.txt"), "b").unwrap();
-        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
 
-        let pattern = dir.path().join("*.txt").to_str().unwrap().to_string();
-        let result = resolve_globs(&[pattern]).unwrap();
+        let input = vec![
+            a.to_string_lossy().into_owned(),
+            b.to_string_lossy().into_owned(),
+        ];
+        let result = resolve_paths(&input).unwrap();
         assert_eq!(result.len(), 2);
-        assert!(result.iter().any(|f: &String| f.ends_with("a.txt")));
-        assert!(result.iter().any(|f: &String| f.ends_with("b.txt")));
     }
 
     #[test]
-    fn resolve_globs_deduplicates() {
+    fn resolve_paths_missing_errors() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("file.txt"), "data").unwrap();
+        let a = dir.path().join("a.txt");
+        std::fs::write(&a, "a").unwrap();
 
-        let pattern = dir.path().join("*.txt").to_str().unwrap().to_string();
-        // Same pattern twice should not produce duplicates
-        let result = resolve_globs(&[pattern.clone(), pattern]).unwrap();
+        let result = resolve_paths(&[
+            a.to_string_lossy().into_owned(),
+            dir.path().join("nope.txt").to_string_lossy().into_owned(),
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_paths_deduplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("file.txt");
+        std::fs::write(&p, "data").unwrap();
+        let ps = p.to_string_lossy().into_owned();
+        let result = resolve_paths(&[ps.clone(), ps]).unwrap();
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn partition_paths_splits_existing_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        std::fs::write(&a, "a").unwrap();
+
+        let (on_disk, missing) = partition_paths(&[
+            a.to_string_lossy().into_owned(),
+            dir.path().join("nope.txt").to_string_lossy().into_owned(),
+        ]);
+        assert_eq!(on_disk.len(), 1);
+        assert_eq!(missing.len(), 1);
     }
 
     // --- floating tags tests ---
@@ -1437,10 +1553,7 @@ mod tests {
             packages: vec![PackageConfig {
                 path: ".".into(),
                 version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                hooks: Some(HooksConfig {
-                    build: vec![cmd],
-                    ..Default::default()
-                }),
+                build: vec![cmd],
                 ..Default::default()
             }],
             ..Default::default()
@@ -1482,10 +1595,7 @@ mod tests {
             packages: vec![PackageConfig {
                 path: ".".into(),
                 version_files: vec![cargo_path.to_str().unwrap().to_string()],
-                hooks: Some(HooksConfig {
-                    build: vec![cmd],
-                    ..Default::default()
-                }),
+                build: vec![cmd],
                 ..Default::default()
             }],
             ..Default::default()
@@ -1514,10 +1624,7 @@ mod tests {
             packages: vec![PackageConfig {
                 path: ".".into(),
                 version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                hooks: Some(HooksConfig {
-                    build: vec!["false".into()],
-                    ..Default::default()
-                }),
+                build: vec!["false".into()],
                 ..Default::default()
             }],
             ..Default::default()
@@ -1546,11 +1653,8 @@ mod tests {
             packages: vec![PackageConfig {
                 path: ".".into(),
                 version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                artifacts: vec!["/definitely/not/here/*.tar.gz".into()],
-                hooks: Some(HooksConfig {
-                    build: vec!["true".into()],
-                    ..Default::default()
-                }),
+                artifacts: vec!["/definitely/not/here/app.tar.gz".into()],
+                build: vec!["true".into()],
                 ..Default::default()
             }],
             ..Default::default()
@@ -1563,7 +1667,7 @@ mod tests {
         match err {
             ReleaseError::Vcs(ref msg) => {
                 assert!(
-                    msg.contains("matched no files"),
+                    msg.contains("missing on disk"),
                     "expected validation error, got: {msg}"
                 );
             }
@@ -1575,7 +1679,7 @@ mod tests {
         assert!(s.vcs.releases.lock().unwrap().is_empty());
     }
 
-    /// Validation passes when every declared glob resolves to ≥1 file.
+    /// Validation passes when every declared artifact exists on disk.
     #[test]
     fn execute_validation_passes_when_all_artifacts_present() {
         let dir = tempfile::tempdir().unwrap();
@@ -1589,11 +1693,8 @@ mod tests {
             packages: vec![PackageConfig {
                 path: ".".into(),
                 version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                artifacts: vec![dir.path().join("*.tar.gz").to_str().unwrap().to_string()],
-                hooks: Some(HooksConfig {
-                    build: vec!["true".into()],
-                    ..Default::default()
-                }),
+                artifacts: vec![dir.path().join("app.tar.gz").to_str().unwrap().to_string()],
+                build: vec!["true".into()],
                 ..Default::default()
             }],
             ..Default::default()
@@ -1606,9 +1707,8 @@ mod tests {
         assert_eq!(*s.git.created_tags.lock().unwrap(), vec!["v0.1.0"]);
     }
 
-    /// No `hooks.build` means no contract — missing declared artifacts do NOT
-    /// fail the pipeline. Preserves today's behavior for users building
-    /// outside sr.
+    /// No `build` commands means no contract — missing declared artifacts
+    /// do NOT fail the pipeline. Useful for repos that build outside sr.
     #[test]
     fn execute_validation_skipped_without_build_hooks() {
         let config = Config {
@@ -1619,8 +1719,8 @@ mod tests {
             packages: vec![PackageConfig {
                 path: ".".into(),
                 version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                artifacts: vec!["/still/not/here/*.tar.gz".into()],
-                // No hooks.build — today's behavior.
+                artifacts: vec!["/still/not/here/app.tar.gz".into()],
+                // No build commands — today's behavior.
                 ..Default::default()
             }],
             ..Default::default()
@@ -1628,64 +1728,15 @@ mod tests {
 
         let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
         let plan = s.plan().unwrap();
-        s.execute(&plan, false).unwrap();
-
-        assert_eq!(*s.git.created_tags.lock().unwrap(), vec!["v0.1.0"]);
+        // Upload stage will try to resolve_paths and fail, since we have
+        // declared artifacts that don't exist. Without build validation,
+        // this surfaces as a Vcs error at upload time.
+        let err = s.execute(&plan, false).unwrap_err();
+        assert!(matches!(err, ReleaseError::Vcs(_)));
     }
 
-    // --- manifest + reconciliation tests ---
-
-    /// sr-manifest.json is uploaded on every successful release.
-    #[test]
-    fn execute_uploads_manifest_as_final_asset() {
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], test_config());
-        let plan = s.plan().unwrap();
-        s.execute(&plan, false).unwrap();
-
-        let assets = s.vcs.list_assets("v0.1.0").unwrap();
-        assert!(
-            assets.contains(&crate::manifest::MANIFEST_ASSET_NAME.to_string()),
-            "manifest should be uploaded; got {assets:?}"
-        );
-    }
-
-    /// Manifest records the tag, the commit sha at HEAD, and (when declared)
-    /// the resolved artifact basenames.
-    #[test]
-    fn execute_manifest_contains_tag_and_artifacts() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("app.tar.gz"), "fake").unwrap();
-
-        let config = Config {
-            changelog: ChangelogConfig {
-                file: None,
-                ..Default::default()
-            },
-            packages: vec![PackageConfig {
-                path: ".".into(),
-                version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                artifacts: vec![dir.path().join("*.tar.gz").to_str().unwrap().to_string()],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        s.execute(&plan, false).unwrap();
-
-        let manifest_bytes = s
-            .vcs
-            .fetch_asset("v0.1.0", crate::manifest::MANIFEST_ASSET_NAME)
-            .unwrap()
-            .expect("manifest should be present");
-        let manifest: crate::manifest::Manifest = serde_json::from_slice(&manifest_bytes).unwrap();
-
-        assert_eq!(manifest.tag, "v0.1.0");
-        assert!(manifest.artifacts.iter().any(|a| a == "app.tar.gz"));
-        assert!(!manifest.commit_sha.is_empty());
-        assert!(!manifest.sr_version.is_empty());
-    }
+    // --- manifest/reconciliation tests removed: no manifest, no reconciler
+    //     state. Idempotency is covered by the end-to-end re-run test below. ---
 
     /// Second run against a release that already has all declared artifacts
     /// uploaded is a no-op for upload — no duplicate asset errors.
@@ -1702,7 +1753,7 @@ mod tests {
             packages: vec![PackageConfig {
                 path: ".".into(),
                 version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                artifacts: vec![dir.path().join("*.tar.gz").to_str().unwrap().to_string()],
+                artifacts: vec![dir.path().join("app.tar.gz").to_str().unwrap().to_string()],
                 ..Default::default()
             }],
             ..Default::default()
@@ -1723,146 +1774,6 @@ mod tests {
             uploads_after_first, uploads_after_second,
             "idempotent re-run should not re-upload existing assets"
         );
-    }
-
-    /// An incomplete prior release warns but does not block. Users recover by
-    /// pushing a new commit; the broken release stays as a dangling record.
-    #[test]
-    fn plan_warns_but_proceeds_when_previous_release_incomplete() {
-        let prev_tag = TagInfo {
-            name: "v1.0.0".into(),
-            version: Version::new(1, 0, 0),
-            sha: "a".repeat(40),
-        };
-        let s = make_strategy(
-            vec![prev_tag],
-            vec![raw_commit("feat: new thing")],
-            test_config(),
-        );
-
-        // Seed an incomplete manifest on the remote: declares an asset that
-        // isn't in list_assets.
-        let incomplete = crate::manifest::Manifest {
-            sr_version: "7.1.0".into(),
-            tag: "v1.0.0".into(),
-            commit_sha: "a".repeat(40),
-            artifacts: vec!["missing-binary.tar.gz".into()],
-            completed_at: "2026-04-18T00:00:00Z".into(),
-        };
-        s.vcs.seed_asset(
-            "v1.0.0",
-            crate::manifest::MANIFEST_ASSET_NAME,
-            serde_json::to_vec(&incomplete).unwrap(),
-        );
-
-        // Should NOT error — incomplete prior is warning-only.
-        let plan = s.plan().unwrap();
-        assert_eq!(plan.next_version, Version::new(1, 1, 0));
-    }
-
-    /// Complete manifest on the previous release → plan proceeds.
-    #[test]
-    fn plan_passes_when_previous_release_complete() {
-        let prev_tag = TagInfo {
-            name: "v1.0.0".into(),
-            version: Version::new(1, 0, 0),
-            sha: "a".repeat(40),
-        };
-        let s = make_strategy(
-            vec![prev_tag],
-            vec![raw_commit("feat: next thing")],
-            test_config(),
-        );
-
-        let complete = crate::manifest::Manifest {
-            sr_version: "7.1.0".into(),
-            tag: "v1.0.0".into(),
-            commit_sha: "a".repeat(40),
-            artifacts: vec!["ok.tar.gz".into()],
-            completed_at: "2026-04-18T00:00:00Z".into(),
-        };
-        s.vcs.seed_asset(
-            "v1.0.0",
-            crate::manifest::MANIFEST_ASSET_NAME,
-            serde_json::to_vec(&complete).unwrap(),
-        );
-        s.vcs.seed_asset("v1.0.0", "ok.tar.gz", b"bin".to_vec());
-
-        let plan = s.plan().unwrap();
-        assert_eq!(plan.next_version, Version::new(1, 1, 0));
-    }
-
-    /// No manifest on the previous release (legacy/pre-sr) → plan proceeds
-    /// without blocking. We can't distinguish legacy from aborted remotely.
-    #[test]
-    fn plan_passes_when_previous_release_has_no_manifest() {
-        let prev_tag = TagInfo {
-            name: "v1.0.0".into(),
-            version: Version::new(1, 0, 0),
-            sha: "a".repeat(40),
-        };
-        let s = make_strategy(
-            vec![prev_tag],
-            vec![raw_commit("feat: legacy compat")],
-            test_config(),
-        );
-        // Intentionally no seed — fetch_asset returns None → Unknown status.
-
-        let plan = s.plan().unwrap();
-        assert_eq!(plan.next_version, Version::new(1, 1, 0));
-    }
-
-    /// Transport errors reading the manifest bubble up as hard errors —
-    /// nothing the user can do anyway, and the pipeline would fail downstream
-    /// for the same reason. Modeled here by wrapping fetch_asset to return Err.
-    #[test]
-    fn plan_propagates_transport_error_on_manifest_fetch() {
-        struct ErroringVcs;
-        impl VcsProvider for ErroringVcs {
-            fn create_release(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: bool,
-                _: bool,
-            ) -> Result<String, ReleaseError> {
-                Ok(String::new())
-            }
-            fn compare_url(&self, _: &str, _: &str) -> Result<String, ReleaseError> {
-                Ok(String::new())
-            }
-            fn release_exists(&self, _: &str) -> Result<bool, ReleaseError> {
-                Ok(false)
-            }
-            fn delete_release(&self, _: &str) -> Result<(), ReleaseError> {
-                Ok(())
-            }
-            fn fetch_asset(&self, _: &str, _: &str) -> Result<Option<Vec<u8>>, ReleaseError> {
-                Err(ReleaseError::Vcs("network down".into()))
-            }
-        }
-
-        let prev_tag = TagInfo {
-            name: "v1.0.0".into(),
-            version: Version::new(1, 0, 0),
-            sha: "a".repeat(40),
-        };
-        let s = TrunkReleaseStrategy {
-            git: FakeGit::new(vec![prev_tag], vec![raw_commit("feat: x")]),
-            vcs: ErroringVcs,
-            parser: TypedCommitParser::default(),
-            formatter: DefaultChangelogFormatter::new(None, default_changelog_groups()),
-            config: test_config(),
-            prerelease_id: None,
-            draft: false,
-        };
-
-        let err = s.plan().unwrap_err();
-        match err {
-            ReleaseError::Vcs(ref msg) => assert!(msg.contains("network down"), "{msg}"),
-            other => panic!("expected Vcs error, got {other:?}"),
-        }
     }
 
     /// A tag at HEAD with no new commits errors with NoCommits — sr never

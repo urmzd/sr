@@ -1,14 +1,14 @@
 [package]
-name = "sr-cli"
+name = "sr"
 version = "7.1.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
 homepage.workspace = true
-description = "CLI binary for sr"
+description = "sr — a release-state reconciler. Define desired state; sr reconciles."
 readme = "README.md"
-keywords = ["semantic-release", "versioning", "changelog", "cli"]
+keywords = ["release", "reconciler", "changelog", "conventional-commits", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]

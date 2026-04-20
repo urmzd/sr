@@ -1,4 +1,7 @@
-//! Pre- and post-release hook stages.
+//! Repo-wide pre-/post-release hook stages.
+//!
+//! Hooks run once per release, not per package. Per-package work belongs in
+//! `packages[].build` (build stage) or `packages[].publish` (`sr publish`).
 
 use super::{Stage, StageContext};
 use crate::error::ReleaseError;
@@ -14,7 +17,7 @@ impl Stage for PreReleaseHooks {
         if ctx.dry_run {
             return Ok(());
         }
-        if let Some(ref hooks) = ctx.active_package.hooks {
+        if let Some(ref hooks) = ctx.config.hooks {
             crate::hooks::run_pre_release(hooks, ctx.hooks_env)?;
         }
         Ok(())
@@ -32,7 +35,7 @@ impl Stage for PostReleaseHooks {
         if ctx.dry_run {
             return Ok(());
         }
-        if let Some(ref hooks) = ctx.active_package.hooks {
+        if let Some(ref hooks) = ctx.config.hooks {
             crate::hooks::run_post_release(hooks, ctx.hooks_env)?;
         }
         Ok(())

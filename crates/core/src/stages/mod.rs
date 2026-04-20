@@ -9,7 +9,7 @@
 //! This structure exists so the reconciler in a later PR can resume an aborted
 //! release by walking the same pipeline against the tag's existing remote state.
 
-use crate::config::{Config, PackageConfig};
+use crate::config::Config;
 use crate::error::ReleaseError;
 use crate::git::GitRepository;
 use crate::release::{ReleasePlan, VcsProvider};
@@ -18,7 +18,7 @@ pub mod build;
 pub mod bump;
 pub mod commit;
 pub mod hooks;
-pub mod manifest;
+pub mod publish;
 pub mod push;
 pub mod tag;
 pub mod upload;
@@ -28,16 +28,16 @@ pub mod verify;
 
 /// Mutable state threaded through the pipeline.
 ///
-/// Inputs (plan, config, git, vcs, changelog_body, release_name, dry_run,
-/// sign_tags, draft, version_str, active_package, hooks_env) are set up
-/// once by the orchestrator. `bumped_files` is populated by [`bump::Bump`]
-/// and consumed by [`commit::Commit`].
+/// Release stages loop `plan.packages` internally where per-package work is
+/// needed (Bump, Build, UploadManifest). There is no "active package" — one
+/// version, one tag, one release event applies to every package at once.
+/// `bumped_files` is populated across all packages by [`bump::Bump`] and
+/// consumed by [`commit::Commit`] as a single staged set.
 pub struct StageContext<'a> {
     pub plan: &'a ReleasePlan,
     pub config: &'a Config,
     pub git: &'a dyn GitRepository,
     pub vcs: &'a dyn VcsProvider,
-    pub active_package: &'a PackageConfig,
     pub changelog_body: &'a str,
     pub release_name: &'a str,
     pub version_str: &'a str,
@@ -45,7 +45,8 @@ pub struct StageContext<'a> {
     pub dry_run: bool,
     pub sign_tags: bool,
     pub draft: bool,
-    /// Files produced by [`bump::Bump`] that [`commit::Commit`] must stage.
+    /// Files produced by [`bump::Bump`] across every package that
+    /// [`commit::Commit`] must stage in a single commit.
     pub bumped_files: Vec<String>,
 }
 
@@ -72,6 +73,11 @@ pub trait Stage {
 /// (b) every declared artifact glob resolves to ≥1 file. Build and
 /// ValidateArtifacts run before Commit/LocalTag so a failure leaves
 /// no commit, no tag, no push.
+///
+/// State model: the VCS is the only source of truth. Tag present = version
+/// exists, release object present = sr got far enough to create it, assets
+/// present = sr got far enough to upload them, registry contains package =
+/// publish ran. sr writes no state asset of its own.
 pub fn default_pipeline() -> Vec<Box<dyn Stage>> {
     vec![
         Box::new(hooks::PreReleaseHooks),
@@ -86,9 +92,7 @@ pub fn default_pipeline() -> Vec<Box<dyn Stage>> {
         Box::new(vcs_release::CreateOrUpdateRelease),
         Box::new(upload::UploadArtifacts),
         Box::new(verify::VerifyRelease),
+        Box::new(publish::Publish),
         Box::new(hooks::PostReleaseHooks),
-        // Must be last: presence of sr-manifest.json is proof the pipeline
-        // completed end-to-end, including post-release hooks.
-        Box::new(manifest::UploadManifest),
     ]
 }

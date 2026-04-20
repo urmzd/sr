@@ -8,7 +8,7 @@ branding:
 
 inputs:
   dry-run:
-    description: "Run 'sr status' instead of 'sr release' to preview without making changes"
+    description: "Run 'sr plan' instead of 'sr release' to preview without making changes"
     default: "false"
   github-token:
     description: "GitHub token for creating releases"
@@ -21,9 +21,6 @@ inputs:
     default: "sr-releaser[bot]@users.noreply.github.com"
   artifacts:
     description: "Glob patterns for artifact files to upload (space-separated, passed as --artifacts)"
-    default: ""
-  package:
-    description: "Target a specific package in a monorepo (matched by path)"
     default: ""
   channel:
     description: "Release channel name (e.g. canary, rc, stable) — must match a channel defined in sr.yaml"
@@ -129,16 +126,13 @@ runs:
       run: |
         set -uo pipefail
         if [ "${{ inputs.dry-run }}" = "true" ]; then
-          CMD="status --format json"
+          CMD="plan --format json"
         else
           CMD="release"
           if [ -n "${{ inputs.artifacts }}" ]; then
             for glob in ${{ inputs.artifacts }}; do
               CMD="$CMD --artifacts \"$glob\""
             done
-          fi
-          if [ -n "${{ inputs.package }}" ]; then
-            CMD="$CMD --package ${{ inputs.package }}"
           fi
           if [ -n "${{ inputs.channel }}" ]; then
             CMD="$CMD --channel ${{ inputs.channel }}"

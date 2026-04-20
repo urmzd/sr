@@ -1,13 +1,16 @@
 pub mod changelog;
 pub mod commit;
 pub mod config;
+pub mod diff;
 pub mod error;
 pub mod git;
 pub mod github;
 pub mod hooks;
-pub mod manifest;
 pub mod native_git;
+pub mod publish;
+pub mod publishers;
 pub mod release;
 pub mod stages;
 pub mod version;
 pub mod version_files;
+pub mod workspaces;

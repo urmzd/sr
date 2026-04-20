@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use clap::{CommandFactory, Parser, Subcommand};
 use sr_core::changelog::DefaultChangelogFormatter;
 use sr_core::commit::TypedCommitParser;
-use sr_core::config::{Config, DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE};
+use sr_core::config::{Config, DEFAULT_CONFIG_FILE};
 use sr_core::error::ReleaseError;
 use sr_core::github::GitHubProvider;
 use sr_core::native_git::NativeGitRepository;
@@ -19,12 +19,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Execute a release (trunk flow: tag + GitHub release)
+    /// Execute a release (trunk flow: tag + GitHub release). Whole-repo —
+    /// monorepos release one tag with one version line for every package.
     Release {
-        /// Target a specific package in a monorepo
-        #[arg(long, short)]
-        package: Option<String>,
-
         /// Release channel (e.g. canary, rc, stable) — overrides config fields
         #[arg(long, short)]
         channel: Option<String>,
@@ -33,11 +30,13 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Glob patterns for artifact files to upload to the release (repeatable)
+        /// Glob patterns for artifact files to upload to the release (repeatable).
+        /// In monorepos, extends the first package's `artifacts` list.
         #[arg(long = "artifacts")]
         artifacts: Vec<String>,
 
-        /// Additional file globs to stage in the release commit (repeatable, e.g. Cargo.lock)
+        /// Additional file globs to stage in the release commit (repeatable, e.g. Cargo.lock).
+        /// In monorepos, extends the first package's `stage_files` list.
         #[arg(long = "stage-files")]
         stage_files: Vec<String>,
 
@@ -62,12 +61,10 @@ enum Commands {
         git_user_email: Option<String>,
     },
 
-    /// Show repo status: unreleased commits, next version, changelog preview, open PRs
-    Status {
-        /// Target a specific package in a monorepo
-        #[arg(long, short)]
-        package: Option<String>,
-
+    /// Plan the next release: compute desired state (next version, intended
+    /// outputs), scan actual state (tag, release, assets), print the diff.
+    /// No side effects.
+    Plan {
         /// Output format
         #[arg(long, default_value = "human")]
         format: PlanFormat,
@@ -196,18 +193,8 @@ fn load_config() -> anyhow::Result<Config> {
 }
 
 fn resolve_config_path() -> std::path::PathBuf {
-    match Config::find_config(Path::new(".")) {
-        Some((path, is_legacy)) => {
-            if is_legacy {
-                eprintln!(
-                    "warning: {} is deprecated, rename to {} (legacy support will be removed in a future release)",
-                    LEGACY_CONFIG_FILE, DEFAULT_CONFIG_FILE,
-                );
-            }
-            path
-        }
-        None => std::path::PathBuf::from(DEFAULT_CONFIG_FILE),
-    }
+    Config::find_config(Path::new("."))
+        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_CONFIG_FILE))
 }
 
 fn self_update() -> anyhow::Result<()> {
@@ -383,11 +370,9 @@ fn run() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Commands::Status { package: _, format } => {
+        Commands::Plan { format } => {
             let config = load_config()?;
-            let tag_prefix = config.git.tag_prefix.clone();
 
-            let git = NativeGitRepository::open(Path::new("."))?;
             let branch_output = std::process::Command::new("git")
                 .args(["branch", "--show-current"])
                 .output()?;
@@ -395,101 +380,74 @@ fn run() -> anyhow::Result<()> {
                 .trim()
                 .to_string();
 
-            let formatter = DefaultChangelogFormatter::new(
-                config.changelog.template.clone(),
-                config.changelog.groups.clone(),
-            );
-            let strategy = build_local_strategy(config, None, false)?;
+            let strategy = build_local_strategy(config.clone(), None, false)?;
             let plan_result = strategy.plan();
 
-            match format {
-                PlanFormat::Json => match plan_result {
-                    Ok(plan) => {
-                        let repo_url = git
-                            .parse_remote_full()
-                            .ok()
-                            .map(|(h, o, r)| format!("https://{h}/{o}/{r}"));
-                        let today = sr_core::release::today_string();
-                        let entry = sr_core::changelog::ChangelogEntry {
-                            version: plan.next_version.to_string(),
-                            date: today,
-                            commits: plan.commits.clone(),
-                            compare_url: None,
-                            repo_url,
-                        };
-                        let changelog =
-                            sr_core::changelog::ChangelogFormatter::format(&formatter, &[entry])?;
-                        #[derive(serde::Serialize)]
-                        struct StatusOutput<'a> {
-                            branch: String,
-                            #[serde(flatten)]
-                            plan: &'a sr_core::release::ReleasePlan,
-                            changelog: String,
-                        }
-                        let output = StatusOutput {
-                            branch,
-                            plan: &plan,
-                            changelog,
-                        };
-                        println!("{}", serde_json::to_string_pretty(&output)?);
+            match (format, plan_result) {
+                (PlanFormat::Json, Ok(plan)) => {
+                    let env = [
+                        ("SR_VERSION", plan.next_version.to_string()),
+                        ("SR_TAG", plan.tag_name.clone()),
+                    ];
+                    let env_refs: Vec<(&str, &str)> =
+                        env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                    let diff = sr_core::diff::build_diff(
+                        &plan,
+                        &strategy.git,
+                        &strategy.vcs,
+                        &config,
+                        &env_refs,
+                    )?;
+                    #[derive(serde::Serialize)]
+                    struct Out<'a> {
+                        branch: &'a str,
+                        #[serde(flatten)]
+                        diff: &'a sr_core::diff::ReleaseDiff,
                     }
-                    Err(e) => {
-                        let msg = if matches!(
-                            &e,
-                            ReleaseError::NoCommits { .. } | ReleaseError::NoBump { .. }
-                        ) {
-                            "no unreleased changes"
-                        } else {
-                            "error"
-                        };
-                        println!("{{\"branch\":\"{branch}\",\"status\":\"{msg}\"}}");
-                    }
-                },
-                PlanFormat::Human => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&Out {
+                            branch: &branch,
+                            diff: &diff,
+                        })?
+                    );
+                }
+                (PlanFormat::Json, Err(e)) => {
+                    let msg = if matches!(
+                        &e,
+                        ReleaseError::NoCommits { .. } | ReleaseError::NoBump { .. }
+                    ) {
+                        "no unreleased changes"
+                    } else {
+                        "error"
+                    };
+                    println!("{{\"branch\":\"{branch}\",\"status\":\"{msg}\"}}");
+                }
+                (PlanFormat::Human, Ok(plan)) => {
                     println!("  Branch: {branch}");
-                    match plan_result {
-                        Ok(plan) => {
-                            let current_tag = plan
-                                .current_version
-                                .as_ref()
-                                .map(|v| format!("{tag_prefix}{v}"))
-                                .unwrap_or_else(|| "(initial)".to_string());
-                            println!("  Current: {current_tag}");
-                            println!("  Next: {} ({})", plan.tag_name, plan.bump);
-                            println!("  Commits: {}", plan.commits.len());
-                            for commit in &plan.commits {
-                                let scope = commit
-                                    .scope
-                                    .as_deref()
-                                    .map(|s| format!("({s})"))
-                                    .unwrap_or_default();
-                                let breaking = if commit.breaking { " BREAKING" } else { "" };
-                                println!(
-                                    "    {}{scope}: {}{breaking}",
-                                    commit.r#type, commit.description
-                                );
-                            }
+                    let env = [
+                        ("SR_VERSION", plan.next_version.to_string()),
+                        ("SR_TAG", plan.tag_name.clone()),
+                    ];
+                    let env_refs: Vec<(&str, &str)> =
+                        env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                    let diff = sr_core::diff::build_diff(
+                        &plan,
+                        &strategy.git,
+                        &strategy.vcs,
+                        &config,
+                        &env_refs,
+                    )?;
+                    println!();
+                    print!("{}", sr_core::diff::render_human(&diff));
+                }
+                (PlanFormat::Human, Err(e)) => {
+                    println!("  Branch: {branch}");
+                    match &e {
+                        ReleaseError::NoCommits { .. } | ReleaseError::NoBump { .. } => {
+                            println!("  No unreleased changes");
                         }
-                        Err(e) => match &e {
-                            ReleaseError::NoCommits { .. } | ReleaseError::NoBump { .. } => {
-                                println!("  No unreleased changes");
-                            }
-                            _ => println!("  Release: error — {e}"),
-                        },
-                    }
-                    if let Ok((hostname, owner, repo_name)) = git.parse_remote_full()
-                        && let Ok(token) =
-                            std::env::var("GH_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN"))
-                    {
-                        let github = GitHubProvider::new(owner, repo_name, hostname, token);
-                        if let Ok((ready, draft)) = github.count_open_prs() {
-                            println!(
-                                "  Open PRs: {} ({} ready, {} draft)",
-                                ready + draft,
-                                ready,
-                                draft
-                            );
-                        }
+                        _ => println!("  Release: error — {e}"),
                     }
                 }
             }
@@ -503,7 +461,6 @@ fn run() -> anyhow::Result<()> {
         }
 
         Commands::Release {
-            package: _,
             channel,
             dry_run,
             artifacts,

@@ -1,12 +1,14 @@
 //! Enforce the "declared artifacts exist" contract before tagging.
 //!
-//! If `hooks.build` is configured, every pattern in `artifacts` must resolve
-//! to ≥1 file on disk. A mismatch aborts the pipeline before tag creation,
-//! guaranteeing that tag-on-remote implies all declared artifacts were built.
+//! If any package has `build` commands configured, every literal path in
+//! that package's `artifacts` must exist on disk. A mismatch aborts the
+//! pipeline before tag creation, guaranteeing that tag-on-remote implies
+//! all declared artifacts were built.
+
+use std::path::Path;
 
 use super::{Stage, StageContext};
 use crate::error::ReleaseError;
-use crate::release::resolve_globs;
 
 pub struct ValidateArtifacts;
 
@@ -20,14 +22,8 @@ impl Stage for ValidateArtifacts {
             return Ok(());
         }
 
-        // Contract only applies when the user opted into build hooks.
-        let has_build_hooks = ctx
-            .active_package
-            .hooks
-            .as_ref()
-            .map(|h| !h.build.is_empty())
-            .unwrap_or(false);
-        if !has_build_hooks {
+        let has_build_commands = ctx.config.packages.iter().any(|p| !p.build.is_empty());
+        if !has_build_commands {
             return Ok(());
         }
 
@@ -37,18 +33,16 @@ impl Stage for ValidateArtifacts {
         }
 
         let mut missing: Vec<&String> = Vec::new();
-        for pattern in &declared {
-            let slice = std::slice::from_ref(pattern);
-            let resolved = resolve_globs(slice).map_err(ReleaseError::Vcs)?;
-            if resolved.is_empty() {
-                missing.push(pattern);
+        for path in &declared {
+            if !Path::new(path).is_file() {
+                missing.push(path);
             }
         }
 
         if !missing.is_empty() {
             return Err(ReleaseError::Vcs(format!(
-                "build completed but declared artifact patterns matched no files: {}. \
-                 Fix the build or remove the patterns from sr.yaml.",
+                "build completed but declared artifacts are missing on disk: {}. \
+                 Fix the build or remove the entries from sr.yaml.",
                 missing
                     .iter()
                     .map(|s| s.as_str())

@@ -6,9 +6,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 homepage.workspace = true
-description = "Pure domain logic for sr"
+description = "Core library for sr — a release-state reconciler"
 readme = "README.md"
-keywords = ["semantic-release", "versioning", "changelog", "conventional-commits"]
+keywords = ["release", "reconciler", "changelog", "conventional-commits", "versioning"]
 categories = ["development-tools"]
 
 [dependencies]
