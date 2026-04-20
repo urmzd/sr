@@ -1,5 +1,24 @@
 # Changelog
 
+## 8.0.0 (2026-04-20)
+
+### Breaking
+
+- reconciler model — VCS is state, commits are diff, sr applies (#25) ([26da777](https://github.com/urmzd/sr/commit/26da7779213fc0a39026e17366a350ab61145fc9))
+
+### Bug Fixes
+
+- **release**: list artifact paths literally ([51084c0](https://github.com/urmzd/sr/commit/51084c097674f82302b2f50ab5ca8c1514020eb5))
+- **cli**: restore sr-cli package name ([91b3c47](https://github.com/urmzd/sr/commit/91b3c475181d389f4280173582746b8a9e040944))
+
+### Misc
+
+- **community**: add GitHub community-health files ([b78f225](https://github.com/urmzd/sr/commit/b78f225b30d588a3b6367e2a4ce8e1430885378d))
+- **fix**: standardize README format and fix contact email ([5c406dc](https://github.com/urmzd/sr/commit/5c406dcaef0cedb6c466821fc3eabd8cb893dafc))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v7.1.2...v8.0.0)
+
+
 ## 7.1.2 (2026-04-19)
 
 ### Bug Fixes
