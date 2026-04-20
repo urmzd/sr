@@ -47,10 +47,21 @@ pub struct PackagePlan {
 
 /// Orchestrates the release flow.
 pub trait ReleaseStrategy: Send + Sync {
-    /// Plan the release without executing it.
+    /// Compute the release plan without executing it or mutating files.
+    /// Used by `sr plan`.
     fn plan(&self) -> Result<ReleasePlan, ReleaseError>;
 
-    /// Execute the release.
+    /// Write release-local state to disk (version_files + changelog) but
+    /// do not commit, tag, push, or publish. Idempotent: running twice
+    /// leaves the same files. Used by `sr prepare`.
+    ///
+    /// Downstream CI jobs read the bumped manifests (e.g. `cargo build`
+    /// picks up the new `CARGO_PKG_VERSION`) so produced artifacts embed
+    /// the correct version, then `sr release` finishes the reconciliation.
+    fn prepare(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError>;
+
+    /// Apply the plan: commit + tag + push + create release + upload +
+    /// publish. Idempotent at each stage; safe to re-run.
     fn execute(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError>;
 }
 
@@ -432,6 +443,48 @@ where
             prerelease: is_prerelease,
             packages: package_plans,
         })
+    }
+
+    fn prepare(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError> {
+        let version_str = plan.next_version.to_string();
+        let changelog_body = self.format_changelog(plan)?;
+        let release_name = self.release_name(plan);
+
+        let env = release_env(&version_str, &plan.tag_name);
+        let env_refs: Vec<(&str, &str)> =
+            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+        let mut ctx = StageContext {
+            plan,
+            config: &self.config,
+            git: &self.git,
+            vcs: &self.vcs,
+            changelog_body: &changelog_body,
+            release_name: &release_name,
+            version_str: &version_str,
+            hooks_env: &env_refs,
+            dry_run,
+            sign_tags: self.config.git.sign_tags,
+            draft: self.draft,
+            bumped_files: Vec::new(),
+        };
+
+        // Only the Bump stage: writes manifests + changelog, nothing else.
+        let bump = crate::stages::bump::Bump;
+        if !crate::stages::Stage::is_complete(&bump, &ctx)? {
+            crate::stages::Stage::run(&bump, &mut ctx)?;
+        }
+
+        if dry_run {
+            eprintln!("[dry-run] Changelog:\n{changelog_body}");
+        } else {
+            eprintln!(
+                "Prepared {} (bumped {} file(s))",
+                plan.tag_name,
+                ctx.bumped_files.len()
+            );
+        }
+        Ok(())
     }
 
     fn execute(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError> {
@@ -1538,113 +1591,11 @@ mod tests {
 
     // --- build hooks + artifact validation tests ---
 
-    /// Build hooks receive SR_VERSION set to the bumped version.
+    /// ValidateArtifacts aborts the pipeline before tagging if any declared
+    /// artifact is missing from disk. This preserves the invariant that a
+    /// tag on remote implies every declared artifact is present.
     #[test]
-    fn execute_runs_build_hook_with_version_env() {
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("saw_version.txt");
-        let cmd = format!("echo \"$SR_VERSION\" > {}", marker.display());
-
-        let config = Config {
-            changelog: ChangelogConfig {
-                file: None,
-                ..Default::default()
-            },
-            packages: vec![PackageConfig {
-                path: ".".into(),
-                version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                build: vec![cmd],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        s.execute(&plan, false).unwrap();
-
-        let content = std::fs::read_to_string(&marker).unwrap();
-        assert_eq!(content.trim(), "0.1.0");
-    }
-
-    /// Build hooks run AFTER version bump — the manifest on disk contains the
-    /// new version when the build executes.
-    #[test]
-    fn execute_build_sees_bumped_version_on_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let cargo_path = dir.path().join("Cargo.toml");
-        std::fs::write(
-            &cargo_path,
-            "[package]\nname = \"test\"\nversion = \"0.0.0\"\n",
-        )
-        .unwrap();
-
-        let marker = dir.path().join("observed_version.txt");
-        // Build hook reads whatever version is currently in Cargo.toml.
-        let cmd = format!(
-            "grep '^version' {} > {}",
-            cargo_path.display(),
-            marker.display()
-        );
-
-        let config = Config {
-            changelog: ChangelogConfig {
-                file: None,
-                ..Default::default()
-            },
-            packages: vec![PackageConfig {
-                path: ".".into(),
-                version_files: vec![cargo_path.to_str().unwrap().to_string()],
-                build: vec![cmd],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        s.execute(&plan, false).unwrap();
-
-        let content = std::fs::read_to_string(&marker).unwrap();
-        assert!(
-            content.contains("0.1.0"),
-            "build should see bumped version on disk, got: {content}"
-        );
-    }
-
-    /// A failing build aborts before tag/commit/release — preserves the invariant
-    /// that a tag on remote implies a successful build.
-    #[test]
-    fn execute_build_failure_leaves_no_tag_or_commit() {
-        let config = Config {
-            changelog: ChangelogConfig {
-                file: None,
-                ..Default::default()
-            },
-            packages: vec![PackageConfig {
-                path: ".".into(),
-                version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                build: vec!["false".into()],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        let err = s.execute(&plan, false).unwrap_err();
-        assert!(matches!(err, ReleaseError::Hook(_)), "got {err:?}");
-
-        assert!(s.git.created_tags.lock().unwrap().is_empty());
-        assert!(s.git.pushed_tags.lock().unwrap().is_empty());
-        assert!(s.git.committed.lock().unwrap().is_empty());
-        assert!(s.vcs.releases.lock().unwrap().is_empty());
-    }
-
-    /// When `hooks.build` is set, every declared artifact glob must match ≥1 file
-    /// or the pipeline aborts before tagging.
-    #[test]
-    fn execute_validation_fails_when_declared_artifact_missing() {
+    fn execute_aborts_when_declared_artifact_missing() {
         let config = Config {
             changelog: ChangelogConfig {
                 file: None,
@@ -1654,7 +1605,6 @@ mod tests {
                 path: ".".into(),
                 version_files: vec!["__sr_test_dummy_no_bump__".into()],
                 artifacts: vec!["/definitely/not/here/app.tar.gz".into()],
-                build: vec!["true".into()],
                 ..Default::default()
             }],
             ..Default::default()
@@ -1679,9 +1629,10 @@ mod tests {
         assert!(s.vcs.releases.lock().unwrap().is_empty());
     }
 
-    /// Validation passes when every declared artifact exists on disk.
+    /// Validation passes and the release proceeds when every declared
+    /// artifact exists on disk (produced by CI between prepare and release).
     #[test]
-    fn execute_validation_passes_when_all_artifacts_present() {
+    fn execute_succeeds_when_all_artifacts_present() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("app.tar.gz"), "fake").unwrap();
 
@@ -1694,7 +1645,6 @@ mod tests {
                 path: ".".into(),
                 version_files: vec!["__sr_test_dummy_no_bump__".into()],
                 artifacts: vec![dir.path().join("app.tar.gz").to_str().unwrap().to_string()],
-                build: vec!["true".into()],
                 ..Default::default()
             }],
             ..Default::default()
@@ -1705,34 +1655,6 @@ mod tests {
         s.execute(&plan, false).unwrap();
 
         assert_eq!(*s.git.created_tags.lock().unwrap(), vec!["v0.1.0"]);
-    }
-
-    /// No `build` commands means no contract — missing declared artifacts
-    /// do NOT fail the pipeline. Useful for repos that build outside sr.
-    #[test]
-    fn execute_validation_skipped_without_build_hooks() {
-        let config = Config {
-            changelog: ChangelogConfig {
-                file: None,
-                ..Default::default()
-            },
-            packages: vec![PackageConfig {
-                path: ".".into(),
-                version_files: vec!["__sr_test_dummy_no_bump__".into()],
-                artifacts: vec!["/still/not/here/app.tar.gz".into()],
-                // No build commands — today's behavior.
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
-        let plan = s.plan().unwrap();
-        // Upload stage will try to resolve_paths and fail, since we have
-        // declared artifacts that don't exist. Without build validation,
-        // this surfaces as a Vcs error at upload time.
-        let err = s.execute(&plan, false).unwrap_err();
-        assert!(matches!(err, ReleaseError::Vcs(_)));
     }
 
     // --- manifest/reconciliation tests removed: no manifest, no reconciler

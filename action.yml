@@ -1,5 +1,5 @@
 name: "SR - Semantic Release"
-description: "Automated semantic versioning and release management — single binary, zero-config, language-agnostic."
+description: "Declarative change/release management — one binary, VCS is state, commits are the diff."
 author: "urmzd"
 
 branding:
@@ -7,8 +7,20 @@ branding:
   color: "green"
 
 inputs:
+  mode:
+    description: >
+      Which verb to run: `plan` (preview only, no side effects),
+      `prepare` (bump manifests + changelog on disk, no commit/tag/push),
+      or `release` (full reconcile — commit, tag, push, release, upload,
+      publish). Default: `release`. A common multi-job CI shape is:
+        job1  mode: plan    → outputs.version, .tag for downstream jobs
+        job2  mode: prepare → writes bumped manifests (upload as artifact)
+        build jobs read the bumped manifest (cargo/npm/uv/go picks up the
+          new version) and produce release-ready binaries
+        job3  mode: release → commits the prepared files, tags, uploads
+    default: "release"
   dry-run:
-    description: "Run 'sr plan' instead of 'sr release' to preview without making changes"
+    description: "Deprecated alias for `mode: plan`. Use `mode` instead."
     default: "false"
   github-token:
     description: "GitHub token for creating releases"
@@ -20,7 +32,7 @@ inputs:
     description: "Git author/committer email for the release commit and tag. Pass empty string to let sr.yaml (git.user.email) or the repo's local git config take over."
     default: "sr-releaser[bot]@users.noreply.github.com"
   artifacts:
-    description: "Glob patterns for artifact files to upload (space-separated, passed as --artifacts)"
+    description: "Literal paths to artifact files to upload (space-separated, passed as --artifacts)"
     default: ""
   channel:
     description: "Release channel name (e.g. canary, rc, stable) — must match a channel defined in sr.yaml"
@@ -29,7 +41,7 @@ inputs:
     description: "Pre-release identifier override (e.g. alpha, beta, rc). Overrides the channel's prerelease setting"
     default: ""
   stage-files:
-    description: "Additional file globs to stage in the release commit (space-separated)"
+    description: "Additional literal paths to stage in the release commit (space-separated)"
     default: ""
   sign-tags:
     description: "Sign tags with GPG/SSH. Overrides git.sign_tags in sr.yaml"
@@ -43,29 +55,29 @@ inputs:
 
 outputs:
   version:
-    description: "The released version (empty if no release)"
-    value: ${{ steps.release.outputs.version }}
+    description: "Planned or released version. Populated for every mode."
+    value: ${{ steps.sr.outputs.version }}
   previous-version:
-    description: "The previous version before this release (empty if first release)"
-    value: ${{ steps.release.outputs.previous_version }}
+    description: "Version before this release (empty if first release)"
+    value: ${{ steps.sr.outputs.previous_version }}
   tag:
-    description: "The git tag created for this release (empty if no release)"
-    value: ${{ steps.release.outputs.tag }}
+    description: "Git tag name (populated for every mode)"
+    value: ${{ steps.sr.outputs.tag }}
   bump:
-    description: "The bump level applied (major/minor/patch, empty if no release)"
-    value: ${{ steps.release.outputs.bump }}
+    description: "Bump level applied (major/minor/patch)"
+    value: ${{ steps.sr.outputs.bump }}
   floating-tag:
-    description: "The floating major tag (e.g. v3, empty if disabled or no release)"
-    value: ${{ steps.release.outputs.floating_tag }}
+    description: "Floating major tag (e.g. v3, empty if disabled)"
+    value: ${{ steps.sr.outputs.floating_tag }}
   commit-count:
-    description: "Number of commits included in this release"
-    value: ${{ steps.release.outputs.commit_count }}
+    description: "Number of commits in this release"
+    value: ${{ steps.sr.outputs.commit_count }}
   released:
-    description: "Whether a release was created (true/false)"
-    value: ${{ steps.release.outputs.released }}
+    description: "Whether a release was actually cut (mode=release only; true/false)"
+    value: ${{ steps.sr.outputs.released }}
   json:
-    description: "Full release metadata as JSON (empty if no release)"
-    value: ${{ steps.release.outputs.json }}
+    description: "Full JSON output of the verb (empty if no release)"
+    value: ${{ steps.sr.outputs.json }}
 
 runs:
   using: "composite"
@@ -119,45 +131,66 @@ runs:
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Run sr
-      id: release
+      id: sr
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -uo pipefail
+
+        # Resolve mode. `dry-run: true` is a back-compat alias for `mode: plan`.
+        MODE="${{ inputs.mode }}"
         if [ "${{ inputs.dry-run }}" = "true" ]; then
-          CMD="plan --format json"
-        else
-          CMD="release"
-          if [ -n "${{ inputs.artifacts }}" ]; then
-            for glob in ${{ inputs.artifacts }}; do
-              CMD="$CMD --artifacts \"$glob\""
-            done
-          fi
-          if [ -n "${{ inputs.channel }}" ]; then
-            CMD="$CMD --channel ${{ inputs.channel }}"
-          fi
-          if [ -n "${{ inputs.prerelease }}" ]; then
-            CMD="$CMD --prerelease ${{ inputs.prerelease }}"
-          fi
-          if [ -n "${{ inputs.stage-files }}" ]; then
-            for glob in ${{ inputs.stage-files }}; do
-              CMD="$CMD --stage-files \"$glob\""
-            done
-          fi
-          if [ "${{ inputs.sign-tags }}" = "true" ]; then
-            CMD="$CMD --sign-tags"
-          fi
-          if [ "${{ inputs.draft }}" = "true" ]; then
-            CMD="$CMD --draft"
-          fi
-          if [ -n "${{ inputs.git-user-name }}" ]; then
-            CMD="$CMD --git-user-name \"${{ inputs.git-user-name }}\""
-          fi
-          if [ -n "${{ inputs.git-user-email }}" ]; then
-            CMD="$CMD --git-user-email \"${{ inputs.git-user-email }}\""
-          fi
+          MODE="plan"
         fi
+
+        case "$MODE" in
+          plan)
+            CMD="plan --format json"
+            ;;
+          prepare)
+            CMD="prepare"
+            if [ -n "${{ inputs.prerelease }}" ]; then
+              CMD="$CMD --prerelease ${{ inputs.prerelease }}"
+            fi
+            ;;
+          release)
+            CMD="release"
+            if [ -n "${{ inputs.artifacts }}" ]; then
+              for p in ${{ inputs.artifacts }}; do
+                CMD="$CMD --artifacts \"$p\""
+              done
+            fi
+            if [ -n "${{ inputs.channel }}" ]; then
+              CMD="$CMD --channel ${{ inputs.channel }}"
+            fi
+            if [ -n "${{ inputs.prerelease }}" ]; then
+              CMD="$CMD --prerelease ${{ inputs.prerelease }}"
+            fi
+            if [ -n "${{ inputs.stage-files }}" ]; then
+              for p in ${{ inputs.stage-files }}; do
+                CMD="$CMD --stage-files \"$p\""
+              done
+            fi
+            if [ "${{ inputs.sign-tags }}" = "true" ]; then
+              CMD="$CMD --sign-tags"
+            fi
+            if [ "${{ inputs.draft }}" = "true" ]; then
+              CMD="$CMD --draft"
+            fi
+            if [ -n "${{ inputs.git-user-name }}" ]; then
+              CMD="$CMD --git-user-name \"${{ inputs.git-user-name }}\""
+            fi
+            if [ -n "${{ inputs.git-user-email }}" ]; then
+              CMD="$CMD --git-user-email \"${{ inputs.git-user-email }}\""
+            fi
+            ;;
+          *)
+            echo "::error::Invalid mode: $MODE (expected plan|prepare|release)"
+            exit 1
+            ;;
+        esac
+
         set +e
         JSON_OUTPUT=$(eval sr $CMD | tail -1)
         EXIT_CODE=${PIPESTATUS[0]}
@@ -165,13 +198,17 @@ runs:
 
         if [ "$EXIT_CODE" -eq 0 ]; then
           echo "json=${JSON_OUTPUT}" >> "$GITHUB_OUTPUT"
-          echo "version=$(echo "$JSON_OUTPUT" | jq -r '.version')" >> "$GITHUB_OUTPUT"
-          echo "previous_version=$(echo "$JSON_OUTPUT" | jq -r '.previous_version')" >> "$GITHUB_OUTPUT"
-          echo "tag=$(echo "$JSON_OUTPUT" | jq -r '.tag')" >> "$GITHUB_OUTPUT"
-          echo "bump=$(echo "$JSON_OUTPUT" | jq -r '.bump')" >> "$GITHUB_OUTPUT"
-          echo "floating_tag=$(echo "$JSON_OUTPUT" | jq -r '.floating_tag')" >> "$GITHUB_OUTPUT"
-          echo "commit_count=$(echo "$JSON_OUTPUT" | jq -r '.commit_count')" >> "$GITHUB_OUTPUT"
-          echo "released=true" >> "$GITHUB_OUTPUT"
+          echo "version=$(echo "$JSON_OUTPUT" | jq -r '.version // ""')" >> "$GITHUB_OUTPUT"
+          echo "previous_version=$(echo "$JSON_OUTPUT" | jq -r '.previous_version // ""')" >> "$GITHUB_OUTPUT"
+          echo "tag=$(echo "$JSON_OUTPUT" | jq -r '.tag // .tag_name // ""')" >> "$GITHUB_OUTPUT"
+          echo "bump=$(echo "$JSON_OUTPUT" | jq -r '.bump // ""')" >> "$GITHUB_OUTPUT"
+          echo "floating_tag=$(echo "$JSON_OUTPUT" | jq -r '.floating_tag // ""')" >> "$GITHUB_OUTPUT"
+          echo "commit_count=$(echo "$JSON_OUTPUT" | jq -r '.commit_count // 0')" >> "$GITHUB_OUTPUT"
+          if [ "$MODE" = "release" ]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
         elif [ "$EXIT_CODE" -eq 2 ]; then
           echo "::notice::No releasable changes found"
           echo "released=false" >> "$GITHUB_OUTPUT"

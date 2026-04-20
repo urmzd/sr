@@ -17,14 +17,13 @@ pub const CONFIG_CANDIDATES: &[&str] = &["sr.yaml", "sr.yml"];
 // Top-level config
 // ---------------------------------------------------------------------------
 
-/// Root configuration. Seven top-level concerns:
+/// Root configuration. Six top-level concerns:
 /// - `git` — tag prefix, floating tags, signing
 /// - `commit` — type→bump classification
 /// - `changelog` — file, template, groups
 /// - `channels` — branch→release mapping
 /// - `vcs` — provider-specific config
-/// - `packages` — version files, artifacts, build/publish targets
-/// - `hooks` — repo-wide pre/post release commands
+/// - `packages` — version files, artifacts, publish targets
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -35,8 +34,6 @@ pub struct Config {
     pub vcs: VcsConfig,
     #[serde(default = "default_packages")]
     pub packages: Vec<PackageConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hooks: Option<HooksConfig>,
 }
 
 impl Default for Config {
@@ -48,7 +45,6 @@ impl Default for Config {
             channels: ChannelsConfig::default(),
             vcs: VcsConfig::default(),
             packages: default_packages(),
-            hooks: None,
         }
     }
 }
@@ -342,13 +338,17 @@ pub struct GitHubConfig {
 ///
 /// All packages share one global release tag (`git.tag_prefix` + semver) and
 /// one version line. Each package's `version_files` are bumped to that same
-/// global version on every release; `packages[]` controls *where to write,
-/// what to build, and how to publish*, not *how to version*.
+/// global version on every release; `packages[]` controls *where to write
+/// versions and how to publish*, not *how to version*.
+///
+/// sr does not run user shell commands. Artifact builds happen in CI
+/// between `sr prepare` and `sr release`; sr uploads whatever paths in
+/// `artifacts` point to at tag time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PackageConfig {
     /// Directory path relative to repo root. Used for organizing changelog
-    /// sections and scoping per-package build/publish commands.
+    /// sections and as the working directory for typed publishers.
     pub path: String,
     /// Manifest files to bump with the global release version. Literal
     /// paths only — no glob expansion.
@@ -363,12 +363,7 @@ pub struct PackageConfig {
     /// Changelog config override for this package.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changelog: Option<ChangelogConfig>,
-    /// Shell commands that produce this package's declared `artifacts`.
-    /// Runs after version bump, before commit. Every declared artifact
-    /// must exist on disk before the tag is created.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub build: Vec<String>,
-    /// Per-package publish configuration (invoked by `sr publish`).
+    /// Per-package publish target (invoked during `sr release`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish: Option<PublishConfig>,
 }
@@ -382,21 +377,9 @@ impl Default for PackageConfig {
             stage_files: vec![],
             artifacts: vec![],
             changelog: None,
-            build: vec![],
             publish: None,
         }
     }
-}
-
-/// Repo-wide lifecycle hooks. Run once per release, not per package.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct HooksConfig {
-    /// Runs before any mutation — tests, lints, validations that may abort the release.
-    pub pre_release: Vec<String>,
-    /// Runs after tag + GitHub release. Kept for parity with pre_release;
-    /// per-package publishing belongs under `packages[].publish` instead.
-    pub post_release: Vec<String>,
 }
 
 /// Per-package publish configuration. Typed enum — the user picks a
@@ -464,7 +447,9 @@ pub enum PublishConfig {
     /// Go modules publish by git-tag; sr already cuts the tag, so this is
     /// effectively a noop documenting the package's presence in the manifest.
     Go,
-    /// Arbitrary shell command with a user-supplied state check.
+    /// Arbitrary publish command with a user-supplied state check.
+    /// The only place sr shells out for a user-provided command; limited to
+    /// registries that don't have a built-in publisher.
     Custom {
         /// Shell command that performs the publish.
         command: String,

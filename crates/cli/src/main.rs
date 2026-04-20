@@ -72,6 +72,21 @@ enum Commands {
         format: PlanFormat,
     },
 
+    /// Prepare the next release: bump version files and write the changelog
+    /// to disk. No commit, no tag, no push, no publish. Idempotent — safe
+    /// to run multiple times. CI uses this between `sr plan` and `sr release`
+    /// so build steps (cargo build, npm pack, uv build) pick up the new
+    /// version from the bumped manifest files.
+    Prepare {
+        /// Pre-release identifier (e.g. alpha, beta, rc). Produces versions like 1.2.0-alpha.1
+        #[arg(long)]
+        prerelease: Option<String>,
+
+        /// Preview what would be written without touching files.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Validate and display resolved configuration
     Config {
         /// Show the fully resolved config with defaults applied
@@ -318,6 +333,35 @@ fn self_update() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Normalized summary emitted as JSON by `sr plan`, `sr prepare`, and
+/// `sr release`. The shape is stable across verbs so the GitHub Action
+/// (and any other consumer) can parse with a single `jq` path regardless
+/// of mode.
+#[derive(serde::Serialize)]
+struct ReleaseSummary {
+    version: String,
+    previous_version: String,
+    tag: String,
+    bump: String,
+    floating_tag: String,
+    commit_count: usize,
+}
+
+fn release_summary(plan: &sr_core::release::ReleasePlan) -> ReleaseSummary {
+    ReleaseSummary {
+        version: plan.next_version.to_string(),
+        previous_version: plan
+            .current_version
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        tag: plan.tag_name.clone(),
+        bump: plan.bump.to_string(),
+        floating_tag: plan.floating_tag_name.as_deref().unwrap_or("").to_string(),
+        commit_count: plan.commits.len(),
+    }
+}
+
 fn print_migration_guide() {
     print!("{}", include_str!("../docs/migration.md"));
 }
@@ -436,12 +480,16 @@ fn run() -> anyhow::Result<()> {
                     struct Out<'a> {
                         branch: &'a str,
                         #[serde(flatten)]
+                        summary: &'a ReleaseSummary,
+                        #[serde(flatten)]
                         diff: &'a sr_core::diff::ReleaseDiff,
                     }
+                    let summary = release_summary(&plan);
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&Out {
                             branch: &branch,
+                            summary: &summary,
                             diff: &diff,
                         })?
                     );
@@ -491,6 +539,22 @@ fn run() -> anyhow::Result<()> {
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
             clap_complete::generate(shell, &mut cmd, "sr", &mut std::io::stdout());
+            Ok(())
+        }
+
+        Commands::Prepare {
+            prerelease,
+            dry_run,
+        } => {
+            let config = load_config()?;
+            let channel_name = config.channels.default.clone();
+            let resolved_channel = config.resolve_channel(&channel_name)?.clone();
+            let prerelease_id = prerelease.or(resolved_channel.prerelease);
+            let strategy = build_local_strategy(config, prerelease_id, false)?;
+            let plan = strategy.plan()?;
+            strategy.prepare(&plan, dry_run)?;
+            let summary = release_summary(&plan);
+            println!("{}", serde_json::to_string(&summary)?);
             Ok(())
         }
 
@@ -554,27 +618,7 @@ fn run() -> anyhow::Result<()> {
                     }
                 }
             };
-            #[derive(serde::Serialize)]
-            struct ReleaseOutput {
-                version: String,
-                previous_version: String,
-                tag: String,
-                bump: String,
-                floating_tag: String,
-                commit_count: usize,
-            }
-            let output = ReleaseOutput {
-                version: plan.next_version.to_string(),
-                previous_version: plan
-                    .current_version
-                    .as_ref()
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
-                tag: plan.tag_name.clone(),
-                bump: plan.bump.to_string(),
-                floating_tag: plan.floating_tag_name.as_deref().unwrap_or("").to_string(),
-                commit_count: plan.commits.len(),
-            };
+            let output = release_summary(&plan);
             println!("{}", serde_json::to_string(&output)?);
             Ok(())
         }

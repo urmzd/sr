@@ -1,9 +1,12 @@
 //! Enforce the "declared artifacts exist" contract before tagging.
 //!
-//! If any package has `build` commands configured, every literal path in
-//! that package's `artifacts` must exist on disk. A mismatch aborts the
-//! pipeline before tag creation, guaranteeing that tag-on-remote implies
-//! all declared artifacts were built.
+//! Every literal path in `packages[].artifacts` must exist on disk before
+//! the tag is created. A mismatch aborts the pipeline so a tag-on-remote
+//! always implies every declared artifact is present.
+//!
+//! sr never builds artifacts itself; the user's CI produces them between
+//! `sr prepare` and `sr release`. When `artifacts` is empty, this stage
+//! is a no-op.
 
 use std::path::Path;
 
@@ -22,11 +25,6 @@ impl Stage for ValidateArtifacts {
             return Ok(());
         }
 
-        let has_build_commands = ctx.config.packages.iter().any(|p| !p.build.is_empty());
-        if !has_build_commands {
-            return Ok(());
-        }
-
         let declared = ctx.config.all_artifacts();
         if declared.is_empty() {
             return Ok(());
@@ -41,8 +39,9 @@ impl Stage for ValidateArtifacts {
 
         if !missing.is_empty() {
             return Err(ReleaseError::Vcs(format!(
-                "build completed but declared artifacts are missing on disk: {}. \
-                 Fix the build or remove the entries from sr.yaml.",
+                "declared artifacts are missing on disk: {}. \
+                 Build them in CI between `sr prepare` and `sr release`, \
+                 or remove the entries from sr.yaml.",
                 missing
                     .iter()
                     .map(|s| s.as_str())
