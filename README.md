@@ -494,6 +494,8 @@ The config has 6 top-level sections — `git`, `commit`, `changelog`, `channels`
 | `git.user.email` | `string?` | `null` | Git author/committer email. When unset, sr uses the repo's git config (or the env fallback `SR_GIT_USER_EMAIL`) |
 | `git.skip_patterns` | `string[]` | `["[skip release]", "[skip sr]"]` | Substrings that, when present in a commit message, exclude that commit from release planning and the changelog |
 
+Identity precedence: `--git-user-name` / `--git-user-email` flags > `git.user` in `sr.yaml` > `SR_GIT_USER_NAME` / `SR_GIT_USER_EMAIL` env > git's own resolution. sr passes the chosen identity via `git -c user.name=… -c user.email=…` per invocation, so persisted git config is never rewritten. `skip_patterns` is a plain substring match against the full commit message, so the token can live in the subject or the body.
+
 #### `commit`
 
 | Field | Type | Default | Description |
@@ -919,47 +921,6 @@ This means:
 
 If *all* commits since the last tag are non-conventional, sr exits with code 2 (no releasable changes).
 
-### Skipping individual commits
-
-Drop a skip token anywhere in a commit message to exclude it from release planning and the changelog:
-
-```
-feat: internal scratch work [skip release]
-```
-
-Out of the box, `[skip release]` and `[skip sr]` are recognized. Customize via `git.skip_patterns` in `sr.yaml`:
-
-```yaml
-git:
-  skip_patterns:
-    - "[skip release]"
-    - "[skip sr]"
-    - "DO-NOT-RELEASE"
-```
-
-Matching is a plain substring check against the full commit message, so the token can live in the subject or the body. sr also always filters its own `chore(release): …` commits regardless of configuration.
-
-### Overriding the commit/tag author
-
-By default sr uses whatever identity `git` resolves from its normal sources (`user.name` / `user.email` in the repo, `GIT_AUTHOR_*` env vars, etc.). To override without mutating the repo's git config, set either:
-
-```yaml
-# sr.yaml
-git:
-  user:
-    name: "sr-releaser[bot]"
-    email: "sr-releaser[bot]@users.noreply.github.com"
-```
-
-or pass the CLI flags on `sr release`:
-
-```bash
-sr release --git-user-name "sr-releaser[bot]" \
-           --git-user-email "sr-releaser[bot]@users.noreply.github.com"
-```
-
-Precedence is **CLI flag > `sr.yaml` > `SR_GIT_USER_NAME` / `SR_GIT_USER_EMAIL` env > git's own resolution**. sr passes the identity via `git -c user.name=… -c user.email=…` per invocation, so persisted config is never rewritten.
-
 ### How merge strategies affect sr
 
 sr reads the commit history from HEAD back to the latest tag. It doesn't care *how* commits landed on the branch — only what the commit messages say.
@@ -975,7 +936,7 @@ sr reads the commit history from HEAD back to the latest tag. It doesn't care *h
 
 ### `sr release` exits with code 2
 
-Exit code 2 means **no releasable commits** were found since the last tag. This is not an error — it means all commits since the last release are either non-bumping types (e.g. `chore`, `docs`, `ci`) or non-conventional messages that were skipped. To ship a release anyway, push a `feat:`/`fix:`/`perf:`/`refactor:` commit (an empty commit works: `git commit --allow-empty -m "fix: trigger release"`).
+Exit code 2 means **no releasable commits** were found since the last tag. Not an error — all commits since the last release are non-bumping types (e.g. `chore`, `docs`, `ci`) or non-conventional messages. To force a release, push a `feat:`/`fix:`/`perf:`/`refactor:` commit (an empty commit works: `git commit --allow-empty -m "fix: trigger release"`).
 
 ### Changelog is not generated
 
@@ -988,15 +949,44 @@ changelog:
 
 ### Version files not updated
 
-Ensure your manifest files are listed in `packages[].version_files` and match a [supported format](#supported-version-files).
+Ensure your manifest files are listed in `packages[].version_files` and match a [supported format](#supported-version-files). Paths must be literal — no glob expansion.
 
 ### Tags are not signed
 
 Set `git.sign_tags: true` in `sr.yaml` or pass `--sign-tags`. You must have a GPG or SSH signing key configured in git (`git config user.signingkey`).
 
-### Migrating from v6.x
+### How do binaries get the correct version embedded?
 
-Run `sr migrate` to see the full migration guide, or read [migration.md](crates/cli/docs/migration.md).
+Most build tools read the version from a manifest at compile time:
+- `cargo build` reads `CARGO_PKG_VERSION` from `Cargo.toml`
+- `npm pack` reads `package.json`
+- `uv build` reads `pyproject.toml`
+
+Run `sr prepare` **before** your build step so the bumped manifest is on disk when the build runs. Then `sr release` commits, tags, uploads, and publishes. See [examples/ci/cargo-multi-platform.yml](examples/ci/cargo-multi-platform.yml) for the three-job shape (prepare → matrix build → release).
+
+### Why doesn't sr run build commands itself?
+
+`sr` is a release-state reconciler, not a task runner. It writes versions, creates tags + releases, invokes typed registry publishers (`cargo publish`, `npm publish`, `docker buildx build --push`, `uv publish`). Running arbitrary shell commands is a CI concern — not sr's.
+
+The one escape hatch is `publish: custom`, which takes a shell command for registries without a built-in publisher (helm, private Maven, etc.).
+
+### Does sr support cross-compilation?
+
+Not directly. Run your matrix in CI between `sr prepare` and `sr release`. Every build job downloads the prepared manifests (via `actions/upload-artifact` + `download-artifact`), builds for its target platform with the correct version embedded, and uploads its binary. The release job then downloads everything and runs `sr release` to tag + upload. See [examples/ci/cargo-multi-platform.yml](examples/ci/cargo-multi-platform.yml).
+
+### What happens if a release fails mid-flight?
+
+Re-run `sr release`. Every stage has a strict `is_complete` check reading external state (tag exists? release object exists? assets uploaded? package on registry?). The pipeline picks up exactly where it left off. There's no state file to corrupt.
+
+### Monorepo with one release per package?
+
+Not supported. `sr` releases one tag per repo, one version across every package. Per-package tags (`core/v1.2.0`, `cli-v3.0.0`) are deliberately out of scope — that model is what changesets / Lerna are for.
+
+For workspace-aware ecosystems, declare one entry at the workspace root with `publish.workspace: true`; every member publishes at the shared version.
+
+### Migrating from v7.x
+
+Run `sr migrate` or read [migration.md](crates/cli/docs/migration.md). The v8 jump is breaking: `sr status` → `sr plan`; `packages[].independent` / `tag_prefix` / `hooks` are gone; `publish:` becomes a typed enum; globs in `artifacts`/`stage_files` become literal paths; `sr-manifest.json` is no longer produced.
 <!-- /fsrc -->
 
 ## Architecture
