@@ -1,5 +1,14 @@
 # Changelog
 
+## 8.0.7 (2026-04-25)
+
+### Bug Fixes
+
+- **docs**: repair broken ../ links and restore git.user precedence note ([7b33f21](https://github.com/urmzd/sr/commit/7b33f217c52bfd223d4b4be77eff59887b4bca3c))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v8.0.6...v8.0.7)
+
+
 ## 8.0.6 (2026-04-20)
 
 ### Bug Fixes
