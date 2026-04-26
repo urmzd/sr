@@ -54,8 +54,8 @@ Most release tools require Node.js, a pile of plugins, and still only handle the
 ```bash
 # Initialize config. Pass an example name to scaffold from a template.
 sr init
-sr init --list                # show bundled templates
-sr init pnpm-workspace        # write a specific example
+sr init --list  # show bundled templates
+sr init pnpm-workspace  # write a specific example
 
 # Preview the next release (version, tag, resource diff)
 sr plan
@@ -115,34 +115,34 @@ jobs:
 Plan-only on pull requests (preview the next version without cutting a release):
 
 ```yaml
-      - uses: urmzd/sr@v8
-        with:
-          mode: plan
+- uses: urmzd/sr@v8
+  with:
+    mode: plan
 ```
 
 Use outputs in subsequent steps:
 
 ```yaml
-      - uses: urmzd/sr@v8
-        id: sr
-      - if: steps.sr.outputs.released == 'true'
-        run: echo "Released ${{ steps.sr.outputs.version }}"
+- uses: urmzd/sr@v8
+  id: sr
+- if: steps.sr.outputs.released == 'true'
+  run: echo "Released ${{ steps.sr.outputs.version }}"
 ```
 
 Verify the downloaded sr binary with a SHA256 checksum:
 
 ```yaml
-      - uses: urmzd/sr@v8
-        with:
-          sha256: "abc123..."
+- uses: urmzd/sr@v8
+  with:
+    sha256: "abc123..."
 ```
 
 For maximum security, pin the action to a full-length commit SHA:
 
 ```yaml
-      - uses: urmzd/sr@<commit-sha>
-        with:
-          sha256: "abc123..."
+- uses: urmzd/sr@<commit-sha>
+  with:
+    sha256: "abc123..."
 ```
 
 Manual re-trigger with `workflow_dispatch` (useful when a previous release partially failed — re-runs reconcile any missing state idempotently, no special flag needed):
@@ -231,7 +231,7 @@ cargo install --path crates/sr-cli
 `sr release` calls the GitHub REST API directly — no external tools are needed. Authentication is via an environment variable:
 
 ```bash
-export GH_TOKEN=ghp_xxxxxxxxxxxx   # or GITHUB_TOKEN
+export GH_TOKEN=ghp_xxxxxxxxxxxx  # or GITHUB_TOKEN
 ```
 
 The GitHub Action sets this automatically via the `github-token` input. Dry-run mode (`sr release --dry-run`) works without a token.
@@ -351,7 +351,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: urmzd/sr@v8
         id: sr
-        with: { mode: prepare }
+        with:
+          mode: prepare
       - uses: actions/upload-artifact@v4
         with:
           name: prepared-manifests
@@ -360,12 +361,15 @@ jobs:
   build:
     needs: prepare
     strategy:
-      matrix: { target: [x86_64-linux, aarch64-linux, x86_64-darwin, aarch64-darwin] }
+      matrix:
+        target: [x86_64-linux, aarch64-linux, x86_64-darwin, aarch64-darwin]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: prepared-manifests, path: . }
+        with:
+          name: prepared-manifests
+          path: .
       - run: cargo build --release --target ${{ matrix.target }}
       # Binary now has the correct version baked in from the bumped Cargo.toml.
       - uses: actions/upload-artifact@v4
@@ -376,7 +380,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { path: . }
+        with:
+          path: .
       - uses: urmzd/sr@v8
 ```
 
@@ -391,13 +396,13 @@ packages:
   - path: .
     version_files: [Cargo.toml]
     publish:
-      type: cargo                 # cargo publish to crates.io
+      type: cargo  # cargo publish to crates.io
 
   - path: packages/web
     version_files: [packages/web/package.json]
     publish:
-      type: npm                   # npm publish; auto-detects pnpm / yarn
-      workspace: true             # pnpm publish -r / npm publish --workspaces
+      type: npm  # npm publish; auto-detects pnpm / yarn
+      workspace: true  # pnpm publish -r / npm publish --workspaces
 
   - path: services/api
     publish:
@@ -443,19 +448,19 @@ All three verbs emit the same flat JSON to stdout on success:
 ### Common flags
 
 ```bash
-sr plan --format json           # machine-readable plan output
-sr prepare --prerelease alpha   # bump to a prerelease (1.2.0-alpha.1)
-sr release --dry-run            # preview without making changes
-sr release -c canary            # release via named channel
-sr release --prerelease rc      # produce 1.2.0-rc.1
-sr release --sign-tags          # sign tags with GPG/SSH (git tag -s)
-sr release --draft              # create GitHub release as a draft
-sr release --artifacts dist/app.tar.gz   # upload literal path as release asset
-sr release --stage-files Cargo.lock      # stage additional files in the release commit
-sr config --resolved            # show config with defaults applied
-sr init pnpm-workspace          # scaffold from a bundled example
-sr init --list                  # list available examples
-sr init --force                 # overwrite existing config
+sr plan --format json  # machine-readable plan output
+sr prepare --prerelease alpha  # bump to a prerelease (1.2.0-alpha.1)
+sr release --dry-run  # preview without making changes
+sr release -c canary  # release via named channel
+sr release --prerelease rc  # produce 1.2.0-rc.1
+sr release --sign-tags  # sign tags with GPG/SSH (git tag -s)
+sr release --draft  # create GitHub release as a draft
+sr release --artifacts dist/app.tar.gz  # upload literal path as release asset
+sr release --stage-files Cargo.lock  # stage additional files in the release commit
+sr config --resolved  # show config with defaults applied
+sr init pnpm-workspace  # scaffold from a bundled example
+sr init --list  # list available examples
+sr init --force  # overwrite existing config
 ```
 
 ### Exit codes
@@ -652,7 +657,7 @@ packages:
     #   - release-assets/sr-aarch64-apple-darwin
     publish:
       type: cargo
-      workspace: true    # iterates every [workspace].members crate
+      workspace: true  # iterates every [workspace].members crate
 ```
 
 More complete examples (pnpm, uv, docker, multi-language, custom) live in [`examples/`](examples/).
@@ -685,7 +690,7 @@ For example, a Cargo workspace only needs the root listed:
 packages:
   - path: .
     version_files:
-      - Cargo.toml    # automatically bumps all workspace member Cargo.toml files
+      - Cargo.toml  # automatically bumps all workspace member Cargo.toml files
 ```
 
 ### Environment variables
@@ -830,9 +835,9 @@ channels:
 ```
 
 ```bash
-sr release --channel canary     # 1.2.0-canary.1
-sr release --channel rc         # 1.2.0-rc.1
-sr release                      # 1.2.0 (stable, uses default channel)
+sr release --channel canary  # 1.2.0-canary.1
+sr release --channel rc  # 1.2.0-rc.1
+sr release  # 1.2.0 (stable, uses default channel)
 ```
 
 **Channel fields:**
@@ -890,11 +895,11 @@ For workspace-aware ecosystems, one entry at the root is enough — `sr` walks t
 ```yaml
 packages:
   - path: .
-    version_files: [Cargo.toml]       # sr finds every [workspace].members crate
+    version_files: [Cargo.toml]  # sr finds every [workspace].members crate
     stage_files: [Cargo.lock]
     publish:
       type: cargo
-      workspace: true                  # publishes every member
+      workspace: true  # publishes every member
 ```
 
 Per-package changelog sections render automatically when more than one package has commits. The tag is always repo-wide (`git.tag_prefix` + semver); there are no per-package tags.
@@ -1025,9 +1030,9 @@ Run `sr migrate` or read [migration.md](crates/cli/docs/migration.md). The v8 ju
 ## Development
 
 ```bash
-cargo test --workspace    # run tests
+cargo test --workspace  # run tests
 cargo clippy --workspace  # lint
-cargo build               # build
+cargo build  # build
 ```
 
 ## Contributing
