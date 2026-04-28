@@ -1,5 +1,18 @@
 # Changelog
 
+## 8.0.8 (2026-04-28)
+
+### Bug Fixes
+
+- **action**: read full JSON output across multiple lines ([7a39c35](https://github.com/urmzd/sr/commit/7a39c35c2d2485500df90af0fcbd2b3355cb0bd2))
+
+### Misc
+
+- **readme**: normalize code-block spacing and dedent standalone action snippets ([f46a2f6](https://github.com/urmzd/sr/commit/f46a2f6e3f055738d334e61e665cab78668f4757))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v8.0.7...v8.0.8)
+
+
 ## 8.0.7 (2026-04-25)
 
 ### Bug Fixes
