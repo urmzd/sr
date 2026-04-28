@@ -211,17 +211,24 @@ runs:
 
         # Capture sr's real exit code. A pipeline inside $(…) hides the
         # left-hand status behind the subshell, so run sr to a temp file
-        # and tail afterward.
+        # and read afterward. sr may pretty-print JSON across multiple
+        # lines, so slurp the whole file and let jq parse it.
         TMP_OUT=$(mktemp)
         trap 'rm -f "$TMP_OUT"' EXIT
         set +e
         sr "${ARGS[@]}" >"$TMP_OUT"
         EXIT_CODE=$?
         set -e
-        JSON_OUTPUT=$(tail -1 "$TMP_OUT")
 
         if [ "$EXIT_CODE" -eq 0 ]; then
-          echo "json=${JSON_OUTPUT}" >> "$GITHUB_OUTPUT"
+          # Compact the JSON onto a single line so it's safe to embed in
+          # GITHUB_OUTPUT and to pipe back into jq for field extraction.
+          JSON_OUTPUT=$(jq -c . <"$TMP_OUT")
+          {
+            echo "json<<__SR_EOF__"
+            echo "$JSON_OUTPUT"
+            echo "__SR_EOF__"
+          } >> "$GITHUB_OUTPUT"
           echo "version=$(echo "$JSON_OUTPUT" | jq -r '.version // ""')" >> "$GITHUB_OUTPUT"
           echo "previous_version=$(echo "$JSON_OUTPUT" | jq -r '.previous_version // ""')" >> "$GITHUB_OUTPUT"
           echo "tag=$(echo "$JSON_OUTPUT" | jq -r '.tag // .tag_name // ""')" >> "$GITHUB_OUTPUT"
