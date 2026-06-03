@@ -1,5 +1,14 @@
 # Changelog
 
+## 8.0.9 (2026-06-03)
+
+### Bug Fixes
+
+- **publishers**: publish cargo workspace members in dependency order (#26) ([8e81978](https://github.com/urmzd/sr/commit/8e81978e6f7496d5eefe81119d63ab8eb086fd74))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v8.0.8...v8.0.9)
+
+
 ## 8.0.8 (2026-04-28)
 
 ### Bug Fixes
