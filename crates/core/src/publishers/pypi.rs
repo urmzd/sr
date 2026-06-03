@@ -78,8 +78,8 @@ impl Publisher for PypiPublisher {
         let dist_root = Path::new(&ctx.package.path).join(dist_dir);
 
         for manifest in &targets {
-            let name =
-                read_pyproject_name(manifest).map_err(|e| ReleaseError::Config(format!("pypi publish: {e}")))?;
+            let name = read_pyproject_name(manifest)
+                .map_err(|e| ReleaseError::Config(format!("pypi publish: {e}")))?;
             let stem = filename_stem(&name);
             let artifacts = find_artifacts(&dist_root, &stem, ctx.version)
                 .map_err(|e| ReleaseError::Config(format!("pypi publish: {e}")))?;

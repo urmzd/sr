@@ -6,10 +6,13 @@
 //!   In workspace mode, aggregates across all members: Completed iff every
 //!   member is already on the registry.
 //! - `run`: `cargo publish -p <name>` per crate. crates.io's index can lag
-//!   30–60s between publishes; cargo retries internally. We iterate in
-//!   `[workspace].members` order (user's responsibility to list deps first).
+//!   30–60s between publishes; cargo retries internally. We publish members in
+//!   intra-workspace dependency order (a crate is published after every other
+//!   member it depends on), so `members = ["crates/*"]` works regardless of how
+//!   the glob happens to sort.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use super::{PublishCtx, PublishState, Publisher};
 use crate::error::ReleaseError;
@@ -96,12 +99,100 @@ impl Publisher for CargoPublisher {
     }
 }
 
-fn resolve_targets(pkg_path: &str, workspace: bool) -> Vec<std::path::PathBuf> {
+fn resolve_targets(pkg_path: &str, workspace: bool) -> Vec<PathBuf> {
     if workspace {
-        discover_cargo_members(Path::new(pkg_path))
+        order_by_dependencies(discover_cargo_members(Path::new(pkg_path)))
     } else {
         vec![Path::new(pkg_path).join("Cargo.toml")]
     }
+}
+
+/// Order workspace member manifests so each crate is published after the other
+/// members it depends on. crates.io rejects a publish whose intra-workspace
+/// dependency requirement is not yet on the index, so glob / declaration order
+/// (e.g. `crates/*` → `oag-cli` before `oag-core`) is not safe. We build the
+/// intra-workspace dependency graph and emit a stable topological order
+/// (dependencies first), preserving the original order as a tiebreak and for
+/// any crate whose manifest can't be parsed.
+fn order_by_dependencies(targets: Vec<PathBuf>) -> Vec<PathBuf> {
+    let n = targets.len();
+    if n < 2 {
+        return targets;
+    }
+
+    // Map each member's package name to its index. First declaration wins.
+    let mut index_of: HashMap<String, usize> = HashMap::new();
+    for (i, manifest) in targets.iter().enumerate() {
+        if let Ok(name) = read_cargo_package_name(manifest) {
+            index_of.entry(name).or_insert(i);
+        }
+    }
+
+    // deps[i] = sorted indices of other members that member i depends on.
+    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, manifest) in targets.iter().enumerate() {
+        for dep in read_intra_workspace_dep_names(manifest) {
+            if let Some(&j) = index_of.get(&dep)
+                && j != i
+                && !deps[i].contains(&j)
+            {
+                deps[i].push(j);
+            }
+        }
+        deps[i].sort_unstable();
+    }
+
+    // Stable DFS post-order: a node is emitted after its dependencies. Marking
+    // a node visited before recursing makes any cycle terminate (a real cargo
+    // dependency cycle is unpublishable anyway, so best-effort is fine).
+    let mut visited = vec![false; n];
+    let mut ordered = Vec::with_capacity(n);
+    for start in 0..n {
+        dfs_post_order(start, &deps, &mut visited, &mut ordered);
+    }
+    ordered.into_iter().map(|i| targets[i].clone()).collect()
+}
+
+fn dfs_post_order(i: usize, deps: &[Vec<usize>], visited: &mut [bool], out: &mut Vec<usize>) {
+    if visited[i] {
+        return;
+    }
+    visited[i] = true;
+    for &j in &deps[i] {
+        dfs_post_order(j, deps, visited, out);
+    }
+    out.push(i);
+}
+
+/// Collect the crate names a manifest depends on via `[dependencies]` and
+/// `[build-dependencies]`. Honors renamed deps (`alias = { package = "real" }`
+/// → `real`). Dev-dependencies are intentionally excluded: they are not part
+/// of the published verification build and can introduce false cycles (e.g. a
+/// core crate dev-depending on a CLI that depends on it).
+fn read_intra_workspace_dep_names(manifest: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(manifest) else {
+        return Vec::new();
+    };
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return Vec::new();
+    };
+
+    let mut names = Vec::new();
+    for table in ["dependencies", "build-dependencies"] {
+        let Some(tbl) = doc.get(table).and_then(|t| t.as_table_like()) else {
+            continue;
+        };
+        for (key, val) in tbl.iter() {
+            // Renamed dependency: `alias = { package = "real-name" }`.
+            let real = val
+                .as_table_like()
+                .and_then(|t| t.get("package"))
+                .and_then(|p| p.as_str())
+                .unwrap_or(key);
+            names.push(real.to_string());
+        }
+    }
+    names
 }
 
 fn probe_crates_io(name: &str, version: &str) -> Result<bool, String> {
@@ -202,5 +293,118 @@ mod tests {
         let ws = resolve_targets(dir.path().to_str().unwrap(), true);
         assert_eq!(ws.len(), 1);
         assert!(ws[0].to_string_lossy().contains("crates/core"));
+    }
+
+    /// The oag scenario: `crates/*` globs `oag-cli` (package `oag`) before
+    /// `oag-core` alphabetically, but `oag` depends on `oag-core`. The core
+    /// crate must be published first.
+    #[test]
+    fn workspace_members_ordered_by_dependency() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("crates/oag-cli")).unwrap();
+        std::fs::write(
+            dir.path().join("crates/oag-cli/Cargo.toml"),
+            "[package]\nname = \"oag\"\nversion = \"0.1.0\"\n\
+             [dependencies]\noag-core = { path = \"../oag-core\", version = \"0.1.0\" }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("crates/oag-core")).unwrap();
+        std::fs::write(
+            dir.path().join("crates/oag-core/Cargo.toml"),
+            "[package]\nname = \"oag-core\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let ws = resolve_targets(dir.path().to_str().unwrap(), true);
+        let order: Vec<String> = ws
+            .iter()
+            .map(|p| read_cargo_package_name(p).unwrap())
+            .collect();
+        assert_eq!(order, vec!["oag-core".to_string(), "oag".to_string()]);
+    }
+
+    /// A renamed dependency (`alias = { package = "real" }`) still creates the
+    /// ordering edge against the real crate name.
+    #[test]
+    fn ordering_honors_renamed_dependency() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a-cli\", \"z-core\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("a-cli")).unwrap();
+        std::fs::write(
+            dir.path().join("a-cli/Cargo.toml"),
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [dependencies]\ncore = { package = \"z-core\", path = \"../z-core\", version = \"0.1.0\" }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("z-core")).unwrap();
+        std::fs::write(
+            dir.path().join("z-core/Cargo.toml"),
+            "[package]\nname = \"z-core\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let ws = resolve_targets(dir.path().to_str().unwrap(), true);
+        let order: Vec<String> = ws
+            .iter()
+            .map(|p| read_cargo_package_name(p).unwrap())
+            .collect();
+        assert_eq!(order, vec!["z-core".to_string(), "a".to_string()]);
+    }
+
+    /// Independent members keep a deterministic, stable order.
+    #[test]
+    fn ordering_is_stable_without_deps() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        for name in ["alpha", "bravo", "charlie"] {
+            std::fs::create_dir_all(dir.path().join(format!("crates/{name}"))).unwrap();
+            std::fs::write(
+                dir.path().join(format!("crates/{name}/Cargo.toml")),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
+            )
+            .unwrap();
+        }
+        let ws = resolve_targets(dir.path().to_str().unwrap(), true);
+        assert_eq!(ws.len(), 3);
+    }
+
+    /// A dependency cycle must terminate (best-effort order, no hang).
+    #[test]
+    fn ordering_tolerates_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("a")).unwrap();
+        std::fs::write(
+            dir.path().join("a/Cargo.toml"),
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nb = { path = \"../b\", version = \"0.1.0\" }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("b")).unwrap();
+        std::fs::write(
+            dir.path().join("b/Cargo.toml"),
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\n\
+             [dependencies]\na = { path = \"../a\", version = \"0.1.0\" }\n",
+        )
+        .unwrap();
+        let ws = resolve_targets(dir.path().to_str().unwrap(), true);
+        assert_eq!(ws.len(), 2);
     }
 }
