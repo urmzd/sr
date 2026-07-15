@@ -1,5 +1,18 @@
 # Changelog
 
+## 8.1.0 (2026-07-15)
+
+### Features
+
+- **release**: lock releases to a base ref commit (#29) ([aab933b](https://github.com/urmzd/sr/commit/aab933bdd90096e656b498093b9bd7eac2f8bc01))
+
+### Misc
+
+- bump GitHub Actions to Node 24 majors and switch app token to client-id ([8edb124](https://github.com/urmzd/sr/commit/8edb124aaf638025d8bfa0d189b28977c616b5ef))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v8.0.9...v8.1.0)
+
+
 ## 8.0.9 (2026-06-03)
 
 ### Bug Fixes
