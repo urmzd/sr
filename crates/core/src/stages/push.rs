@@ -2,8 +2,17 @@
 
 use super::{Stage, StageContext};
 use crate::error::ReleaseError;
+use crate::git::PushOutcome;
 
-/// Push HEAD to origin. Always safe to re-run (idempotent when up to date).
+/// Push the release commit to origin. Always safe to re-run (idempotent
+/// when up to date).
+///
+/// Pushes the exact release SHA — never `HEAD` — so commits that landed on
+/// the branch after the release commit are not swept along. A non-fast-
+/// forward rejection (the remote branch advanced past the base, e.g. queued
+/// releases on a busy trunk) is a warning, not a failure: the release stays
+/// locked to its commit, which remains reachable through the tag pushed by
+/// the next stage.
 pub struct PushCommit;
 
 impl Stage for PushCommit {
@@ -24,7 +33,15 @@ impl Stage for PushCommit {
         if ctx.dry_run {
             return Ok(());
         }
-        ctx.git.push()
+        if ctx.git.push(&ctx.release_sha)? == PushOutcome::Rejected {
+            eprintln!(
+                "warning: branch advanced past {}; skipping branch push — \
+                 the release commit remains reachable via tag {}",
+                &ctx.plan.base_sha[..ctx.plan.base_sha.len().min(12)],
+                ctx.plan.tag_name
+            );
+        }
+        Ok(())
     }
 }
 

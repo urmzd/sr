@@ -61,6 +61,13 @@ enum Commands {
         /// Override the git author/committer email for the release commit and tag
         #[arg(long = "git-user-email")]
         git_user_email: Option<String>,
+
+        /// Commit to release (ref or SHA, e.g. $GITHUB_SHA). Locked at plan
+        /// time; the tag targets exactly this commit even if the branch moves.
+        /// Falls back to $SR_BASE_REF, then HEAD. The checkout must be at
+        /// this commit.
+        #[arg(long = "base-ref")]
+        base_ref: Option<String>,
     },
 
     /// Plan the next release: compute desired state (next version, intended
@@ -70,6 +77,11 @@ enum Commands {
         /// Output format
         #[arg(long, default_value = "human")]
         format: PlanFormat,
+
+        /// Commit to plan against (ref or SHA). Falls back to $SR_BASE_REF,
+        /// then HEAD.
+        #[arg(long = "base-ref")]
+        base_ref: Option<String>,
     },
 
     /// Prepare the next release: bump version files and write the changelog
@@ -85,6 +97,11 @@ enum Commands {
         /// Preview what would be written without touching files.
         #[arg(long)]
         dry_run: bool,
+
+        /// Commit to prepare (ref or SHA). Falls back to $SR_BASE_REF, then
+        /// HEAD. The checkout must be at this commit.
+        #[arg(long = "base-ref")]
+        base_ref: Option<String>,
     },
 
     /// Validate and display resolved configuration
@@ -154,6 +171,7 @@ fn build_local_strategy(
     config: Config,
     prerelease_id: Option<String>,
     draft: bool,
+    base_ref: Option<String>,
 ) -> anyhow::Result<
     TrunkReleaseStrategy<
         NativeGitRepository,
@@ -178,6 +196,7 @@ fn build_local_strategy(
         config,
         prerelease_id,
         draft,
+        base_ref,
     })
 }
 
@@ -185,6 +204,7 @@ fn build_full_strategy(
     config: Config,
     prerelease_id: Option<String>,
     draft: bool,
+    base_ref: Option<String>,
 ) -> anyhow::Result<
     TrunkReleaseStrategy<
         NativeGitRepository,
@@ -218,6 +238,7 @@ fn build_full_strategy(
         config,
         prerelease_id,
         draft,
+        base_ref,
     })
 }
 
@@ -235,6 +256,13 @@ fn is_no_release_error(err: &anyhow::Error) -> bool {
 fn load_config() -> anyhow::Result<Config> {
     let config_path = resolve_config_path();
     Config::load(&config_path).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Base-ref precedence: `--base-ref` flag > `SR_BASE_REF` env > None
+/// (lock to HEAD at plan time).
+fn resolve_base_ref(flag: Option<String>) -> Option<String> {
+    flag.or_else(|| std::env::var("SR_BASE_REF").ok())
+        .filter(|s| !s.is_empty())
 }
 
 fn resolve_config_path() -> std::path::PathBuf {
@@ -362,6 +390,7 @@ struct ReleaseSummary {
     bump: String,
     floating_tag: String,
     commit_count: usize,
+    base_sha: String,
 }
 
 fn release_summary(plan: &sr_core::release::ReleasePlan) -> ReleaseSummary {
@@ -376,6 +405,7 @@ fn release_summary(plan: &sr_core::release::ReleasePlan) -> ReleaseSummary {
         bump: plan.bump.to_string(),
         floating_tag: plan.floating_tag_name.as_deref().unwrap_or("").to_string(),
         commit_count: plan.commits.len(),
+        base_sha: plan.base_sha.clone(),
     }
 }
 
@@ -465,7 +495,7 @@ fn run() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Commands::Plan { format } => {
+        Commands::Plan { format, base_ref } => {
             let config = load_config()?;
 
             let branch_output = std::process::Command::new("git")
@@ -475,7 +505,8 @@ fn run() -> anyhow::Result<()> {
                 .trim()
                 .to_string();
 
-            let strategy = build_local_strategy(config.clone(), None, false)?;
+            let strategy =
+                build_local_strategy(config.clone(), None, false, resolve_base_ref(base_ref))?;
             let plan_result = strategy.plan();
             let plan_vcs = build_plan_vcs(&strategy.git);
 
@@ -525,6 +556,7 @@ fn run() -> anyhow::Result<()> {
                 }
                 (PlanFormat::Human, Ok(plan)) => {
                     println!("  Branch: {branch}");
+                    println!("  Base:   {}", plan.base_sha);
                     let env = [
                         ("SR_VERSION", plan.next_version.to_string()),
                         ("SR_TAG", plan.tag_name.clone()),
@@ -563,12 +595,14 @@ fn run() -> anyhow::Result<()> {
         Commands::Prepare {
             prerelease,
             dry_run,
+            base_ref,
         } => {
             let config = load_config()?;
             let channel_name = config.channels.default.clone();
             let resolved_channel = config.resolve_channel(&channel_name)?.clone();
             let prerelease_id = prerelease.or(resolved_channel.prerelease);
-            let strategy = build_local_strategy(config, prerelease_id, false)?;
+            let strategy =
+                build_local_strategy(config, prerelease_id, false, resolve_base_ref(base_ref))?;
             let plan = strategy.plan()?;
             strategy.prepare(&plan, dry_run)?;
             let summary = release_summary(&plan);
@@ -586,7 +620,9 @@ fn run() -> anyhow::Result<()> {
             draft,
             git_user_name,
             git_user_email,
+            base_ref,
         } => {
+            let base_ref = resolve_base_ref(base_ref);
             let mut config = load_config()?;
 
             // Resolve channel
@@ -618,7 +654,12 @@ fn run() -> anyhow::Result<()> {
                 pkg.stage_files.extend(stage_files);
             }
 
-            let plan = match build_full_strategy(config.clone(), prerelease_id.clone(), draft) {
+            let plan = match build_full_strategy(
+                config.clone(),
+                prerelease_id.clone(),
+                draft,
+                base_ref.clone(),
+            ) {
                 Ok(strategy) => {
                     let plan = strategy.plan()?;
                     strategy.execute(&plan, dry_run)?;
@@ -627,7 +668,8 @@ fn run() -> anyhow::Result<()> {
                 Err(e) => {
                     if dry_run {
                         eprintln!("warning: {e} (continuing dry-run without GitHub)");
-                        let strategy = build_local_strategy(config, prerelease_id, draft)?;
+                        let strategy =
+                            build_local_strategy(config, prerelease_id, draft, base_ref)?;
                         let plan = strategy.plan()?;
                         strategy.execute(&plan, dry_run)?;
                         plan

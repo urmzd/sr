@@ -68,6 +68,12 @@ Not directly. Run your matrix in CI between `sr prepare` and `sr release`. Every
 
 Re-run `sr release`. Every stage has a strict `is_complete` check reading external state (tag exists? release object exists? assets uploaded? package on registry?). The pipeline picks up exactly where it left off. There's no state file to corrupt.
 
+### What if the branch moves while a release is running?
+
+Nothing changes about what gets released. `sr plan` resolves the base commit once (HEAD, or `--base-ref`) and locks the release to it: the commit walk is bounded by that SHA, the tag targets exactly that commit (plus the `chore(release)` commit built on it), and the branch push carries only that SHA. With queued CI runs on a busy trunk, each run releases its own commit — if the remote branch has already advanced, the branch push is skipped with a warning and the release completes; the release commit stays reachable through the tag.
+
+If the *local checkout* moves between plan and execute (something rewrote HEAD under sr, or `--base-ref` doesn't match the checkout), sr refuses with a `base ref moved` error — bumping files on a tree that isn't the planned commit would corrupt the release.
+
 ### Monorepo with one release per package?
 
 Not supported. `sr` releases one tag per repo, one version across every package. Per-package tags (`core/v1.2.0`, `cli-v3.0.0`) are deliberately out of scope — that model is what changesets / Lerna are for.

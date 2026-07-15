@@ -181,6 +181,7 @@ jobs:
 | `stage-files` | Additional literal paths to stage in the release commit (space-separated) | `""` |
 | `sign-tags` | Sign tags with GPG/SSH | `false` |
 | `draft` | Create GitHub release as a draft | `false` |
+| `base-ref` | Commit to release (ref or SHA), locked at plan time so queued runs each release their own commit | `${{ github.sha }}` |
 | `sha256` | Expected SHA256 checksum of the sr binary (hex string) | `""` |
 
 #### Outputs
@@ -457,6 +458,7 @@ sr release --sign-tags  # sign tags with GPG/SSH (git tag -s)
 sr release --draft  # create GitHub release as a draft
 sr release --artifacts dist/app.tar.gz  # upload literal path as release asset
 sr release --stage-files Cargo.lock  # stage additional files in the release commit
+sr release --base-ref "$GITHUB_SHA"  # lock the release to a specific commit
 sr config --resolved  # show config with defaults applied
 sr init pnpm-workspace  # scaffold from a bundled example
 sr init --list  # list available examples
@@ -700,6 +702,7 @@ packages:
 | `GH_TOKEN` / `GITHUB_TOKEN` | Release | GitHub API token for creating releases and uploading artifacts. Not needed for `--dry-run` |
 | `SR_GIT_USER_NAME` | Release | Fallback git author/committer name. Consulted only when neither `--git-user-name` nor `git.user.name` in `sr.yaml` is set |
 | `SR_GIT_USER_EMAIL` | Release | Fallback git author/committer email. Same precedence as `SR_GIT_USER_NAME` |
+| `SR_BASE_REF` | Plan / Prepare / Release | Fallback for `--base-ref`: the commit the release is locked to. Consulted only when the flag is not given; empty means lock to HEAD at plan time |
 | `SR_VERSION` | Release hooks | The new version string (e.g. `1.2.3`), set for `pre_release` and `post_release` hooks |
 | `SR_TAG` | Release hooks | The new tag name (e.g. `v1.2.3`), set for `pre_release` and `post_release` hooks |
 

@@ -48,6 +48,11 @@ pub struct StageContext<'a> {
     /// Files produced by [`bump::Bump`] across every package that
     /// [`commit::Commit`] must stage in a single commit.
     pub bumped_files: Vec<String>,
+    /// The commit every tag and push targets. Starts at the plan's locked
+    /// `base_sha`; [`commit::Commit`] advances it to the release commit it
+    /// creates. Stages use this — never implicit HEAD — so a branch that
+    /// moves mid-pipeline cannot change what gets tagged or pushed.
+    pub release_sha: String,
 }
 
 /// A single step in the release pipeline.
