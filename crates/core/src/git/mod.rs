@@ -22,6 +22,17 @@ pub struct TagInfo {
     pub sha: String,
 }
 
+/// Result of pushing the release commit to the branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushOutcome {
+    /// The branch now includes the release commit.
+    Pushed,
+    /// The remote branch advanced past the release's base commit
+    /// (non-fast-forward rejection). The release commit stays reachable
+    /// through the tag; the branch is left alone.
+    Rejected,
+}
+
 /// Abstraction over git operations.
 pub trait GitRepository: Send + Sync {
     /// Find the latest semver tag matching the configured prefix.
@@ -31,18 +42,39 @@ pub trait GitRepository: Send + Sync {
     /// If `from` is `None`, returns all commits reachable from HEAD.
     fn commits_since(&self, from: Option<&str>) -> Result<Vec<Commit>, ReleaseError>;
 
-    /// Create an annotated tag at HEAD. When `sign` is true, uses `-s` for GPG/SSH signing.
-    fn create_tag(&self, name: &str, message: &str, sign: bool) -> Result<(), ReleaseError>;
+    /// Create an annotated tag at `target` (a commit SHA). When `sign` is
+    /// true, uses `-s` for GPG/SSH signing. The target is explicit — never
+    /// implicit HEAD — so the tag lands on the planned commit even if the
+    /// branch moves mid-release.
+    fn create_tag(
+        &self,
+        name: &str,
+        message: &str,
+        sign: bool,
+        target: &str,
+    ) -> Result<(), ReleaseError>;
 
     /// Push a tag to the remote.
     fn push_tag(&self, name: &str) -> Result<(), ReleaseError>;
 
     /// Stage files and commit (skips git hooks via --no-verify).
-    /// Returns Ok(false) if nothing to commit.
-    fn stage_and_commit(&self, paths: &[&str], message: &str) -> Result<bool, ReleaseError>;
+    /// Returns the SHA of the new commit, or `None` if nothing to commit.
+    fn stage_and_commit(
+        &self,
+        paths: &[&str],
+        message: &str,
+    ) -> Result<Option<String>, ReleaseError>;
 
-    /// Push current branch to origin.
-    fn push(&self) -> Result<(), ReleaseError>;
+    /// Push exactly `sha` to the current branch on origin. Explicit — never
+    /// `git push origin HEAD` — so commits landing on the branch after the
+    /// release commit are not swept into the push.
+    ///
+    /// Returns [`PushOutcome::Rejected`] when the remote branch has advanced
+    /// past `sha` (non-fast-forward). That is an expected state with queued
+    /// releases — each run releases its own commit while the branch moves on
+    /// — so callers decide whether it is fatal; transport/auth failures are
+    /// still `Err`.
+    fn push(&self, sha: &str) -> Result<PushOutcome, ReleaseError>;
 
     /// Check if a tag exists locally.
     fn tag_exists(&self, name: &str) -> Result<bool, ReleaseError>;
@@ -60,14 +92,23 @@ pub trait GitRepository: Send + Sync {
     /// Get the date (YYYY-MM-DD) of the commit a tag points to.
     fn tag_date(&self, tag_name: &str) -> Result<String, ReleaseError>;
 
-    /// Force-create a lightweight tag at HEAD, overwriting if it already exists.
-    fn force_create_tag(&self, name: &str) -> Result<(), ReleaseError>;
+    /// Force-create a lightweight tag at `target` (a commit SHA),
+    /// overwriting if it already exists.
+    fn force_create_tag(&self, name: &str, target: &str) -> Result<(), ReleaseError>;
 
     /// Force-push a tag to the remote, overwriting the remote tag if it exists.
     fn force_push_tag(&self, name: &str) -> Result<(), ReleaseError>;
 
     /// Return the full SHA of HEAD.
     fn head_sha(&self) -> Result<String, ReleaseError>;
+
+    /// Resolve an arbitrary ref (branch, tag, SHA prefix) to a full commit SHA.
+    /// Default falls back to HEAD for test fakes; real implementations
+    /// must resolve the given ref.
+    fn resolve_ref(&self, ref_name: &str) -> Result<String, ReleaseError> {
+        let _ = ref_name;
+        self.head_sha()
+    }
 
     /// Like `commits_since`, but only includes commits that touched files under `path`.
     fn commits_since_in_path(

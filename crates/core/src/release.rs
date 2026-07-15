@@ -24,6 +24,11 @@ pub struct ReleasePlan {
     pub tag_name: String,
     pub floating_tag_name: Option<String>,
     pub prerelease: bool,
+    /// The commit this release is locked to. Resolved once at plan time
+    /// (HEAD, or an explicit `--base-ref`); every commit walk is bounded by
+    /// it and the release tag targets it (plus the release commit created on
+    /// top of it) — never whatever the branch tip happens to be later.
+    pub base_sha: String,
     /// Per-package breakdown (stable order = `config.packages`). Used by
     /// stages that iterate packages (Bump, Build, UploadManifest) and by the
     /// changelog formatter for optional per-package sectioning.
@@ -171,6 +176,9 @@ pub struct TrunkReleaseStrategy<G, V, C, F> {
     pub prerelease_id: Option<String>,
     /// Whether the GitHub release should be created as a draft.
     pub draft: bool,
+    /// Explicit base ref to release (e.g. a CI-provided commit SHA).
+    /// None = lock to HEAD at plan time.
+    pub base_ref: Option<String>,
 }
 
 impl<G, V, C, F> TrunkReleaseStrategy<G, V, C, F>
@@ -211,6 +219,25 @@ where
         self.formatter.format(&[entry])
     }
 
+    /// Verify the working tree is still at the plan's locked base commit.
+    ///
+    /// Prepare and execute mutate the working tree (version bumps) and build
+    /// the release commit on top of HEAD — if HEAD is no longer the planned
+    /// base, those writes would target a different commit's tree. This never
+    /// fires for queued CI releases (each run checks out its own SHA); it
+    /// catches a checkout that moved underneath sr, or a `--base-ref` that
+    /// doesn't match the checkout.
+    fn ensure_at_base(&self, plan: &ReleasePlan) -> Result<(), ReleaseError> {
+        let head = self.git.head_sha()?;
+        if head != plan.base_sha {
+            return Err(ReleaseError::BaseRefMoved {
+                expected: plan.base_sha.clone(),
+                actual: head,
+            });
+        }
+        Ok(())
+    }
+
     /// Render the release name from the configured template, or fall back to the tag name.
     fn release_name(&self, plan: &ReleasePlan) -> String {
         if let Some(ref template_str) = self.config.vcs.github.release_name_template {
@@ -238,6 +265,7 @@ where
     fn build_package_plans(
         &self,
         from_sha: Option<&str>,
+        base_sha: &str,
         all_conventional: &[ConventionalCommit],
     ) -> Result<Vec<PackagePlan>, ReleaseError> {
         let packages = &self.config.packages;
@@ -275,7 +303,9 @@ where
                 continue;
             }
 
-            let raw = self.git.commits_since_in_path(from_sha, &pkg.path)?;
+            let raw = self
+                .git
+                .commits_between_in_path(from_sha, base_sha, &pkg.path)?;
             let pkg_shas: std::collections::HashSet<&str> =
                 raw.iter().map(|c| c.sha.as_str()).collect();
             let pkg_commits: Vec<ConventionalCommit> = all_conventional
@@ -329,6 +359,14 @@ where
     fn plan(&self) -> Result<ReleasePlan, ReleaseError> {
         let is_prerelease = self.prerelease_id.is_some();
 
+        // Lock the base commit first. Everything below — commit walks, the
+        // tag target, the pushed ref — is pinned to this SHA so a branch
+        // that moves while the release runs cannot change what is released.
+        let base_sha = match &self.base_ref {
+            Some(r) => self.git.resolve_ref(r)?,
+            None => self.git.head_sha()?,
+        };
+
         // State model: the tag is the only source of truth. Prior releases
         // — complete, partial, or abandoned — are archaeology. We compute
         // the next release relative to the latest tag and move forward.
@@ -350,11 +388,12 @@ where
             None => (None, None),
         };
 
-        // Scan commits repo-wide. Strict monorepo model: one version for all
-        // packages, so the global bump is decided over every commit since the
-        // last tag — not filtered by package path. Per-package path attribution
-        // happens later, for changelog sectioning only.
-        let raw_commits = self.git.commits_since(from_sha)?;
+        // Scan commits repo-wide, bounded by the locked base — never HEAD,
+        // which may have moved since. Strict monorepo model: one version for
+        // all packages, so the global bump is decided over every commit since
+        // the last tag — not filtered by package path. Per-package path
+        // attribution happens later, for changelog sectioning only.
+        let raw_commits = self.git.commits_between(from_sha, &base_sha)?;
 
         if raw_commits.is_empty() {
             let (tag, sha) = match tag_info {
@@ -387,7 +426,7 @@ where
             }
         };
 
-        let package_plans = self.build_package_plans(from_sha, &conventional_commits)?;
+        let package_plans = self.build_package_plans(from_sha, &base_sha, &conventional_commits)?;
 
         // For pre-releases, base the version on the latest *stable* tag
         let base_version = if is_prerelease {
@@ -441,11 +480,13 @@ where
             tag_name,
             floating_tag_name,
             prerelease: is_prerelease,
+            base_sha,
             packages: package_plans,
         })
     }
 
     fn prepare(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError> {
+        self.ensure_at_base(plan)?;
         let version_str = plan.next_version.to_string();
         let changelog_body = self.format_changelog(plan)?;
         let release_name = self.release_name(plan);
@@ -467,6 +508,7 @@ where
             sign_tags: self.config.git.sign_tags,
             draft: self.draft,
             bumped_files: Vec::new(),
+            release_sha: plan.base_sha.clone(),
         };
 
         // Only the Bump stage: writes manifests + changelog, nothing else.
@@ -488,6 +530,7 @@ where
     }
 
     fn execute(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError> {
+        self.ensure_at_base(plan)?;
         let version_str = plan.next_version.to_string();
         let changelog_body = self.format_changelog(plan)?;
         let release_name = self.release_name(plan);
@@ -509,6 +552,7 @@ where
             sign_tags: self.config.git.sign_tags,
             draft: self.draft,
             bumped_files: Vec::new(),
+            release_sha: plan.base_sha.clone(),
         };
 
         for stage in default_pipeline() {
@@ -604,7 +648,7 @@ mod tests {
     use crate::config::{
         ChangelogConfig, Config, GitConfig, PackageConfig, default_changelog_groups,
     };
-    use crate::git::{GitRepository, TagInfo};
+    use crate::git::{GitRepository, PushOutcome, TagInfo};
 
     // --- Fakes ---
 
@@ -613,13 +657,19 @@ mod tests {
         commits: Vec<Commit>,
         /// Commits returned when path filtering is active (None = fall back to `commits`).
         path_commits: Option<Vec<Commit>>,
-        head: String,
-        created_tags: Mutex<Vec<String>>,
+        head: Mutex<String>,
+        /// SHA assigned to the release commit made by stage_and_commit.
+        commit_sha: String,
+        created_tags: Mutex<Vec<(String, String)>>,
         pushed_tags: Mutex<Vec<String>>,
         committed: Mutex<Vec<(Vec<String>, String)>>,
-        push_count: Mutex<u32>,
-        force_created_tags: Mutex<Vec<String>>,
+        pushed_shas: Mutex<Vec<String>>,
+        force_created_tags: Mutex<Vec<(String, String)>>,
         force_pushed_tags: Mutex<Vec<String>>,
+        /// Ranges requested via commits_between (from, to).
+        between_calls: Mutex<Vec<(Option<String>, String)>>,
+        /// When true, push() reports a non-fast-forward rejection.
+        reject_push: bool,
     }
 
     impl FakeGit {
@@ -632,14 +682,21 @@ mod tests {
                 tags,
                 commits,
                 path_commits: None,
-                head,
+                head: Mutex::new(head),
+                commit_sha: "f".repeat(40),
                 created_tags: Mutex::new(Vec::new()),
                 pushed_tags: Mutex::new(Vec::new()),
                 committed: Mutex::new(Vec::new()),
-                push_count: Mutex::new(0),
+                pushed_shas: Mutex::new(Vec::new()),
                 force_created_tags: Mutex::new(Vec::new()),
                 force_pushed_tags: Mutex::new(Vec::new()),
+                between_calls: Mutex::new(Vec::new()),
+                reject_push: false,
             }
+        }
+
+        fn set_head(&self, sha: &str) {
+            *self.head.lock().unwrap() = sha.to_string();
         }
     }
 
@@ -652,8 +709,17 @@ mod tests {
             Ok(self.commits.clone())
         }
 
-        fn create_tag(&self, name: &str, _message: &str, _sign: bool) -> Result<(), ReleaseError> {
-            self.created_tags.lock().unwrap().push(name.to_string());
+        fn create_tag(
+            &self,
+            name: &str,
+            _message: &str,
+            _sign: bool,
+            target: &str,
+        ) -> Result<(), ReleaseError> {
+            self.created_tags
+                .lock()
+                .unwrap()
+                .push((name.to_string(), target.to_string()));
             Ok(())
         }
 
@@ -662,17 +728,27 @@ mod tests {
             Ok(())
         }
 
-        fn stage_and_commit(&self, paths: &[&str], message: &str) -> Result<bool, ReleaseError> {
+        fn stage_and_commit(
+            &self,
+            paths: &[&str],
+            message: &str,
+        ) -> Result<Option<String>, ReleaseError> {
             self.committed.lock().unwrap().push((
                 paths.iter().map(|s| s.to_string()).collect(),
                 message.to_string(),
             ));
-            Ok(true)
+            // Mirror real git: the release commit becomes the new HEAD.
+            self.set_head(&self.commit_sha);
+            Ok(Some(self.commit_sha.clone()))
         }
 
-        fn push(&self) -> Result<(), ReleaseError> {
-            *self.push_count.lock().unwrap() += 1;
-            Ok(())
+        fn push(&self, sha: &str) -> Result<PushOutcome, ReleaseError> {
+            self.pushed_shas.lock().unwrap().push(sha.to_string());
+            if self.reject_push {
+                Ok(PushOutcome::Rejected)
+            } else {
+                Ok(PushOutcome::Pushed)
+            }
         }
 
         fn tag_exists(&self, name: &str) -> Result<bool, ReleaseError> {
@@ -680,7 +756,8 @@ mod tests {
                 .created_tags
                 .lock()
                 .unwrap()
-                .contains(&name.to_string()))
+                .iter()
+                .any(|(n, _)| n == name))
         }
 
         fn remote_tag_exists(&self, name: &str) -> Result<bool, ReleaseError> {
@@ -693,9 +770,13 @@ mod tests {
 
         fn commits_between(
             &self,
-            _from: Option<&str>,
-            _to: &str,
+            from: Option<&str>,
+            to: &str,
         ) -> Result<Vec<Commit>, ReleaseError> {
+            self.between_calls
+                .lock()
+                .unwrap()
+                .push((from.map(|s| s.to_string()), to.to_string()));
             Ok(self.commits.clone())
         }
 
@@ -703,11 +784,11 @@ mod tests {
             Ok("2026-01-01".into())
         }
 
-        fn force_create_tag(&self, name: &str) -> Result<(), ReleaseError> {
+        fn force_create_tag(&self, name: &str, target: &str) -> Result<(), ReleaseError> {
             self.force_created_tags
                 .lock()
                 .unwrap()
-                .push(name.to_string());
+                .push((name.to_string(), target.to_string()));
             Ok(())
         }
 
@@ -720,12 +801,33 @@ mod tests {
         }
 
         fn head_sha(&self) -> Result<String, ReleaseError> {
-            Ok(self.head.clone())
+            Ok(self.head.lock().unwrap().clone())
+        }
+
+        fn resolve_ref(&self, ref_name: &str) -> Result<String, ReleaseError> {
+            // Full SHAs resolve to themselves; anything else acts like HEAD.
+            if ref_name.len() == 40 && ref_name.chars().all(|c| c.is_ascii_hexdigit()) {
+                Ok(ref_name.to_string())
+            } else {
+                self.head_sha()
+            }
         }
 
         fn commits_since_in_path(
             &self,
             _from: Option<&str>,
+            _path: &str,
+        ) -> Result<Vec<Commit>, ReleaseError> {
+            Ok(self
+                .path_commits
+                .clone()
+                .unwrap_or_else(|| self.commits.clone()))
+        }
+
+        fn commits_between_in_path(
+            &self,
+            _from: Option<&str>,
+            _to: &str,
             _path: &str,
         ) -> Result<Vec<Commit>, ReleaseError> {
             Ok(self
@@ -897,6 +999,7 @@ mod tests {
             config,
             prerelease_id: None,
             draft: false,
+            base_ref: None,
         }
     }
 
@@ -1100,7 +1203,11 @@ mod tests {
         let plan = s.plan().unwrap();
         s.execute(&plan, false).unwrap();
 
-        assert_eq!(*s.git.created_tags.lock().unwrap(), vec!["v0.1.0"]);
+        let created = s.git.created_tags.lock().unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].0, "v0.1.0");
+        // No release commit in test_config → the tag targets the locked base.
+        assert_eq!(created[0].1, plan.base_sha);
         assert_eq!(*s.git.pushed_tags.lock().unwrap(), vec!["v0.1.0"]);
     }
 
@@ -1147,8 +1254,11 @@ mod tests {
         );
         assert!(committed[0].1.contains("chore(release): v0.1.0"));
 
-        // Verify tag was created after commit
-        assert_eq!(*s.git.created_tags.lock().unwrap(), vec!["v0.1.0"]);
+        // Verify tag was created after commit, targeting the release commit.
+        let created = s.git.created_tags.lock().unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].0, "v0.1.0");
+        assert_eq!(created[0].1, s.git.commit_sha);
     }
 
     #[test]
@@ -1161,7 +1271,7 @@ mod tests {
             .created_tags
             .lock()
             .unwrap()
-            .push("v0.1.0".to_string());
+            .push(("v0.1.0".to_string(), "e".repeat(40)));
 
         s.execute(&plan, false).unwrap();
 
@@ -1212,7 +1322,7 @@ mod tests {
 
         // Commit push should only happen once — PushCommit::is_complete sees
         // the remote tag and correctly skips the second run.
-        assert_eq!(*s.git.push_count.lock().unwrap(), 1);
+        assert_eq!(s.git.pushed_shas.lock().unwrap().len(), 1);
 
         // test_config has no real version files (dummy skipped on bump), so
         // bumped_files is empty and stage_and_commit is never called.
@@ -1524,7 +1634,11 @@ mod tests {
 
         s.execute(&plan, false).unwrap();
 
-        assert_eq!(*s.git.force_created_tags.lock().unwrap(), vec!["v1"]);
+        let forced = s.git.force_created_tags.lock().unwrap();
+        assert_eq!(forced.len(), 1);
+        assert_eq!(forced[0].0, "v1");
+        // No release commit in this config → floating tag targets the base.
+        assert_eq!(forced[0].1, plan.base_sha);
         assert_eq!(*s.git.force_pushed_tags.lock().unwrap(), vec!["v1"]);
     }
 
@@ -1654,7 +1768,9 @@ mod tests {
         let plan = s.plan().unwrap();
         s.execute(&plan, false).unwrap();
 
-        assert_eq!(*s.git.created_tags.lock().unwrap(), vec!["v0.1.0"]);
+        let created = s.git.created_tags.lock().unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].0, "v0.1.0");
     }
 
     // --- manifest/reconciliation tests removed: no manifest, no reconciler
@@ -1762,9 +1878,126 @@ mod tests {
             version: Version::new(1, 2, 3),
             sha: "a".repeat(40),
         };
-        let mut s = make_strategy(vec![tag], vec![], Config::default());
-        s.git.head = "a".repeat(40);
+        let s = make_strategy(vec![tag], vec![], Config::default());
+        s.git.set_head(&"a".repeat(40));
         let err = s.plan().unwrap_err();
         assert!(matches!(err, ReleaseError::NoCommits { .. }));
+    }
+
+    // --- base-ref lock tests ---
+
+    /// The plan locks HEAD at plan time and bounds the commit walk by that
+    /// SHA — never by a floating `HEAD`.
+    #[test]
+    fn plan_locks_base_sha_and_bounds_commit_walk() {
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], test_config());
+        let head = s.git.head_sha().unwrap();
+
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.base_sha, head);
+
+        let calls = s.git.between_calls.lock().unwrap();
+        assert!(
+            !calls.is_empty(),
+            "plan must walk commits via a bounded range"
+        );
+        assert!(
+            calls.iter().all(|(_, to)| *to == head),
+            "every commit walk must be bounded by the locked base, got {calls:?}"
+        );
+    }
+
+    /// An explicit base ref overrides HEAD as the locked commit.
+    #[test]
+    fn plan_resolves_explicit_base_ref() {
+        let pinned = "b".repeat(40);
+        let mut s = make_strategy(vec![], vec![raw_commit("feat: something")], test_config());
+        s.base_ref = Some(pinned.clone());
+
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.base_sha, pinned);
+    }
+
+    /// If the checkout moves between plan and execute, the release must not
+    /// proceed — the working tree no longer matches the planned commit.
+    #[test]
+    fn execute_fails_when_checkout_moved_after_plan() {
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], test_config());
+        let plan = s.plan().unwrap();
+
+        s.git.set_head(&"9".repeat(40));
+
+        let err = s.execute(&plan, false).unwrap_err();
+        assert!(matches!(err, ReleaseError::BaseRefMoved { .. }));
+        assert!(s.git.created_tags.lock().unwrap().is_empty());
+        assert!(s.git.pushed_tags.lock().unwrap().is_empty());
+    }
+
+    /// Same guard for prepare: version files must be bumped on the planned
+    /// commit's tree.
+    #[test]
+    fn prepare_fails_when_checkout_moved_after_plan() {
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], test_config());
+        let plan = s.plan().unwrap();
+
+        s.git.set_head(&"9".repeat(40));
+
+        let err = s.prepare(&plan, false).unwrap_err();
+        assert!(matches!(err, ReleaseError::BaseRefMoved { .. }));
+    }
+
+    /// The branch push carries exactly the release commit's SHA — commits
+    /// landing on the branch afterwards are never swept into the push.
+    #[test]
+    fn execute_pushes_exact_release_sha() {
+        let dir = tempfile::tempdir().unwrap();
+        let cargo_path = dir.path().join("Cargo.toml");
+        std::fs::write(
+            &cargo_path,
+            "[package]\nname = \"test\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                version_files: vec![cargo_path.to_str().unwrap().to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
+        let plan = s.plan().unwrap();
+        s.execute(&plan, false).unwrap();
+
+        // The release commit was made, so tag and push target its SHA.
+        assert_eq!(
+            *s.git.pushed_shas.lock().unwrap(),
+            vec![s.git.commit_sha.clone()]
+        );
+        let created = s.git.created_tags.lock().unwrap();
+        assert_eq!(created[0].1, s.git.commit_sha);
+    }
+
+    /// A non-fast-forward rejection of the branch push (queued releases on a
+    /// busy trunk) must not abort the release: the tag still ships, pointing
+    /// at the locked commit.
+    #[test]
+    fn execute_continues_when_branch_push_rejected() {
+        let mut s = make_strategy(vec![], vec![raw_commit("feat: something")], test_config());
+        s.git.reject_push = true;
+
+        let plan = s.plan().unwrap();
+        s.execute(&plan, false).unwrap();
+
+        // Branch push was attempted and rejected, but tag + release shipped.
+        assert_eq!(s.git.pushed_shas.lock().unwrap().len(), 1);
+        assert_eq!(*s.git.pushed_tags.lock().unwrap(), vec!["v0.1.0"]);
+        assert!(s.vcs.release_exists("v0.1.0").unwrap());
     }
 }

@@ -35,6 +35,7 @@ metadata:
 | `sr release --draft` | Draft GitHub release |
 | `sr release --artifacts <path>` | Upload a literal path as a release asset |
 | `sr release --stage-files <path>` | Stage extra file in release commit |
+| `sr release --base-ref <ref>` | Lock the release to a specific commit (also on `plan` / `prepare`; env fallback `SR_BASE_REF`) |
 | `sr prepare --prerelease <id>` | Bump to a prerelease version |
 | `sr config --resolved` | Show config with defaults applied |
 | `sr init <example>` | Scaffold from bundled example (`sr init --list`) |
@@ -51,6 +52,8 @@ Typed. `publish: { type: cargo | npm | docker | pypi | go | custom }`. Built-ins
 
 ## Release execution order
 
+The base commit is resolved once at plan time (HEAD, or `--base-ref`) and the whole release is locked to it: commit walks, the tag target, and the branch push all use that SHA — never the moving branch tip. Queued CI runs each release their own commit; if the remote branch already advanced, the branch push is skipped with a warning and the release still completes.
+
 1. Parse commits → determine bump
 2. Bump version files (every package's `version_files`) + write changelog
 3. Validate artifacts — every `artifacts` path must exist on disk
@@ -66,6 +69,7 @@ Every stage has a strict `is_complete` check. Re-running on a converged release 
 ## Environment
 
 - `GH_TOKEN` / `GITHUB_TOKEN` — required for GitHub releases
+- `SR_BASE_REF` — fallback for `--base-ref` (commit the release is locked to)
 - `SR_VERSION` / `SR_TAG` — set when `publish: custom` commands run
 - Registry tokens (`CARGO_REGISTRY_TOKEN`, `NODE_AUTH_TOKEN`, `UV_PUBLISH_TOKEN`, etc.) — consumed by the typed publishers
 

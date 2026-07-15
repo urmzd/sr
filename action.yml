@@ -49,6 +49,14 @@ inputs:
   draft:
     description: "Create GitHub release as a draft. Overrides the channel's draft setting"
     default: "false"
+  base-ref:
+    description: >
+      Commit to release (ref or SHA). Locked at plan time so the release
+      tags exactly this commit even if the branch has moved on — with
+      queued workflow runs, each run releases its own commit. Defaults to
+      the commit that triggered the workflow. Pass empty string to lock to
+      HEAD of the checkout instead.
+    default: ${{ github.sha }}
   sha256:
     description: "Expected SHA256 checksum of the sr binary"
     default: ""
@@ -145,6 +153,7 @@ runs:
         SR_DRAFT: ${{ inputs.draft }}
         SR_GIT_USER_NAME: ${{ inputs.git-user-name }}
         SR_GIT_USER_EMAIL: ${{ inputs.git-user-email }}
+        SR_BASE_REF: ${{ inputs.base-ref }}
       run: |
         set -uo pipefail
 
@@ -208,6 +217,12 @@ runs:
             exit 1
             ;;
         esac
+
+        # Lock every verb to the workflow's commit: queued runs each release
+        # their own SHA, never whatever the branch tip has become.
+        if [ -n "$SR_BASE_REF" ]; then
+          ARGS+=(--base-ref "$SR_BASE_REF")
+        fi
 
         # Capture sr's real exit code. A pipeline inside $(…) hides the
         # left-hand status behind the subshell, so run sr to a temp file

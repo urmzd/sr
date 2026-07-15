@@ -33,8 +33,12 @@ impl Stage for LocalTag {
             return Ok(());
         }
         let tag_message = format!("{}\n\n{}", ctx.plan.tag_name, ctx.changelog_body);
-        ctx.git
-            .create_tag(&ctx.plan.tag_name, &tag_message, ctx.sign_tags)?;
+        ctx.git.create_tag(
+            &ctx.plan.tag_name,
+            &tag_message,
+            ctx.sign_tags,
+            &ctx.release_sha,
+        )?;
         Ok(())
     }
 }
@@ -62,7 +66,7 @@ impl Stage for FloatingTag {
             return Ok(());
         }
         if let Some(ref floating) = ctx.plan.floating_tag_name {
-            ctx.git.force_create_tag(floating)?;
+            ctx.git.force_create_tag(floating, &ctx.release_sha)?;
             ctx.git.force_push_tag(floating)?;
         }
         Ok(())
