@@ -1,5 +1,14 @@
 # Changelog
 
+## 9.0.0 (2026-07-31)
+
+### Breaking
+
+- **version-files**: sync lock files and internal deps offline (#30) ([d0573ee](https://github.com/urmzd/sr/commit/d0573ee187a71a0671a968a636f64db322132c62))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v8.1.0...v9.0.0)
+
+
 ## 8.1.0 (2026-07-15)
 
 ### Features
