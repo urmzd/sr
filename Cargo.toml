@@ -32,7 +32,11 @@ clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 
 # Serialization (JSON)
-serde_json = "1"
+# `preserve_order` keeps JSON keys in their original order on rewrite. Without
+# it every package.json and package-lock.json sr touches comes back
+# alphabetized, which is a spurious diff in the release commit and makes the
+# lock differ from what npm itself writes.
+serde_json = { version = "1", features = ["preserve_order"] }
 toml_edit = "0.22"
 
 # Error handling

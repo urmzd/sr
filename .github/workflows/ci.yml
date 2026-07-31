@@ -3,6 +3,9 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  schedule:
+    # Weekly: catch an ecosystem lock format moving under sr's offline rewrites.
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
@@ -70,6 +73,30 @@ jobs:
         with:
           workspaces: sr
       - run: cargo test --workspace
+        working-directory: sr
+
+  conformance:
+    name: Lock conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: sr
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sr
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - run: pipx install poetry
+      # sr rewrites Cargo.lock / uv.lock / poetry.lock / package-lock.json
+      # offline. These tests re-lock with each real tool and demand a
+      # byte-identical result, so a format change surfaces here rather than in
+      # someone's release commit. On failure: re-verify the rewrite in
+      # version_files.rs and update the matching *_LOCK_MAX_VERSION.
+      - run: cargo test -p sr-core --test lock_conformance -- --ignored --nocapture
         working-directory: sr
 
   embed:

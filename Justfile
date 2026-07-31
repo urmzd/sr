@@ -16,6 +16,11 @@ run *ARGS:
 test:
     cargo test --workspace
 
+# Round-trip sr's offline lock rewrites against the real resolvers.
+# Needs cargo/uv/poetry/npm on PATH plus a network; missing tools skip.
+conformance:
+    cargo test -p sr-core --test lock_conformance -- --ignored --nocapture
+
 lint:
     cargo clippy --workspace -- -D warnings
 

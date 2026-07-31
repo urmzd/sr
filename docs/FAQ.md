@@ -60,6 +60,27 @@ Run `sr prepare` **before** your build step so the bumped manifest is on disk wh
 
 The one escape hatch is `publish: custom`, which takes a shell command for registries without a built-in publisher (helm, private Maven, etc.).
 
+### Does updating lock files need a network resolve?
+
+No. After bumping the manifests, sr rewrites the affected entries in `Cargo.lock`, `uv.lock`, `poetry.lock` and `package-lock.json` in place — as TOML and JSON, never by invoking a resolver — then stages the lockfile in the release commit. It never shells out to `cargo update`, `uv lock`, `poetry lock` or `npm install`, so the release job needs no registry access and no repo needs a hook to keep its lockfile in sync.
+
+Only locally-sourced entries are touched:
+
+| Lock | Entries rewritten | Left alone |
+|---|---|---|
+| `Cargo.lock` | `[[package]]` with no `source` | anything with a `source` (registry deps) |
+| `uv.lock` | `[[package]]` whose `source` is `editable`, `virtual`, or `directory` | `registry` sources |
+| `poetry.lock` | `[[package]]` with `[package.source] type = "directory"` | registry and git sources; `content-hash` covers declared specs, not resolved versions |
+| `package-lock.json` | the root `version`, plus `packages` entries naming a workspace member | registry entries, integrity hashes, `link: true` pointers |
+
+`pnpm-lock.yaml` and `yarn.lock` need no sync at all: pnpm records workspace deps as `link:../core` and yarn omits members entirely, so neither stores a member version that a bump could invalidate.
+
+Intra-workspace pins don't go stale either, but each ecosystem gets there differently. uv drops the version specifier for anything resolved through `[tool.uv.sources]` with `workspace = true`, so nothing needs rewriting. Cargo and npm do enforce the requirement, so sr retargets it: a Cargo path dep carrying `{ path = ..., version = ... }` moves to the new version, and an npm sibling range moves from `^1.0.0` to `^2.0.0`. Ranges that stay satisfied (`>=1.0.0`), wildcards, and protocol specs (`workspace:*`, `file:../core`) are deliberately left alone.
+
+Because this reproduces a derived file, each rewrite is pinned to the format it was verified against — `Cargo.lock` v4, `uv.lock` v1 (revision 2), `poetry.lock` lock-version 2.x, `package-lock.json` v3. A newer structural version is refused outright rather than half-edited, because a partially-updated lock in a release commit is worse than a failed release.
+
+Those pins are held honest by a conformance suite (`just conformance`, also run weekly in CI) that builds a fixture, locks it with the real tool, bumps it with sr, re-locks, and requires the files be byte-identical. All four ecosystems pass, including a uv workspace with registry dependencies and environment markers.
+
 ### Does sr support cross-compilation?
 
 Not directly. Run your matrix in CI between `sr prepare` and `sr release`. Every build job downloads the prepared manifests (via `actions/upload-artifact` + `download-artifact`), builds for its target platform with the correct version embedded, and uploads its binary. The release job then downloads everything and runs `sr release` to tag + upload. See [examples/ci/cargo-multi-platform.yml](../examples/ci/cargo-multi-platform.yml).
