@@ -26,7 +26,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
         id: sr
         with:
           mode: prepare
@@ -104,6 +104,6 @@ jobs:
           pattern: binary-*
           merge-multiple: true
 
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

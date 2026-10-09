@@ -11,6 +11,24 @@
 | **7.x** | Config redesign | Entire config structure rewritten; 6 top-level sections; MCP server removed; agentspec removed; file snapshot/rollback removed |
 | **7.1** | Build stage + roll-forward recovery | New `hooks.build` phase runs after bump before tag; declared artifacts validated before tagging; `sr-manifest.json` proves completion; idempotent uploads; reconciliation warns (never blocks); `--force` flag removed — recovery is push a new commit |
 | **8.x** | Reconciler model + typed publishers + three verbs | `plan` / `prepare` / `release`; typed publishers (cargo/npm/docker/pypi/go/custom); workspace-aware publishes; shell hooks removed (builds live in CI); `sr-manifest.json` removed; monorepos collapse to one global version; literal paths only (no globs) |
+| **9.x** | Offline lock sync | Lock files and intra-workspace dependency versions are rewritten on every bump; no action input or output changes |
+
+---
+
+## Migrating from 8.x to 9.x (breaking)
+
+Change the action pin from `urmzd/sr@v8` to `urmzd/sr@v9`. Action inputs, action outputs, CLI verbs and the `sr.yaml` schema are unchanged.
+
+```yaml
+- uses: urmzd/sr@v9
+```
+
+**Lock sync is now mandatory.** When sr bumps a manifest, it also rewrites the matching lock file in the same release commit: `Cargo.lock`, `uv.lock`, `poetry.lock` and `package-lock.json`. pnpm and yarn locks need no change. Intra-workspace requirements also follow the bump: Cargo path deps with a `version`, and npm sibling ranges such as `^1.0.0`.
+
+What to check:
+
+- If your workflow ran `cargo update`, `npm install`, `uv lock` or `poetry lock` after `sr prepare` only to refresh versions, remove that step.
+- The rewrite is offline and pinned to known lock format versions. If a lock uses a newer format than sr supports, the release fails instead of committing a partly updated lock. Upgrade sr, or relock with an older tool.
 
 ---
 
