@@ -233,27 +233,17 @@ runs:
         set +e
         sr "${ARGS[@]}" >"$TMP_OUT"
         EXIT_CODE=$?
-        set -e
 
         if [ "$EXIT_CODE" -eq 0 ]; then
-          # Compact the JSON onto a single line so it's safe to embed in
-          # GITHUB_OUTPUT and to pipe back into jq for field extraction.
-          JSON_OUTPUT=$(jq -c . <"$TMP_OUT")
-          {
-            echo "json<<__SR_EOF__"
-            echo "$JSON_OUTPUT"
-            echo "__SR_EOF__"
-          } >> "$GITHUB_OUTPUT"
-          echo "version=$(echo "$JSON_OUTPUT" | jq -r '.version // ""')" >> "$GITHUB_OUTPUT"
-          echo "previous_version=$(echo "$JSON_OUTPUT" | jq -r '.previous_version // ""')" >> "$GITHUB_OUTPUT"
-          echo "tag=$(echo "$JSON_OUTPUT" | jq -r '.tag // .tag_name // ""')" >> "$GITHUB_OUTPUT"
-          echo "bump=$(echo "$JSON_OUTPUT" | jq -r '.bump // ""')" >> "$GITHUB_OUTPUT"
-          echo "floating_tag=$(echo "$JSON_OUTPUT" | jq -r '.floating_tag // ""')" >> "$GITHUB_OUTPUT"
-          echo "commit_count=$(echo "$JSON_OUTPUT" | jq -r '.commit_count // 0')" >> "$GITHUB_OUTPUT"
-          if [ "$MODE" = "release" ]; then
-            echo "released=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "released=false" >> "$GITHUB_OUTPUT"
+          # sr succeeded: never fail the step on output parsing. The script
+          # falls back to the last JSON object, then to mode-only outputs.
+          if ! bash "$GITHUB_ACTION_PATH/scripts/action-outputs.sh" "$MODE" "$TMP_OUT"; then
+            echo "::warning::Could not set outputs from sr's result; sr itself succeeded."
+            if [ "$MODE" = "release" ]; then
+              echo "released=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "released=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
         elif [ "$EXIT_CODE" -eq 2 ]; then
           echo "::notice::No releasable changes found"
