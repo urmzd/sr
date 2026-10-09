@@ -87,7 +87,7 @@ The installer automatically adds `~/.local/bin` to your `PATH` in your shell pro
 ### GitHub Action (recommended)
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -109,13 +109,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
 ```
 
 Plan-only on pull requests (preview the next version without cutting a release):
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
   with:
     mode: plan
 ```
@@ -123,7 +123,7 @@ Plan-only on pull requests (preview the next version without cutting a release):
 Use outputs in subsequent steps:
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
   id: sr
 - if: steps.sr.outputs.released == 'true'
   run: echo "Released ${{ steps.sr.outputs.version }}"
@@ -132,7 +132,7 @@ Use outputs in subsequent steps:
 Verify the downloaded sr binary with a SHA256 checksum:
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
   with:
     sha256: "abc123..."
 ```
@@ -163,7 +163,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
 ```
 
 #### Inputs
@@ -313,7 +313,7 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
         with:
           github-token: ${{ steps.app-token.outputs.token }}
 ```
@@ -335,7 +335,7 @@ sr does not run user shell commands. Artifact builds happen in CI between `sr pr
 For repos where `cargo publish` / `npm publish` builds and uploads internally, one verb is enough:
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
 ```
 
 ### Multi-platform binaries (prepare → build matrix → release)
@@ -350,7 +350,7 @@ jobs:
       version: ${{ steps.sr.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
         id: sr
         with:
           mode: prepare
@@ -383,7 +383,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: .
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
 ```
 
 Full worked examples per ecosystem live in [`examples/ci/`](examples/ci/).

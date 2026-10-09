@@ -21,6 +21,6 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org/"
 
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

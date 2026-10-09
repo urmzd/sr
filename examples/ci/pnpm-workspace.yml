@@ -32,12 +32,12 @@ jobs:
       # run it *after* `sr prepare` so the compiled output ships with the
       # bumped version baked in. Pattern:
       #
-      #   - uses: urmzd/sr@v8
+      #   - uses: urmzd/sr@v9
       #     with: { mode: prepare }
       #   - run: pnpm -r build
-      #   - uses: urmzd/sr@v8
+      #   - uses: urmzd/sr@v9
       #
       # For a simple JS-only workspace, skip the split:
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
