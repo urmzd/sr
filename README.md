@@ -429,7 +429,7 @@ All three verbs emit the same flat JSON to stdout on success:
 }
 ```
 
-`sr plan` additionally includes a `resources` array (Terraform-style resource diff). Diagnostic messages go to stderr; stdout is always clean JSON (or empty on exit code 2, "no releasable changes").
+`sr plan` additionally includes a `resources` array (Terraform-style resource diff). Diagnostic messages and publisher output (`npm publish`, `cargo publish`, custom commands) go to stderr; stdout is always clean JSON (or empty on exit code 2, "no releasable changes").
 
 ## CLI Reference
 
