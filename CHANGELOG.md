@@ -1,5 +1,14 @@
 # Changelog
 
+## 9.0.1 (2026-10-09)
+
+### Bug Fixes
+
+- **release**: keep publisher output off stdout so action JSON parsing works (#32) ([72fcfd0](https://github.com/urmzd/sr/commit/72fcfd0c42a65a597632a5ca15c2a182903b0286))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v9.0.0...v9.0.1)
+
+
 ## 9.0.0 (2026-07-31)
 
 ### Breaking
