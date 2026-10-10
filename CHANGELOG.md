@@ -1,5 +1,14 @@
 # Changelog
 
+## 9.0.2 (2026-10-10)
+
+### Bug Fixes
+
+- **release**: resume a tagged release whose publish or upload never finished (#34) ([3b8f4b6](https://github.com/urmzd/sr/commit/3b8f4b625d8b37c1b09f9f00a80be548009adb77))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v9.0.1...v9.0.2)
+
+
 ## 9.0.1 (2026-10-09)
 
 ### Bug Fixes
