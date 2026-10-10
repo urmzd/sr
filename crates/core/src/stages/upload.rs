@@ -11,13 +11,13 @@ use std::path::Path;
 
 use super::{Stage, StageContext};
 use crate::error::ReleaseError;
-use crate::release::{partition_paths, resolve_paths};
+use crate::release::resolve_paths;
 
 pub struct UploadArtifacts;
 
 impl UploadArtifacts {
-    /// Compute (files_to_upload, files_to_skip) by diffing resolved local
-    /// paths against the set of asset basenames already on the release.
+    /// Compute (files_to_upload, files_to_skip) by diffing declared paths
+    /// against the set of asset basenames already on the release.
     fn partition<'a>(
         resolved: &'a [String],
         existing: &HashSet<String>,
@@ -25,11 +25,7 @@ impl UploadArtifacts {
         let mut to_upload = Vec::new();
         let mut to_skip = Vec::new();
         for path in resolved {
-            let basename = Path::new(path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(path.as_str());
-            if existing.contains(basename) {
+            if existing.contains(basename(path)) {
                 to_skip.push(path.as_str());
             } else {
                 to_upload.push(path.as_str());
@@ -47,49 +43,19 @@ impl Stage for UploadArtifacts {
     /// Converged when every declared artifact is already attached to the
     /// release as an asset. Reconciler contract: read actual state (the
     /// release's asset list), compare to desired (declared paths, by
-    /// basename), noop when they match.
+    /// basename), noop when they match. Local files are not consulted: a
+    /// release that already carries every asset is complete whether or not
+    /// the build output is still on disk.
     fn is_complete(&self, ctx: &StageContext<'_>) -> Result<bool, ReleaseError> {
         if ctx.dry_run {
             return Ok(false);
         }
-        let declared = ctx.config.all_artifacts();
-        if declared.is_empty() {
-            return Ok(true);
-        }
-        let (existing_on_disk, missing_on_disk) = partition_paths(&declared);
-        if !missing_on_disk.is_empty() {
-            // Files declared but not yet built — not complete.
-            return Ok(false);
-        }
-        let existing_on_release: HashSet<String> = ctx
-            .vcs
-            .list_assets(&ctx.plan.tag_name)?
-            .into_iter()
-            .collect();
-        let all_present = existing_on_disk.iter().all(|p| {
-            let basename = Path::new(p)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(p.as_str());
-            existing_on_release.contains(basename)
-        });
-        Ok(all_present)
+        Ok(missing_from_release(ctx)?.is_empty())
     }
 
     fn run(&self, ctx: &mut StageContext<'_>) -> Result<(), ReleaseError> {
         let declared = ctx.config.all_artifacts();
         if declared.is_empty() {
-            return Ok(());
-        }
-
-        // Literal-path resolution: every declared file must exist on disk.
-        let resolved = resolve_paths(&declared).map_err(ReleaseError::Vcs)?;
-
-        if ctx.dry_run {
-            eprintln!("[dry-run] Would upload {} artifact(s):", resolved.len());
-            for f in &resolved {
-                eprintln!("[dry-run]   {f}");
-            }
             return Ok(());
         }
 
@@ -99,26 +65,60 @@ impl Stage for UploadArtifacts {
             .into_iter()
             .collect();
 
-        let (to_upload, to_skip) = Self::partition(&resolved, &existing);
+        let (to_upload, to_skip) = Self::partition(&declared, &existing);
 
-        for skipped in &to_skip {
-            let basename = Path::new(skipped)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(skipped);
-            eprintln!("skipping {basename} (already uploaded)");
+        // Literal-path resolution: every file still to upload must exist on
+        // disk. Assets already on the release need no local copy.
+        let to_upload: Vec<String> = to_upload.into_iter().map(String::from).collect();
+        let resolved = resolve_paths(&to_upload).map_err(ReleaseError::Vcs)?;
+
+        if ctx.dry_run {
+            eprintln!("[dry-run] Would upload {} artifact(s):", resolved.len());
+            for f in &resolved {
+                eprintln!("[dry-run]   {f}");
+            }
+            return Ok(());
         }
 
-        if !to_upload.is_empty() {
-            ctx.vcs.upload_assets(&ctx.plan.tag_name, &to_upload)?;
+        for skipped in &to_skip {
+            eprintln!("skipping {} (already uploaded)", basename(skipped));
+        }
+
+        if !resolved.is_empty() {
+            let files: Vec<&str> = resolved.iter().map(String::as_str).collect();
+            ctx.vcs.upload_assets(&ctx.plan.tag_name, &files)?;
             eprintln!(
                 "Uploaded {} artifact(s) to {}",
-                to_upload.len(),
+                files.len(),
                 ctx.plan.tag_name
             );
         }
         Ok(())
     }
+}
+
+fn basename(path: &str) -> &str {
+    Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+}
+
+/// Declared artifacts whose basename is not yet an asset on the release.
+pub(crate) fn missing_from_release(ctx: &StageContext<'_>) -> Result<Vec<String>, ReleaseError> {
+    let declared = ctx.config.all_artifacts();
+    if declared.is_empty() {
+        return Ok(declared);
+    }
+    let on_release: HashSet<String> = ctx
+        .vcs
+        .list_assets(&ctx.plan.tag_name)?
+        .into_iter()
+        .collect();
+    Ok(declared
+        .into_iter()
+        .filter(|p| !on_release.contains(basename(p)))
+        .collect())
 }
 
 #[cfg(test)]
