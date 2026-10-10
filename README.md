@@ -471,11 +471,19 @@ sr init --force  # overwrite existing config
 |------|---------|
 | `0` | Success. The planned/released metadata is printed to stdout as JSON. |
 | `1` | Real error — configuration issue, git failure, VCS provider error, publish failure, etc. |
-| `2` | No releasable changes — no new commits or no releasable commit types since the last tag. |
+| `2` | No releasable changes — no new commits or no releasable commit types since the last tag, and the release at that tag is complete. |
 
 ### Recovery from a broken release
 
 The pipeline is idempotent. Re-running `sr release` after any mid-flight failure picks up exactly where it left off — tag created but release object missing? The next run creates the release object and skips tag creation. Assets uploaded but publish failed? The next run skips the upload and retries the publish.
+
+This holds after the version is tagged too. With no new commits `sr release` would normally exit `2`, but when the checkout is the latest tag's commit it first reads that release's actual state: the release object, the declared assets, and each publisher's registry check. Anything missing is completed for the tagged version (no new commit, no new tag) and the run exits `0` with that version's JSON. A complete release still exits `2`.
+
+Three limits, all because sr only resumes what it can observe on the tree that was released:
+
+- The checkout must be the tagged commit. Re-dispatch the workflow on the release branch rather than using "Re-run failed jobs", which checks out the commit from before the release commit.
+- A `custom` publisher needs a `check` command to be retried on its own; without one its state is unknown.
+- Draft releases are skipped, since GitHub cannot look a draft up by tag.
 
 No state files, no local checkpoints. Actual state lives in git + GitHub + registries; sr reads and converges. See [Architecture](#architecture) for the reconciler contract.
 
@@ -1008,6 +1016,8 @@ Not directly. Run your matrix in CI between `sr prepare` and `sr release`. Every
 ### What happens if a release fails mid-flight?
 
 Re-run `sr release`. Every stage has a strict `is_complete` check reading external state (tag exists? release object exists? assets uploaded? package on registry?). The pipeline picks up exactly where it left off. There's no state file to corrupt.
+
+If the failure came after the tag was pushed, run it from the tagged commit (re-dispatch the workflow on the release branch). sr sees there are no new commits, checks the tagged release, and finishes whatever is missing: release object, assets, publish. See [Recovery from a broken release](#recovery-from-a-broken-release) for the limits.
 
 ### Monorepo with one release per package?
 

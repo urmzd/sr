@@ -68,6 +68,21 @@ pub trait ReleaseStrategy: Send + Sync {
     /// Apply the plan: commit + tag + push + create release + upload +
     /// publish. Idempotent at each stage; safe to re-run.
     fn execute(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError>;
+
+    /// Finish a release that was tagged but never completed.
+    ///
+    /// `plan` reports `NoCommits` once a version is tagged, so a release
+    /// that died after tagging (release object, asset upload, or publish
+    /// failed) would otherwise never be picked up again. When the base
+    /// commit is the latest tag's commit, this reads the actual state of
+    /// that release and runs the outstanding stages for the tagged version.
+    /// No new commit or tag is created.
+    ///
+    /// Returns the tagged release's plan when something was outstanding
+    /// (and, unless `dry_run`, has now been done). Returns `None` when the
+    /// base commit is not the latest tag, or that release is already
+    /// complete as far as sr can observe.
+    fn resume(&self, dry_run: bool) -> Result<Option<ReleasePlan>, ReleaseError>;
 }
 
 /// Abstraction over a remote VCS provider (e.g. GitHub, GitLab).
@@ -236,6 +251,95 @@ where
             });
         }
         Ok(())
+    }
+
+    /// Rebuild the plan of the release already tagged at the base commit.
+    ///
+    /// `None` unless the base commit is exactly the commit of the tag `plan`
+    /// measures from: the tree being published must be the tagged tree, so a
+    /// checkout that sits before or after the tag is never resumed.
+    fn tagged_plan(&self) -> Result<Option<ReleasePlan>, ReleaseError> {
+        let base_sha = match &self.base_ref {
+            Some(r) => self.git.resolve_ref(r)?,
+            None => self.git.head_sha()?,
+        };
+
+        // Same reference tag as `plan`: latest stable for a stable release,
+        // latest of any kind for a pre-release.
+        let all_tags = self.git.all_tags(&self.config.git.tag_prefix)?;
+        let latest_any = all_tags.len().checked_sub(1);
+        let idx = if self.prerelease_id.is_some() {
+            latest_any
+        } else {
+            all_tags
+                .iter()
+                .rposition(|t| t.version.pre.is_empty())
+                .or(latest_any)
+        };
+        let Some(idx) = idx else {
+            return Ok(None);
+        };
+        let tag = &all_tags[idx];
+        if tag.sha != base_sha {
+            return Ok(None);
+        }
+
+        // The tag this release was itself measured from.
+        let is_prerelease = !tag.version.pre.is_empty();
+        let earlier = &all_tags[..idx];
+        let previous = if is_prerelease {
+            earlier.last()
+        } else {
+            earlier
+                .iter()
+                .rev()
+                .find(|t| t.version.pre.is_empty())
+                .or(earlier.last())
+        };
+        let from_sha = previous.map(|t| t.sha.as_str());
+
+        let skip_patterns = &self.config.git.skip_patterns;
+        let commits: Vec<ConventionalCommit> = self
+            .git
+            .commits_between(from_sha, &tag.sha)?
+            .iter()
+            .filter(|c| !c.message.starts_with("chore(release):"))
+            .filter(|c| !skip_patterns.iter().any(|p| c.message.contains(p.as_str())))
+            .filter_map(|c| self.parser.parse(c).ok())
+            .collect();
+        let packages = self.build_package_plans(from_sha, &tag.sha, &commits)?;
+
+        // The bump already happened; read it off the two versions.
+        let zero = Version::new(0, 0, 0);
+        let from_version = previous.map(|t| &t.version).unwrap_or(&zero);
+        let bump = if from_version.major != tag.version.major {
+            BumpLevel::Major
+        } else if from_version.minor != tag.version.minor {
+            BumpLevel::Minor
+        } else {
+            BumpLevel::Patch
+        };
+
+        let floating_tag_name = if self.config.git.floating_tag && !is_prerelease {
+            Some(format!(
+                "{}{}",
+                self.config.git.tag_prefix, tag.version.major
+            ))
+        } else {
+            None
+        };
+
+        Ok(Some(ReleasePlan {
+            current_version: previous.map(|t| t.version.clone()),
+            next_version: tag.version.clone(),
+            bump,
+            commits,
+            tag_name: tag.name.clone(),
+            floating_tag_name,
+            prerelease: is_prerelease,
+            base_sha,
+            packages,
+        }))
     }
 
     /// Render the release name from the configured template, or fall back to the tag name.
@@ -567,6 +671,100 @@ where
             eprintln!("Released {}", plan.tag_name);
         }
         Ok(())
+    }
+
+    fn resume(&self, dry_run: bool) -> Result<Option<ReleasePlan>, ReleaseError> {
+        let Some(plan) = self.tagged_plan()? else {
+            return Ok(None);
+        };
+        self.ensure_at_base(&plan)?;
+        let version_str = plan.next_version.to_string();
+        let changelog_body = self.format_changelog(&plan)?;
+        let release_name = self.release_name(&plan);
+
+        let env = release_env(&version_str, &plan.tag_name);
+        let env_refs: Vec<(&str, &str)> =
+            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+        let mut ctx = StageContext {
+            plan: &plan,
+            config: &self.config,
+            git: &self.git,
+            vcs: &self.vcs,
+            changelog_body: &changelog_body,
+            release_name: &release_name,
+            version_str: &version_str,
+            hooks_env: &env_refs,
+            dry_run,
+            sign_tags: self.config.git.sign_tags,
+            draft: self.draft,
+            bumped_files: Vec::new(),
+            release_sha: plan.base_sha.clone(),
+        };
+
+        // Read actual state. Only definite evidence starts a resume, so a
+        // complete release stays a no-op. A draft release is invisible to
+        // the tag lookup: its presence and assets cannot be observed, so it
+        // is left alone rather than risk a duplicate.
+        let release_missing = !self.draft && !self.vcs.release_exists(&plan.tag_name)?;
+        let assets_missing = if self.draft {
+            Vec::new()
+        } else {
+            crate::stages::upload::missing_from_release(&ctx)?
+        };
+        let unpublished: Vec<&str> = self
+            .config
+            .packages
+            .iter()
+            .filter(|p| crate::publish::publish_needed(p, &version_str, &plan.tag_name, &env_refs))
+            .map(|p| p.path.as_str())
+            .collect();
+
+        if !release_missing && assets_missing.is_empty() && unpublished.is_empty() {
+            return Ok(None);
+        }
+
+        let mut outstanding: Vec<String> = Vec::new();
+        if release_missing {
+            outstanding.push("release object".into());
+        }
+        if !assets_missing.is_empty() {
+            outstanding.push(format!("{} asset(s)", assets_missing.len()));
+        }
+        if !unpublished.is_empty() {
+            outstanding.push(format!("publish ({})", unpublished.join(", ")));
+        }
+        eprintln!(
+            "{} is tagged at this commit but incomplete: missing {}. Resuming.",
+            plan.tag_name,
+            outstanding.join(", ")
+        );
+
+        // The tail of the pipeline, from the first stage that can be
+        // outstanding once the tag is on the remote. A missing release
+        // object means the run died before or at release creation, so the
+        // floating tag may not have moved either.
+        let mut stages: Vec<Box<dyn crate::stages::Stage>> = Vec::new();
+        if release_missing {
+            stages.push(Box::new(crate::stages::tag::FloatingTag));
+            stages.push(Box::new(crate::stages::vcs_release::CreateOrUpdateRelease));
+        }
+        if !assets_missing.is_empty() {
+            stages.push(Box::new(crate::stages::upload::UploadArtifacts));
+        }
+        stages.push(Box::new(crate::stages::verify::VerifyRelease));
+        stages.push(Box::new(crate::stages::publish::Publish));
+
+        for stage in stages {
+            if !stage.is_complete(&ctx)? {
+                stage.run(&mut ctx)?;
+            }
+        }
+
+        if !dry_run {
+            eprintln!("Resumed {}", plan.tag_name);
+        }
+        Ok(Some(plan))
     }
 }
 
@@ -1870,7 +2068,8 @@ mod tests {
     }
 
     /// A tag at HEAD with no new commits errors with NoCommits — sr never
-    /// re-releases the same commit.
+    /// re-releases the same commit. `resume` is what finishes that tag's
+    /// release if it was left incomplete.
     #[test]
     fn no_new_commits_at_tag_head_errors() {
         let tag = TagInfo {
@@ -1999,5 +2198,208 @@ mod tests {
         assert_eq!(s.git.pushed_shas.lock().unwrap().len(), 1);
         assert_eq!(*s.git.pushed_tags.lock().unwrap(), vec!["v0.1.0"]);
         assert!(s.vcs.release_exists("v0.1.0").unwrap());
+    }
+
+    // --- resume tests ---
+
+    fn tag_at(version: &str, sha: &str) -> TagInfo {
+        TagInfo {
+            name: format!("v{version}"),
+            version: Version::parse(version).unwrap(),
+            sha: sha.repeat(40),
+        }
+    }
+
+    /// A strategy sitting on `v1.3.0` with no new commits: `plan` reports
+    /// NoCommits, which is where `sr release` hands over to `resume`.
+    fn tagged_strategy(config: Config) -> TestStrategy {
+        let s = make_strategy(
+            vec![tag_at("1.2.3", "a"), tag_at("1.3.0", "b")],
+            vec![],
+            config,
+        );
+        assert!(matches!(
+            s.plan().unwrap_err(),
+            ReleaseError::NoCommits { .. }
+        ));
+        s
+    }
+
+    fn with_release(s: TestStrategy, tag: &str) -> TestStrategy {
+        s.vcs
+            .releases
+            .lock()
+            .unwrap()
+            .push((tag.into(), "notes".into()));
+        s
+    }
+
+    /// Config whose only package publishes through a custom command that
+    /// creates `marker`; `check` (when wanted) reports published once it
+    /// exists.
+    fn publish_config(dir: &std::path::Path, command: &str, check: bool) -> Config {
+        let mut config = test_config();
+        config.packages[0].publish = Some(crate::config::PublishConfig::Custom {
+            command: command.into(),
+            check: check.then(|| "test -f marker".into()),
+            cwd: Some(dir.to_str().unwrap().into()),
+        });
+        config
+    }
+
+    #[test]
+    fn resume_is_noop_for_a_complete_release() {
+        let s = with_release(tagged_strategy(test_config()), "v1.3.0");
+        assert!(s.resume(false).unwrap().is_none());
+        assert!(s.git.force_pushed_tags.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resume_creates_missing_release_object_without_retagging() {
+        let s = tagged_strategy(test_config());
+        let plan = s.resume(false).unwrap().expect("release object is missing");
+
+        // The plan describes the release that is already tagged.
+        assert_eq!(plan.tag_name, "v1.3.0");
+        assert_eq!(plan.next_version, Version::new(1, 3, 0));
+        assert_eq!(plan.current_version, Some(Version::new(1, 2, 3)));
+        assert_eq!(plan.bump, BumpLevel::Minor);
+        assert_eq!(plan.base_sha, "b".repeat(40));
+
+        assert!(s.vcs.release_exists("v1.3.0").unwrap());
+        // The floating tag is caught up; nothing is committed or re-tagged.
+        assert_eq!(
+            *s.git.force_created_tags.lock().unwrap(),
+            vec![("v1".to_string(), "b".repeat(40))]
+        );
+        assert!(s.git.created_tags.lock().unwrap().is_empty());
+        assert!(s.git.pushed_tags.lock().unwrap().is_empty());
+        assert!(s.git.committed.lock().unwrap().is_empty());
+
+        // Converged: a second run has nothing left to do.
+        assert!(s.resume(false).unwrap().is_none());
+    }
+
+    #[test]
+    fn resume_uploads_only_assets_missing_from_the_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("present.tar.gz");
+        let missing = dir.path().join("missing.tar.gz");
+        std::fs::write(&missing, "fake").unwrap();
+
+        let mut config = test_config();
+        config.packages[0].artifacts = vec![
+            present.to_str().unwrap().to_string(),
+            missing.to_str().unwrap().to_string(),
+        ];
+        let s = with_release(tagged_strategy(config), "v1.3.0");
+        // `present` was uploaded by the failed run and is gone from disk.
+        s.vcs.stored_assets.lock().unwrap().push((
+            "v1.3.0".into(),
+            "present.tar.gz".into(),
+            Vec::new(),
+        ));
+
+        s.resume(false).unwrap().expect("an asset is missing");
+
+        assert_eq!(
+            *s.vcs.uploaded_assets.lock().unwrap(),
+            vec![(
+                "v1.3.0".to_string(),
+                vec![missing.to_str().unwrap().to_string()]
+            )]
+        );
+        // The existing release object is not rewritten.
+        assert_eq!(s.vcs.releases.lock().unwrap()[0].1, "notes");
+        assert!(s.resume(false).unwrap().is_none());
+    }
+
+    #[test]
+    fn resume_fails_when_a_missing_asset_is_not_on_disk() {
+        let mut config = test_config();
+        config.packages[0].artifacts = vec!["/definitely/not/here/app.tar.gz".into()];
+        let s = with_release(tagged_strategy(config), "v1.3.0");
+        let err = s.resume(false).unwrap_err();
+        assert!(err.to_string().contains("path does not exist"), "{err}");
+    }
+
+    #[test]
+    fn resume_retries_an_outstanding_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = publish_config(dir.path(), "touch marker", true);
+        let s = with_release(tagged_strategy(config), "v1.3.0");
+
+        s.resume(false).unwrap().expect("publish is outstanding");
+        assert!(dir.path().join("marker").exists());
+
+        assert!(s.resume(false).unwrap().is_none());
+    }
+
+    #[test]
+    fn resume_surfaces_a_publish_that_fails_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = publish_config(dir.path(), "false", true);
+        let s = with_release(tagged_strategy(config), "v1.3.0");
+        assert!(matches!(
+            s.resume(false).unwrap_err(),
+            ReleaseError::Hook(_)
+        ));
+    }
+
+    /// A publisher that cannot report its state is not evidence of an
+    /// incomplete release: its command must not run on every no-op release.
+    #[test]
+    fn resume_ignores_publishers_with_unknown_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = publish_config(dir.path(), "touch marker", false);
+        let s = with_release(tagged_strategy(config), "v1.3.0");
+
+        assert!(s.resume(false).unwrap().is_none());
+        assert!(!dir.path().join("marker").exists());
+    }
+
+    #[test]
+    fn resume_dry_run_reports_but_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = publish_config(dir.path(), "touch marker", true);
+        let s = tagged_strategy(config);
+
+        let plan = s.resume(true).unwrap().expect("release is incomplete");
+        assert_eq!(plan.tag_name, "v1.3.0");
+        assert!(!s.vcs.release_exists("v1.3.0").unwrap());
+        assert!(s.git.force_created_tags.lock().unwrap().is_empty());
+        assert!(!dir.path().join("marker").exists());
+    }
+
+    /// Only the tagged commit itself is resumed: a checkout before or after
+    /// the tag does not hold the tree that was released.
+    #[test]
+    fn resume_requires_the_checkout_to_be_the_tagged_commit() {
+        let s = tagged_strategy(test_config());
+        s.git.set_head(&"c".repeat(40));
+        assert!(s.resume(false).unwrap().is_none());
+        assert!(!s.vcs.release_exists("v1.3.0").unwrap());
+    }
+
+    /// Draft releases cannot be looked up by tag, so their state is unknown
+    /// and resuming would create a duplicate draft on every run.
+    #[test]
+    fn resume_leaves_draft_releases_alone() {
+        let mut s = tagged_strategy(test_config());
+        s.draft = true;
+        assert!(s.resume(false).unwrap().is_none());
+        assert!(s.vcs.releases.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resume_first_release_measures_from_zero() {
+        let s = make_strategy(vec![tag_at("0.1.0", "a")], vec![], test_config());
+        let plan = s.resume(false).unwrap().expect("release object is missing");
+        assert_eq!(plan.current_version, None);
+        assert_eq!(plan.bump, BumpLevel::Minor);
+        assert_eq!(
+            s.git.between_calls.lock().unwrap().last().unwrap(),
+            &(None, "a".repeat(40))
+        );
     }
 }
