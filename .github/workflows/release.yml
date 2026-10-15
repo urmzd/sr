@@ -12,6 +12,8 @@ jobs:
   prepare:
     name: Prepare
     runs-on: ubuntu-latest
+    outputs:
+      should-release: ${{ steps.prepare.outputs.should-release }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -24,10 +26,19 @@ jobs:
         run: cargo install sr-cli --locked
 
       - name: Bump version files (sr prepare)
+        id: prepare
         working-directory: sr
-        run: sr prepare
+        run: |
+          rc=0
+          sr prepare || rc=$?
+          case "$rc" in
+            0) echo "should-release=true" >> "$GITHUB_OUTPUT" ;;
+            2) echo "should-release=false" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$rc" ;;
+          esac
 
       - name: Upload prepared manifest
+        if: steps.prepare.outputs.should-release == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: prepared-manifest
@@ -40,6 +51,7 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     needs: prepare
+    if: needs.prepare.outputs.should-release == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
