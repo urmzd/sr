@@ -1,5 +1,21 @@
 # Changelog
 
+## 9.0.3 (2026-10-15)
+
+### Bug Fixes
+
+- **git**: match exact remote release tag refs (#36) ([b47152e](https://github.com/urmzd/sr/commit/b47152e63fa597af3ee8e5f4e8085d34aea36fac))
+
+### Misc
+
+- **deps**: bump actions/setup-node from 6 to 7 (#31) ([b5db43e](https://github.com/urmzd/sr/commit/b5db43e7903ff042f1643c222e6dbab6de3a02f2))
+- **deps**: bump actions/checkout from 6 to 7 (#28) ([f3b01a9](https://github.com/urmzd/sr/commit/f3b01a9678075e988ffc1bd2de852c3cd92a6c28))
+- **release**: skip builds when prepare has no releasable changes (#35) ([41e93cb](https://github.com/urmzd/sr/commit/41e93cb2566634aed740e52ac8b3c367c9e0e986))
+- **release**: read the sr-releaser key from the release environment (#33) ([6898a61](https://github.com/urmzd/sr/commit/6898a6110b03239a381aa226b6252c7209bf4c80))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v9.0.2...v9.0.3)
+
+
 ## 9.0.2 (2026-10-10)
 
 ### Bug Fixes
