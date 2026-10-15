@@ -87,7 +87,7 @@ The installer automatically adds `~/.local/bin` to your `PATH` in your shell pro
 ### GitHub Action (recommended)
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -109,13 +109,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
 ```
 
 Plan-only on pull requests (preview the next version without cutting a release):
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
   with:
     mode: plan
 ```
@@ -123,7 +123,7 @@ Plan-only on pull requests (preview the next version without cutting a release):
 Use outputs in subsequent steps:
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
   id: sr
 - if: steps.sr.outputs.released == 'true'
   run: echo "Released ${{ steps.sr.outputs.version }}"
@@ -132,7 +132,7 @@ Use outputs in subsequent steps:
 Verify the downloaded sr binary with a SHA256 checksum:
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
   with:
     sha256: "abc123..."
 ```
@@ -163,7 +163,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
 ```
 
 #### Inputs
@@ -313,7 +313,7 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
         with:
           github-token: ${{ steps.app-token.outputs.token }}
 ```
@@ -335,7 +335,7 @@ sr does not run user shell commands. Artifact builds happen in CI between `sr pr
 For repos where `cargo publish` / `npm publish` builds and uploads internally, one verb is enough:
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
 ```
 
 ### Multi-platform binaries (prepare → build matrix → release)
@@ -350,7 +350,7 @@ jobs:
       version: ${{ steps.sr.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
         id: sr
         with:
           mode: prepare
@@ -383,7 +383,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: .
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
 ```
 
 Full worked examples per ecosystem live in [`examples/ci/`](examples/ci/).
@@ -429,7 +429,7 @@ All three verbs emit the same flat JSON to stdout on success:
 }
 ```
 
-`sr plan` additionally includes a `resources` array (Terraform-style resource diff). Diagnostic messages go to stderr; stdout is always clean JSON (or empty on exit code 2, "no releasable changes").
+`sr plan` additionally includes a `resources` array (Terraform-style resource diff). Diagnostic messages and publisher output (`npm publish`, `cargo publish`, custom commands) go to stderr; stdout is always clean JSON (or empty on exit code 2, "no releasable changes").
 
 ## CLI Reference
 
@@ -471,11 +471,19 @@ sr init --force  # overwrite existing config
 |------|---------|
 | `0` | Success. The planned/released metadata is printed to stdout as JSON. |
 | `1` | Real error — configuration issue, git failure, VCS provider error, publish failure, etc. |
-| `2` | No releasable changes — no new commits or no releasable commit types since the last tag. |
+| `2` | No releasable changes — no new commits or no releasable commit types since the last tag, and the release at that tag is complete. |
 
 ### Recovery from a broken release
 
 The pipeline is idempotent. Re-running `sr release` after any mid-flight failure picks up exactly where it left off — tag created but release object missing? The next run creates the release object and skips tag creation. Assets uploaded but publish failed? The next run skips the upload and retries the publish.
+
+This holds after the version is tagged too. With no new commits `sr release` would normally exit `2`, but when the checkout is the latest tag's commit it first reads that release's actual state: the release object, the declared assets, and each publisher's registry check. Anything missing is completed for the tagged version (no new commit, no new tag) and the run exits `0` with that version's JSON. A complete release still exits `2`.
+
+Three limits, all because sr only resumes what it can observe on the tree that was released:
+
+- The checkout must be the tagged commit. Re-dispatch the workflow on the release branch rather than using "Re-run failed jobs", which checks out the commit from before the release commit.
+- A `custom` publisher needs a `check` command to be retried on its own; without one its state is unknown.
+- Draft releases are skipped, since GitHub cannot look a draft up by tag.
 
 No state files, no local checkpoints. Actual state lives in git + GitHub + registries; sr reads and converges. See [Architecture](#architecture) for the reconciler contract.
 
@@ -1008,6 +1016,8 @@ Not directly. Run your matrix in CI between `sr prepare` and `sr release`. Every
 ### What happens if a release fails mid-flight?
 
 Re-run `sr release`. Every stage has a strict `is_complete` check reading external state (tag exists? release object exists? assets uploaded? package on registry?). The pipeline picks up exactly where it left off. There's no state file to corrupt.
+
+If the failure came after the tag was pushed, run it from the tagged commit (re-dispatch the workflow on the release branch). sr sees there are no new commits, checks the tagged release, and finishes whatever is missing: release object, assets, publish. See [Recovery from a broken release](#recovery-from-a-broken-release) for the limits.
 
 ### Monorepo with one release per package?
 

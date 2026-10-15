@@ -110,10 +110,72 @@ pub fn run_package_publish(
     }
 }
 
+/// Whether the registry is known to lack `version` of this package.
+///
+/// Used to decide if an already-tagged release still has publishing to do.
+/// Only a definite `Needed` counts: `Unknown` (no `check` command, registry
+/// unreachable) and check errors are not evidence that anything is missing.
+pub fn publish_needed(
+    package: &PackageConfig,
+    version: &str,
+    tag: &str,
+    env: &[(&str, &str)],
+) -> bool {
+    let Some(cfg) = package.publish.as_ref() else {
+        return false;
+    };
+    let ctx = PublishCtx {
+        package,
+        version,
+        tag,
+        dry_run: true,
+        env,
+    };
+    matches!(publisher_for(cfg).check(&ctx), Ok(PublishState::Needed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{PackageConfig, PublishConfig};
+
+    fn custom(check: Option<&str>) -> PackageConfig {
+        PackageConfig {
+            path: ".".into(),
+            publish: Some(PublishConfig::Custom {
+                command: "true".into(),
+                check: check.map(Into::into),
+                cwd: Some(".".into()),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn publish_needed_only_on_a_definite_check() {
+        // check exits non-zero: the registry lacks the version.
+        assert!(publish_needed(
+            &custom(Some("false")),
+            "1.0.0",
+            "v1.0.0",
+            &[]
+        ));
+        // check exits zero: already published.
+        assert!(!publish_needed(
+            &custom(Some("true")),
+            "1.0.0",
+            "v1.0.0",
+            &[]
+        ));
+        // No check command: state is Unknown, which is not evidence.
+        assert!(!publish_needed(&custom(None), "1.0.0", "v1.0.0", &[]));
+        // No publish config at all.
+        let plain = PackageConfig {
+            path: ".".into(),
+            ..Default::default()
+        };
+        assert!(!publish_needed(&plain, "1.0.0", "v1.0.0", &[]));
+    }
 
     #[test]
     fn not_configured_when_publish_is_none() {

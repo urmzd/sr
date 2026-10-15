@@ -1,5 +1,23 @@
 # Changelog
 
+## 9.0.2 (2026-10-10)
+
+### Bug Fixes
+
+- **release**: resume a tagged release whose publish or upload never finished (#34) ([3b8f4b6](https://github.com/urmzd/sr/commit/3b8f4b625d8b37c1b09f9f00a80be548009adb77))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v9.0.1...v9.0.2)
+
+
+## 9.0.1 (2026-10-09)
+
+### Bug Fixes
+
+- **release**: keep publisher output off stdout so action JSON parsing works (#32) ([72fcfd0](https://github.com/urmzd/sr/commit/72fcfd0c42a65a597632a5ca15c2a182903b0286))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v9.0.0...v9.0.1)
+
+
 ## 9.0.0 (2026-07-31)
 
 ### Breaking

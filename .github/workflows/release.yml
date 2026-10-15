@@ -124,6 +124,7 @@ jobs:
           path: sr/sr-${{ matrix.target }}*
 
   release:
+    environment: release
     name: Release
     needs: build
     runs-on: ubuntu-latest

@@ -660,11 +660,20 @@ fn run() -> anyhow::Result<()> {
                 draft,
                 base_ref.clone(),
             ) {
-                Ok(strategy) => {
-                    let plan = strategy.plan()?;
-                    strategy.execute(&plan, dry_run)?;
-                    plan
-                }
+                Ok(strategy) => match strategy.plan() {
+                    Ok(plan) => {
+                        strategy.execute(&plan, dry_run)?;
+                        plan
+                    }
+                    // Nothing new to release. If this commit is the latest
+                    // tag and that release never finished, finish it
+                    // instead of reporting "no releasable changes".
+                    Err(e @ ReleaseError::NoCommits { .. }) => match strategy.resume(dry_run)? {
+                        Some(plan) => plan,
+                        None => return Err(e.into()),
+                    },
+                    Err(e) => return Err(e.into()),
+                },
                 Err(e) => {
                     if dry_run {
                         eprintln!("warning: {e} (continuing dry-run without GitHub)");

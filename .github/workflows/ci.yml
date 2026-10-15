@@ -75,6 +75,13 @@ jobs:
       - run: cargo test --workspace
         working-directory: sr
 
+  action:
+    name: Action outputs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash scripts/action-outputs.test.sh
+
   conformance:
     name: Lock conformance
     runs-on: ubuntu-latest
