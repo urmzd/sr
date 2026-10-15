@@ -16,6 +16,12 @@ pub enum ReleaseError {
     #[error("git error: {0}")]
     Git(String),
 
+    #[error(
+        "base ref moved: the release was planned at {expected} but HEAD is now {actual}; \
+         re-run to plan against the new commit, or restore the checkout to the planned commit"
+    )]
+    BaseRefMoved { expected: String, actual: String },
+
     #[error("vcs provider error: {0}")]
     Vcs(String),
 

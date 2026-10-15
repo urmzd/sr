@@ -1,5 +1,45 @@
 # Changelog
 
+## 9.0.2 (2026-10-10)
+
+### Bug Fixes
+
+- **release**: resume a tagged release whose publish or upload never finished (#34) ([3b8f4b6](https://github.com/urmzd/sr/commit/3b8f4b625d8b37c1b09f9f00a80be548009adb77))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v9.0.1...v9.0.2)
+
+
+## 9.0.1 (2026-10-09)
+
+### Bug Fixes
+
+- **release**: keep publisher output off stdout so action JSON parsing works (#32) ([72fcfd0](https://github.com/urmzd/sr/commit/72fcfd0c42a65a597632a5ca15c2a182903b0286))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v9.0.0...v9.0.1)
+
+
+## 9.0.0 (2026-07-31)
+
+### Breaking
+
+- **version-files**: sync lock files and internal deps offline (#30) ([d0573ee](https://github.com/urmzd/sr/commit/d0573ee187a71a0671a968a636f64db322132c62))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v8.1.0...v9.0.0)
+
+
+## 8.1.0 (2026-07-15)
+
+### Features
+
+- **release**: lock releases to a base ref commit (#29) ([aab933b](https://github.com/urmzd/sr/commit/aab933bdd90096e656b498093b9bd7eac2f8bc01))
+
+### Misc
+
+- bump GitHub Actions to Node 24 majors and switch app token to client-id ([8edb124](https://github.com/urmzd/sr/commit/8edb124aaf638025d8bfa0d189b28977c616b5ef))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v8.0.9...v8.1.0)
+
+
 ## 8.0.9 (2026-06-03)
 
 ### Bug Fixes

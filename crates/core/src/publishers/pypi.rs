@@ -239,6 +239,8 @@ fn collapse_seps(name: &str, sep: char) -> String {
 fn which_exists(cmd: &str) -> bool {
     std::process::Command::new("sh")
         .args(["-c", &format!("command -v {cmd} >/dev/null 2>&1")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)

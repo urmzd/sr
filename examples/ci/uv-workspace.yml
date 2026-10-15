@@ -20,13 +20,13 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
         with:
           mode: prepare
 
       # uv build reads version from pyproject.toml — which sr just bumped.
       - run: uv build --all
 
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
         env:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}

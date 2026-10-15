@@ -9,7 +9,9 @@ use std::path::Path;
 
 use super::{Stage, StageContext};
 use crate::error::ReleaseError;
-use crate::version_files::{bump_version_file, discover_lock_files, is_supported_version_file};
+use crate::version_files::{
+    bump_version_file, discover_lock_files, is_supported_version_file, sync_lock_files,
+};
 
 pub struct Bump;
 
@@ -68,13 +70,15 @@ impl Stage for Bump {
         }
 
         let mut files_to_stage: Vec<String> = Vec::new();
+        let mut bumped_packages: Vec<String> = Vec::new();
         for (file, strict) in &all_version_files {
             match bump_version_file(Path::new(file), ctx.version_str) {
-                Ok(extra) => {
+                Ok(outcome) => {
                     files_to_stage.push(file.clone());
-                    for extra_path in extra {
+                    for extra_path in outcome.extra_files {
                         files_to_stage.push(extra_path.to_string_lossy().into_owned());
                     }
+                    bumped_packages.extend(outcome.package_names);
                 }
                 Err(e) if !*strict => {
                     eprintln!("warning: {e} — skipping {file}");
@@ -82,6 +86,11 @@ impl Stage for Bump {
                 Err(e) => return Err(e),
             }
         }
+
+        // Sync lock files once every manifest is bumped, so each lock sees the
+        // complete set of packages that moved — an entry can name a package
+        // whose manifest lives in a different part of the tree.
+        sync_lock_files(&files_to_stage, ctx.version_str, &bumped_packages)?;
 
         // Auto-discover and stage lock files associated with bumped manifests.
         for lock_file in discover_lock_files(&files_to_stage) {

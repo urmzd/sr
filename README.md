@@ -87,7 +87,7 @@ The installer automatically adds `~/.local/bin` to your `PATH` in your shell pro
 ### GitHub Action (recommended)
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -109,13 +109,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
 ```
 
 Plan-only on pull requests (preview the next version without cutting a release):
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
   with:
     mode: plan
 ```
@@ -123,7 +123,7 @@ Plan-only on pull requests (preview the next version without cutting a release):
 Use outputs in subsequent steps:
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
   id: sr
 - if: steps.sr.outputs.released == 'true'
   run: echo "Released ${{ steps.sr.outputs.version }}"
@@ -132,7 +132,7 @@ Use outputs in subsequent steps:
 Verify the downloaded sr binary with a SHA256 checksum:
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
   with:
     sha256: "abc123..."
 ```
@@ -163,7 +163,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
 ```
 
 #### Inputs
@@ -181,6 +181,7 @@ jobs:
 | `stage-files` | Additional literal paths to stage in the release commit (space-separated) | `""` |
 | `sign-tags` | Sign tags with GPG/SSH | `false` |
 | `draft` | Create GitHub release as a draft | `false` |
+| `base-ref` | Commit to release (ref or SHA), locked at plan time so queued runs each release their own commit | `${{ github.sha }}` |
 | `sha256` | Expected SHA256 checksum of the sr binary (hex string) | `""` |
 
 #### Outputs
@@ -312,7 +313,7 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
         with:
           github-token: ${{ steps.app-token.outputs.token }}
 ```
@@ -334,7 +335,7 @@ sr does not run user shell commands. Artifact builds happen in CI between `sr pr
 For repos where `cargo publish` / `npm publish` builds and uploads internally, one verb is enough:
 
 ```yaml
-- uses: urmzd/sr@v8
+- uses: urmzd/sr@v9
 ```
 
 ### Multi-platform binaries (prepare → build matrix → release)
@@ -349,7 +350,7 @@ jobs:
       version: ${{ steps.sr.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
         id: sr
         with:
           mode: prepare
@@ -382,7 +383,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: .
-      - uses: urmzd/sr@v8
+      - uses: urmzd/sr@v9
 ```
 
 Full worked examples per ecosystem live in [`examples/ci/`](examples/ci/).
@@ -428,7 +429,7 @@ All three verbs emit the same flat JSON to stdout on success:
 }
 ```
 
-`sr plan` additionally includes a `resources` array (Terraform-style resource diff). Diagnostic messages go to stderr; stdout is always clean JSON (or empty on exit code 2, "no releasable changes").
+`sr plan` additionally includes a `resources` array (Terraform-style resource diff). Diagnostic messages and publisher output (`npm publish`, `cargo publish`, custom commands) go to stderr; stdout is always clean JSON (or empty on exit code 2, "no releasable changes").
 
 ## CLI Reference
 
@@ -457,6 +458,7 @@ sr release --sign-tags  # sign tags with GPG/SSH (git tag -s)
 sr release --draft  # create GitHub release as a draft
 sr release --artifacts dist/app.tar.gz  # upload literal path as release asset
 sr release --stage-files Cargo.lock  # stage additional files in the release commit
+sr release --base-ref "$GITHUB_SHA"  # lock the release to a specific commit
 sr config --resolved  # show config with defaults applied
 sr init pnpm-workspace  # scaffold from a bundled example
 sr init --list  # list available examples
@@ -469,11 +471,19 @@ sr init --force  # overwrite existing config
 |------|---------|
 | `0` | Success. The planned/released metadata is printed to stdout as JSON. |
 | `1` | Real error — configuration issue, git failure, VCS provider error, publish failure, etc. |
-| `2` | No releasable changes — no new commits or no releasable commit types since the last tag. |
+| `2` | No releasable changes — no new commits or no releasable commit types since the last tag, and the release at that tag is complete. |
 
 ### Recovery from a broken release
 
 The pipeline is idempotent. Re-running `sr release` after any mid-flight failure picks up exactly where it left off — tag created but release object missing? The next run creates the release object and skips tag creation. Assets uploaded but publish failed? The next run skips the upload and retries the publish.
+
+This holds after the version is tagged too. With no new commits `sr release` would normally exit `2`, but when the checkout is the latest tag's commit it first reads that release's actual state: the release object, the declared assets, and each publisher's registry check. Anything missing is completed for the tagged version (no new commit, no new tag) and the run exits `0` with that version's JSON. A complete release still exits `2`.
+
+Three limits, all because sr only resumes what it can observe on the tree that was released:
+
+- The checkout must be the tagged commit. Re-dispatch the workflow on the release branch rather than using "Re-run failed jobs", which checks out the commit from before the release commit.
+- A `custom` publisher needs a `check` command to be retried on its own; without one its state is unknown.
+- Draft releases are skipped, since GitHub cannot look a draft up by tag.
 
 No state files, no local checkpoints. Actual state lives in git + GitHub + registries; sr reads and converges. See [Architecture](#architecture) for the reconciler contract.
 
@@ -684,6 +694,8 @@ When bumping a workspace root, `sr` automatically finds and bumps all member man
 | **npm** | `workspaces` array in `package.json` | `workspaces` globs → member `package.json` files (skips members without `version`) |
 | **uv** | `[tool.uv.workspace]` with `members` | `tool.uv.workspace.members` globs → member `pyproject.toml` files (skips members without `version`) |
 
+Lock files and intra-workspace dependency requirements are kept in sync at the same time. `Cargo.lock`, `uv.lock`, `poetry.lock` and `package-lock.json` are rewritten in place and staged in the release commit; Cargo path deps (`{ path = ..., version = ... }`) and npm sibling ranges (`^1.0.0`) are retargeted so a major bump doesn't leave the workspace unresolvable. All of it is plain data editing — no `cargo update`, `uv lock`, `poetry lock` or `npm install`, and no network access. Registry entries and their hashes are untouched. See the [FAQ](docs/FAQ.md#does-updating-lock-files-need-a-network-resolve) for the exact matching rules and the format versions each rewrite is verified against.
+
 For example, a Cargo workspace only needs the root listed:
 
 ```yaml
@@ -700,6 +712,7 @@ packages:
 | `GH_TOKEN` / `GITHUB_TOKEN` | Release | GitHub API token for creating releases and uploading artifacts. Not needed for `--dry-run` |
 | `SR_GIT_USER_NAME` | Release | Fallback git author/committer name. Consulted only when neither `--git-user-name` nor `git.user.name` in `sr.yaml` is set |
 | `SR_GIT_USER_EMAIL` | Release | Fallback git author/committer email. Same precedence as `SR_GIT_USER_NAME` |
+| `SR_BASE_REF` | Plan / Prepare / Release | Fallback for `--base-ref`: the commit the release is locked to. Consulted only when the flag is not given; empty means lock to HEAD at plan time |
 | `SR_VERSION` | Release hooks | The new version string (e.g. `1.2.3`), set for `pre_release` and `post_release` hooks |
 | `SR_TAG` | Release hooks | The new tag name (e.g. `v1.2.3`), set for `pre_release` and `post_release` hooks |
 
@@ -975,6 +988,27 @@ Run `sr prepare` **before** your build step so the bumped manifest is on disk wh
 
 The one escape hatch is `publish: custom`, which takes a shell command for registries without a built-in publisher (helm, private Maven, etc.).
 
+### Does updating lock files need a network resolve?
+
+No. After bumping the manifests, sr rewrites the affected entries in `Cargo.lock`, `uv.lock`, `poetry.lock` and `package-lock.json` in place — as TOML and JSON, never by invoking a resolver — then stages the lockfile in the release commit. It never shells out to `cargo update`, `uv lock`, `poetry lock` or `npm install`, so the release job needs no registry access and no repo needs a hook to keep its lockfile in sync.
+
+Only locally-sourced entries are touched:
+
+| Lock | Entries rewritten | Left alone |
+|---|---|---|
+| `Cargo.lock` | `[[package]]` with no `source` | anything with a `source` (registry deps) |
+| `uv.lock` | `[[package]]` whose `source` is `editable`, `virtual`, or `directory` | `registry` sources |
+| `poetry.lock` | `[[package]]` with `[package.source] type = "directory"` | registry and git sources; `content-hash` covers declared specs, not resolved versions |
+| `package-lock.json` | the root `version`, plus `packages` entries naming a workspace member | registry entries, integrity hashes, `link: true` pointers |
+
+`pnpm-lock.yaml` and `yarn.lock` need no sync at all: pnpm records workspace deps as `link:../core` and yarn omits members entirely, so neither stores a member version that a bump could invalidate.
+
+Intra-workspace pins don't go stale either, but each ecosystem gets there differently. uv drops the version specifier for anything resolved through `[tool.uv.sources]` with `workspace = true`, so nothing needs rewriting. Cargo and npm do enforce the requirement, so sr retargets it: a Cargo path dep carrying `{ path = ..., version = ... }` moves to the new version, and an npm sibling range moves from `^1.0.0` to `^2.0.0`. Ranges that stay satisfied (`>=1.0.0`), wildcards, and protocol specs (`workspace:*`, `file:../core`) are deliberately left alone.
+
+Because this reproduces a derived file, each rewrite is pinned to the format it was verified against — `Cargo.lock` v4, `uv.lock` v1 (revision 2), `poetry.lock` lock-version 2.x, `package-lock.json` v3. A newer structural version is refused outright rather than half-edited, because a partially-updated lock in a release commit is worse than a failed release.
+
+Those pins are held honest by a conformance suite (`just conformance`, also run weekly in CI) that builds a fixture, locks it with the real tool, bumps it with sr, re-locks, and requires the files be byte-identical. All four ecosystems pass, including a uv workspace with registry dependencies and environment markers.
+
 ### Does sr support cross-compilation?
 
 Not directly. Run your matrix in CI between `sr prepare` and `sr release`. Every build job downloads the prepared manifests (via `actions/upload-artifact` + `download-artifact`), builds for its target platform with the correct version embedded, and uploads its binary. The release job then downloads everything and runs `sr release` to tag + upload. See [examples/ci/cargo-multi-platform.yml](examples/ci/cargo-multi-platform.yml).
@@ -982,6 +1016,8 @@ Not directly. Run your matrix in CI between `sr prepare` and `sr release`. Every
 ### What happens if a release fails mid-flight?
 
 Re-run `sr release`. Every stage has a strict `is_complete` check reading external state (tag exists? release object exists? assets uploaded? package on registry?). The pipeline picks up exactly where it left off. There's no state file to corrupt.
+
+If the failure came after the tag was pushed, run it from the tagged commit (re-dispatch the workflow on the release branch). sr sees there are no new commits, checks the tagged release, and finishes whatever is missing: release object, assets, publish. See [Recovery from a broken release](#recovery-from-a-broken-release) for the limits.
 
 ### Monorepo with one release per package?
 

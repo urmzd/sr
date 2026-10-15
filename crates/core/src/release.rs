@@ -24,6 +24,11 @@ pub struct ReleasePlan {
     pub tag_name: String,
     pub floating_tag_name: Option<String>,
     pub prerelease: bool,
+    /// The commit this release is locked to. Resolved once at plan time
+    /// (HEAD, or an explicit `--base-ref`); every commit walk is bounded by
+    /// it and the release tag targets it (plus the release commit created on
+    /// top of it) — never whatever the branch tip happens to be later.
+    pub base_sha: String,
     /// Per-package breakdown (stable order = `config.packages`). Used by
     /// stages that iterate packages (Bump, Build, UploadManifest) and by the
     /// changelog formatter for optional per-package sectioning.
@@ -63,6 +68,21 @@ pub trait ReleaseStrategy: Send + Sync {
     /// Apply the plan: commit + tag + push + create release + upload +
     /// publish. Idempotent at each stage; safe to re-run.
     fn execute(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError>;
+
+    /// Finish a release that was tagged but never completed.
+    ///
+    /// `plan` reports `NoCommits` once a version is tagged, so a release
+    /// that died after tagging (release object, asset upload, or publish
+    /// failed) would otherwise never be picked up again. When the base
+    /// commit is the latest tag's commit, this reads the actual state of
+    /// that release and runs the outstanding stages for the tagged version.
+    /// No new commit or tag is created.
+    ///
+    /// Returns the tagged release's plan when something was outstanding
+    /// (and, unless `dry_run`, has now been done). Returns `None` when the
+    /// base commit is not the latest tag, or that release is already
+    /// complete as far as sr can observe.
+    fn resume(&self, dry_run: bool) -> Result<Option<ReleasePlan>, ReleaseError>;
 }
 
 /// Abstraction over a remote VCS provider (e.g. GitHub, GitLab).
@@ -171,6 +191,9 @@ pub struct TrunkReleaseStrategy<G, V, C, F> {
     pub prerelease_id: Option<String>,
     /// Whether the GitHub release should be created as a draft.
     pub draft: bool,
+    /// Explicit base ref to release (e.g. a CI-provided commit SHA).
+    /// None = lock to HEAD at plan time.
+    pub base_ref: Option<String>,
 }
 
 impl<G, V, C, F> TrunkReleaseStrategy<G, V, C, F>
@@ -211,6 +234,114 @@ where
         self.formatter.format(&[entry])
     }
 
+    /// Verify the working tree is still at the plan's locked base commit.
+    ///
+    /// Prepare and execute mutate the working tree (version bumps) and build
+    /// the release commit on top of HEAD — if HEAD is no longer the planned
+    /// base, those writes would target a different commit's tree. This never
+    /// fires for queued CI releases (each run checks out its own SHA); it
+    /// catches a checkout that moved underneath sr, or a `--base-ref` that
+    /// doesn't match the checkout.
+    fn ensure_at_base(&self, plan: &ReleasePlan) -> Result<(), ReleaseError> {
+        let head = self.git.head_sha()?;
+        if head != plan.base_sha {
+            return Err(ReleaseError::BaseRefMoved {
+                expected: plan.base_sha.clone(),
+                actual: head,
+            });
+        }
+        Ok(())
+    }
+
+    /// Rebuild the plan of the release already tagged at the base commit.
+    ///
+    /// `None` unless the base commit is exactly the commit of the tag `plan`
+    /// measures from: the tree being published must be the tagged tree, so a
+    /// checkout that sits before or after the tag is never resumed.
+    fn tagged_plan(&self) -> Result<Option<ReleasePlan>, ReleaseError> {
+        let base_sha = match &self.base_ref {
+            Some(r) => self.git.resolve_ref(r)?,
+            None => self.git.head_sha()?,
+        };
+
+        // Same reference tag as `plan`: latest stable for a stable release,
+        // latest of any kind for a pre-release.
+        let all_tags = self.git.all_tags(&self.config.git.tag_prefix)?;
+        let latest_any = all_tags.len().checked_sub(1);
+        let idx = if self.prerelease_id.is_some() {
+            latest_any
+        } else {
+            all_tags
+                .iter()
+                .rposition(|t| t.version.pre.is_empty())
+                .or(latest_any)
+        };
+        let Some(idx) = idx else {
+            return Ok(None);
+        };
+        let tag = &all_tags[idx];
+        if tag.sha != base_sha {
+            return Ok(None);
+        }
+
+        // The tag this release was itself measured from.
+        let is_prerelease = !tag.version.pre.is_empty();
+        let earlier = &all_tags[..idx];
+        let previous = if is_prerelease {
+            earlier.last()
+        } else {
+            earlier
+                .iter()
+                .rev()
+                .find(|t| t.version.pre.is_empty())
+                .or(earlier.last())
+        };
+        let from_sha = previous.map(|t| t.sha.as_str());
+
+        let skip_patterns = &self.config.git.skip_patterns;
+        let commits: Vec<ConventionalCommit> = self
+            .git
+            .commits_between(from_sha, &tag.sha)?
+            .iter()
+            .filter(|c| !c.message.starts_with("chore(release):"))
+            .filter(|c| !skip_patterns.iter().any(|p| c.message.contains(p.as_str())))
+            .filter_map(|c| self.parser.parse(c).ok())
+            .collect();
+        let packages = self.build_package_plans(from_sha, &tag.sha, &commits)?;
+
+        // The bump already happened; read it off the two versions.
+        let zero = Version::new(0, 0, 0);
+        let from_version = previous.map(|t| &t.version).unwrap_or(&zero);
+        let bump = if from_version.major != tag.version.major {
+            BumpLevel::Major
+        } else if from_version.minor != tag.version.minor {
+            BumpLevel::Minor
+        } else {
+            BumpLevel::Patch
+        };
+
+        let floating_tag_name = if self.config.git.floating_tag && !is_prerelease {
+            Some(format!(
+                "{}{}",
+                self.config.git.tag_prefix, tag.version.major
+            ))
+        } else {
+            None
+        };
+
+        Ok(Some(ReleasePlan {
+            current_version: previous.map(|t| t.version.clone()),
+            next_version: tag.version.clone(),
+            bump,
+            commits,
+            tag_name: tag.name.clone(),
+            floating_tag_name,
+            prerelease: is_prerelease,
+            base_sha,
+            packages,
+        }))
+    }
+
     /// Render the release name from the configured template, or fall back to the tag name.
     fn release_name(&self, plan: &ReleasePlan) -> String {
         if let Some(ref template_str) = self.config.vcs.github.release_name_template {
@@ -238,6 +369,7 @@ where
     fn build_package_plans(
         &self,
         from_sha: Option<&str>,
+        base_sha: &str,
         all_conventional: &[ConventionalCommit],
     ) -> Result<Vec<PackagePlan>, ReleaseError> {
         let packages = &self.config.packages;
@@ -275,7 +407,9 @@ where
                 continue;
             }
 
-            let raw = self.git.commits_since_in_path(from_sha, &pkg.path)?;
+            let raw = self
+                .git
+                .commits_between_in_path(from_sha, base_sha, &pkg.path)?;
             let pkg_shas: std::collections::HashSet<&str> =
                 raw.iter().map(|c| c.sha.as_str()).collect();
             let pkg_commits: Vec<ConventionalCommit> = all_conventional
@@ -329,6 +463,14 @@ where
     fn plan(&self) -> Result<ReleasePlan, ReleaseError> {
         let is_prerelease = self.prerelease_id.is_some();
 
+        // Lock the base commit first. Everything below — commit walks, the
+        // tag target, the pushed ref — is pinned to this SHA so a branch
+        // that moves while the release runs cannot change what is released.
+        let base_sha = match &self.base_ref {
+            Some(r) => self.git.resolve_ref(r)?,
+            None => self.git.head_sha()?,
+        };
+
         // State model: the tag is the only source of truth. Prior releases
         // — complete, partial, or abandoned — are archaeology. We compute
         // the next release relative to the latest tag and move forward.
@@ -350,11 +492,12 @@ where
             None => (None, None),
         };
 
-        // Scan commits repo-wide. Strict monorepo model: one version for all
-        // packages, so the global bump is decided over every commit since the
-        // last tag — not filtered by package path. Per-package path attribution
-        // happens later, for changelog sectioning only.
-        let raw_commits = self.git.commits_since(from_sha)?;
+        // Scan commits repo-wide, bounded by the locked base — never HEAD,
+        // which may have moved since. Strict monorepo model: one version for
+        // all packages, so the global bump is decided over every commit since
+        // the last tag — not filtered by package path. Per-package path
+        // attribution happens later, for changelog sectioning only.
+        let raw_commits = self.git.commits_between(from_sha, &base_sha)?;
 
         if raw_commits.is_empty() {
             let (tag, sha) = match tag_info {
@@ -387,7 +530,7 @@ where
             }
         };
 
-        let package_plans = self.build_package_plans(from_sha, &conventional_commits)?;
+        let package_plans = self.build_package_plans(from_sha, &base_sha, &conventional_commits)?;
 
         // For pre-releases, base the version on the latest *stable* tag
         let base_version = if is_prerelease {
@@ -441,11 +584,13 @@ where
             tag_name,
             floating_tag_name,
             prerelease: is_prerelease,
+            base_sha,
             packages: package_plans,
         })
     }
 
     fn prepare(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError> {
+        self.ensure_at_base(plan)?;
         let version_str = plan.next_version.to_string();
         let changelog_body = self.format_changelog(plan)?;
         let release_name = self.release_name(plan);
@@ -467,6 +612,7 @@ where
             sign_tags: self.config.git.sign_tags,
             draft: self.draft,
             bumped_files: Vec::new(),
+            release_sha: plan.base_sha.clone(),
         };
 
         // Only the Bump stage: writes manifests + changelog, nothing else.
@@ -488,6 +634,7 @@ where
     }
 
     fn execute(&self, plan: &ReleasePlan, dry_run: bool) -> Result<(), ReleaseError> {
+        self.ensure_at_base(plan)?;
         let version_str = plan.next_version.to_string();
         let changelog_body = self.format_changelog(plan)?;
         let release_name = self.release_name(plan);
@@ -509,6 +656,7 @@ where
             sign_tags: self.config.git.sign_tags,
             draft: self.draft,
             bumped_files: Vec::new(),
+            release_sha: plan.base_sha.clone(),
         };
 
         for stage in default_pipeline() {
@@ -523,6 +671,100 @@ where
             eprintln!("Released {}", plan.tag_name);
         }
         Ok(())
+    }
+
+    fn resume(&self, dry_run: bool) -> Result<Option<ReleasePlan>, ReleaseError> {
+        let Some(plan) = self.tagged_plan()? else {
+            return Ok(None);
+        };
+        self.ensure_at_base(&plan)?;
+        let version_str = plan.next_version.to_string();
+        let changelog_body = self.format_changelog(&plan)?;
+        let release_name = self.release_name(&plan);
+
+        let env = release_env(&version_str, &plan.tag_name);
+        let env_refs: Vec<(&str, &str)> =
+            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+        let mut ctx = StageContext {
+            plan: &plan,
+            config: &self.config,
+            git: &self.git,
+            vcs: &self.vcs,
+            changelog_body: &changelog_body,
+            release_name: &release_name,
+            version_str: &version_str,
+            hooks_env: &env_refs,
+            dry_run,
+            sign_tags: self.config.git.sign_tags,
+            draft: self.draft,
+            bumped_files: Vec::new(),
+            release_sha: plan.base_sha.clone(),
+        };
+
+        // Read actual state. Only definite evidence starts a resume, so a
+        // complete release stays a no-op. A draft release is invisible to
+        // the tag lookup: its presence and assets cannot be observed, so it
+        // is left alone rather than risk a duplicate.
+        let release_missing = !self.draft && !self.vcs.release_exists(&plan.tag_name)?;
+        let assets_missing = if self.draft {
+            Vec::new()
+        } else {
+            crate::stages::upload::missing_from_release(&ctx)?
+        };
+        let unpublished: Vec<&str> = self
+            .config
+            .packages
+            .iter()
+            .filter(|p| crate::publish::publish_needed(p, &version_str, &plan.tag_name, &env_refs))
+            .map(|p| p.path.as_str())
+            .collect();
+
+        if !release_missing && assets_missing.is_empty() && unpublished.is_empty() {
+            return Ok(None);
+        }
+
+        let mut outstanding: Vec<String> = Vec::new();
+        if release_missing {
+            outstanding.push("release object".into());
+        }
+        if !assets_missing.is_empty() {
+            outstanding.push(format!("{} asset(s)", assets_missing.len()));
+        }
+        if !unpublished.is_empty() {
+            outstanding.push(format!("publish ({})", unpublished.join(", ")));
+        }
+        eprintln!(
+            "{} is tagged at this commit but incomplete: missing {}. Resuming.",
+            plan.tag_name,
+            outstanding.join(", ")
+        );
+
+        // The tail of the pipeline, from the first stage that can be
+        // outstanding once the tag is on the remote. A missing release
+        // object means the run died before or at release creation, so the
+        // floating tag may not have moved either.
+        let mut stages: Vec<Box<dyn crate::stages::Stage>> = Vec::new();
+        if release_missing {
+            stages.push(Box::new(crate::stages::tag::FloatingTag));
+            stages.push(Box::new(crate::stages::vcs_release::CreateOrUpdateRelease));
+        }
+        if !assets_missing.is_empty() {
+            stages.push(Box::new(crate::stages::upload::UploadArtifacts));
+        }
+        stages.push(Box::new(crate::stages::verify::VerifyRelease));
+        stages.push(Box::new(crate::stages::publish::Publish));
+
+        for stage in stages {
+            if !stage.is_complete(&ctx)? {
+                stage.run(&mut ctx)?;
+            }
+        }
+
+        if !dry_run {
+            eprintln!("Resumed {}", plan.tag_name);
+        }
+        Ok(Some(plan))
     }
 }
 
@@ -604,7 +846,7 @@ mod tests {
     use crate::config::{
         ChangelogConfig, Config, GitConfig, PackageConfig, default_changelog_groups,
     };
-    use crate::git::{GitRepository, TagInfo};
+    use crate::git::{GitRepository, PushOutcome, TagInfo};
 
     // --- Fakes ---
 
@@ -613,13 +855,19 @@ mod tests {
         commits: Vec<Commit>,
         /// Commits returned when path filtering is active (None = fall back to `commits`).
         path_commits: Option<Vec<Commit>>,
-        head: String,
-        created_tags: Mutex<Vec<String>>,
+        head: Mutex<String>,
+        /// SHA assigned to the release commit made by stage_and_commit.
+        commit_sha: String,
+        created_tags: Mutex<Vec<(String, String)>>,
         pushed_tags: Mutex<Vec<String>>,
         committed: Mutex<Vec<(Vec<String>, String)>>,
-        push_count: Mutex<u32>,
-        force_created_tags: Mutex<Vec<String>>,
+        pushed_shas: Mutex<Vec<String>>,
+        force_created_tags: Mutex<Vec<(String, String)>>,
         force_pushed_tags: Mutex<Vec<String>>,
+        /// Ranges requested via commits_between (from, to).
+        between_calls: Mutex<Vec<(Option<String>, String)>>,
+        /// When true, push() reports a non-fast-forward rejection.
+        reject_push: bool,
     }
 
     impl FakeGit {
@@ -632,14 +880,21 @@ mod tests {
                 tags,
                 commits,
                 path_commits: None,
-                head,
+                head: Mutex::new(head),
+                commit_sha: "f".repeat(40),
                 created_tags: Mutex::new(Vec::new()),
                 pushed_tags: Mutex::new(Vec::new()),
                 committed: Mutex::new(Vec::new()),
-                push_count: Mutex::new(0),
+                pushed_shas: Mutex::new(Vec::new()),
                 force_created_tags: Mutex::new(Vec::new()),
                 force_pushed_tags: Mutex::new(Vec::new()),
+                between_calls: Mutex::new(Vec::new()),
+                reject_push: false,
             }
+        }
+
+        fn set_head(&self, sha: &str) {
+            *self.head.lock().unwrap() = sha.to_string();
         }
     }
 
@@ -652,8 +907,17 @@ mod tests {
             Ok(self.commits.clone())
         }
 
-        fn create_tag(&self, name: &str, _message: &str, _sign: bool) -> Result<(), ReleaseError> {
-            self.created_tags.lock().unwrap().push(name.to_string());
+        fn create_tag(
+            &self,
+            name: &str,
+            _message: &str,
+            _sign: bool,
+            target: &str,
+        ) -> Result<(), ReleaseError> {
+            self.created_tags
+                .lock()
+                .unwrap()
+                .push((name.to_string(), target.to_string()));
             Ok(())
         }
 
@@ -662,17 +926,27 @@ mod tests {
             Ok(())
         }
 
-        fn stage_and_commit(&self, paths: &[&str], message: &str) -> Result<bool, ReleaseError> {
+        fn stage_and_commit(
+            &self,
+            paths: &[&str],
+            message: &str,
+        ) -> Result<Option<String>, ReleaseError> {
             self.committed.lock().unwrap().push((
                 paths.iter().map(|s| s.to_string()).collect(),
                 message.to_string(),
             ));
-            Ok(true)
+            // Mirror real git: the release commit becomes the new HEAD.
+            self.set_head(&self.commit_sha);
+            Ok(Some(self.commit_sha.clone()))
         }
 
-        fn push(&self) -> Result<(), ReleaseError> {
-            *self.push_count.lock().unwrap() += 1;
-            Ok(())
+        fn push(&self, sha: &str) -> Result<PushOutcome, ReleaseError> {
+            self.pushed_shas.lock().unwrap().push(sha.to_string());
+            if self.reject_push {
+                Ok(PushOutcome::Rejected)
+            } else {
+                Ok(PushOutcome::Pushed)
+            }
         }
 
         fn tag_exists(&self, name: &str) -> Result<bool, ReleaseError> {
@@ -680,7 +954,8 @@ mod tests {
                 .created_tags
                 .lock()
                 .unwrap()
-                .contains(&name.to_string()))
+                .iter()
+                .any(|(n, _)| n == name))
         }
 
         fn remote_tag_exists(&self, name: &str) -> Result<bool, ReleaseError> {
@@ -693,9 +968,13 @@ mod tests {
 
         fn commits_between(
             &self,
-            _from: Option<&str>,
-            _to: &str,
+            from: Option<&str>,
+            to: &str,
         ) -> Result<Vec<Commit>, ReleaseError> {
+            self.between_calls
+                .lock()
+                .unwrap()
+                .push((from.map(|s| s.to_string()), to.to_string()));
             Ok(self.commits.clone())
         }
 
@@ -703,11 +982,11 @@ mod tests {
             Ok("2026-01-01".into())
         }
 
-        fn force_create_tag(&self, name: &str) -> Result<(), ReleaseError> {
+        fn force_create_tag(&self, name: &str, target: &str) -> Result<(), ReleaseError> {
             self.force_created_tags
                 .lock()
                 .unwrap()
-                .push(name.to_string());
+                .push((name.to_string(), target.to_string()));
             Ok(())
         }
 
@@ -720,12 +999,33 @@ mod tests {
         }
 
         fn head_sha(&self) -> Result<String, ReleaseError> {
-            Ok(self.head.clone())
+            Ok(self.head.lock().unwrap().clone())
+        }
+
+        fn resolve_ref(&self, ref_name: &str) -> Result<String, ReleaseError> {
+            // Full SHAs resolve to themselves; anything else acts like HEAD.
+            if ref_name.len() == 40 && ref_name.chars().all(|c| c.is_ascii_hexdigit()) {
+                Ok(ref_name.to_string())
+            } else {
+                self.head_sha()
+            }
         }
 
         fn commits_since_in_path(
             &self,
             _from: Option<&str>,
+            _path: &str,
+        ) -> Result<Vec<Commit>, ReleaseError> {
+            Ok(self
+                .path_commits
+                .clone()
+                .unwrap_or_else(|| self.commits.clone()))
+        }
+
+        fn commits_between_in_path(
+            &self,
+            _from: Option<&str>,
+            _to: &str,
             _path: &str,
         ) -> Result<Vec<Commit>, ReleaseError> {
             Ok(self
@@ -897,6 +1197,7 @@ mod tests {
             config,
             prerelease_id: None,
             draft: false,
+            base_ref: None,
         }
     }
 
@@ -1100,7 +1401,11 @@ mod tests {
         let plan = s.plan().unwrap();
         s.execute(&plan, false).unwrap();
 
-        assert_eq!(*s.git.created_tags.lock().unwrap(), vec!["v0.1.0"]);
+        let created = s.git.created_tags.lock().unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].0, "v0.1.0");
+        // No release commit in test_config → the tag targets the locked base.
+        assert_eq!(created[0].1, plan.base_sha);
         assert_eq!(*s.git.pushed_tags.lock().unwrap(), vec!["v0.1.0"]);
     }
 
@@ -1147,8 +1452,11 @@ mod tests {
         );
         assert!(committed[0].1.contains("chore(release): v0.1.0"));
 
-        // Verify tag was created after commit
-        assert_eq!(*s.git.created_tags.lock().unwrap(), vec!["v0.1.0"]);
+        // Verify tag was created after commit, targeting the release commit.
+        let created = s.git.created_tags.lock().unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].0, "v0.1.0");
+        assert_eq!(created[0].1, s.git.commit_sha);
     }
 
     #[test]
@@ -1161,7 +1469,7 @@ mod tests {
             .created_tags
             .lock()
             .unwrap()
-            .push("v0.1.0".to_string());
+            .push(("v0.1.0".to_string(), "e".repeat(40)));
 
         s.execute(&plan, false).unwrap();
 
@@ -1212,7 +1520,7 @@ mod tests {
 
         // Commit push should only happen once — PushCommit::is_complete sees
         // the remote tag and correctly skips the second run.
-        assert_eq!(*s.git.push_count.lock().unwrap(), 1);
+        assert_eq!(s.git.pushed_shas.lock().unwrap().len(), 1);
 
         // test_config has no real version files (dummy skipped on bump), so
         // bumped_files is empty and stage_and_commit is never called.
@@ -1524,7 +1832,11 @@ mod tests {
 
         s.execute(&plan, false).unwrap();
 
-        assert_eq!(*s.git.force_created_tags.lock().unwrap(), vec!["v1"]);
+        let forced = s.git.force_created_tags.lock().unwrap();
+        assert_eq!(forced.len(), 1);
+        assert_eq!(forced[0].0, "v1");
+        // No release commit in this config → floating tag targets the base.
+        assert_eq!(forced[0].1, plan.base_sha);
         assert_eq!(*s.git.force_pushed_tags.lock().unwrap(), vec!["v1"]);
     }
 
@@ -1654,7 +1966,9 @@ mod tests {
         let plan = s.plan().unwrap();
         s.execute(&plan, false).unwrap();
 
-        assert_eq!(*s.git.created_tags.lock().unwrap(), vec!["v0.1.0"]);
+        let created = s.git.created_tags.lock().unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].0, "v0.1.0");
     }
 
     // --- manifest/reconciliation tests removed: no manifest, no reconciler
@@ -1754,7 +2068,8 @@ mod tests {
     }
 
     /// A tag at HEAD with no new commits errors with NoCommits — sr never
-    /// re-releases the same commit.
+    /// re-releases the same commit. `resume` is what finishes that tag's
+    /// release if it was left incomplete.
     #[test]
     fn no_new_commits_at_tag_head_errors() {
         let tag = TagInfo {
@@ -1762,9 +2077,329 @@ mod tests {
             version: Version::new(1, 2, 3),
             sha: "a".repeat(40),
         };
-        let mut s = make_strategy(vec![tag], vec![], Config::default());
-        s.git.head = "a".repeat(40);
+        let s = make_strategy(vec![tag], vec![], Config::default());
+        s.git.set_head(&"a".repeat(40));
         let err = s.plan().unwrap_err();
         assert!(matches!(err, ReleaseError::NoCommits { .. }));
+    }
+
+    // --- base-ref lock tests ---
+
+    /// The plan locks HEAD at plan time and bounds the commit walk by that
+    /// SHA — never by a floating `HEAD`.
+    #[test]
+    fn plan_locks_base_sha_and_bounds_commit_walk() {
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], test_config());
+        let head = s.git.head_sha().unwrap();
+
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.base_sha, head);
+
+        let calls = s.git.between_calls.lock().unwrap();
+        assert!(
+            !calls.is_empty(),
+            "plan must walk commits via a bounded range"
+        );
+        assert!(
+            calls.iter().all(|(_, to)| *to == head),
+            "every commit walk must be bounded by the locked base, got {calls:?}"
+        );
+    }
+
+    /// An explicit base ref overrides HEAD as the locked commit.
+    #[test]
+    fn plan_resolves_explicit_base_ref() {
+        let pinned = "b".repeat(40);
+        let mut s = make_strategy(vec![], vec![raw_commit("feat: something")], test_config());
+        s.base_ref = Some(pinned.clone());
+
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.base_sha, pinned);
+    }
+
+    /// If the checkout moves between plan and execute, the release must not
+    /// proceed — the working tree no longer matches the planned commit.
+    #[test]
+    fn execute_fails_when_checkout_moved_after_plan() {
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], test_config());
+        let plan = s.plan().unwrap();
+
+        s.git.set_head(&"9".repeat(40));
+
+        let err = s.execute(&plan, false).unwrap_err();
+        assert!(matches!(err, ReleaseError::BaseRefMoved { .. }));
+        assert!(s.git.created_tags.lock().unwrap().is_empty());
+        assert!(s.git.pushed_tags.lock().unwrap().is_empty());
+    }
+
+    /// Same guard for prepare: version files must be bumped on the planned
+    /// commit's tree.
+    #[test]
+    fn prepare_fails_when_checkout_moved_after_plan() {
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], test_config());
+        let plan = s.plan().unwrap();
+
+        s.git.set_head(&"9".repeat(40));
+
+        let err = s.prepare(&plan, false).unwrap_err();
+        assert!(matches!(err, ReleaseError::BaseRefMoved { .. }));
+    }
+
+    /// The branch push carries exactly the release commit's SHA — commits
+    /// landing on the branch afterwards are never swept into the push.
+    #[test]
+    fn execute_pushes_exact_release_sha() {
+        let dir = tempfile::tempdir().unwrap();
+        let cargo_path = dir.path().join("Cargo.toml");
+        std::fs::write(
+            &cargo_path,
+            "[package]\nname = \"test\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+
+        let config = Config {
+            changelog: ChangelogConfig {
+                file: None,
+                ..Default::default()
+            },
+            packages: vec![PackageConfig {
+                path: ".".into(),
+                version_files: vec![cargo_path.to_str().unwrap().to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let s = make_strategy(vec![], vec![raw_commit("feat: something")], config);
+        let plan = s.plan().unwrap();
+        s.execute(&plan, false).unwrap();
+
+        // The release commit was made, so tag and push target its SHA.
+        assert_eq!(
+            *s.git.pushed_shas.lock().unwrap(),
+            vec![s.git.commit_sha.clone()]
+        );
+        let created = s.git.created_tags.lock().unwrap();
+        assert_eq!(created[0].1, s.git.commit_sha);
+    }
+
+    /// A non-fast-forward rejection of the branch push (queued releases on a
+    /// busy trunk) must not abort the release: the tag still ships, pointing
+    /// at the locked commit.
+    #[test]
+    fn execute_continues_when_branch_push_rejected() {
+        let mut s = make_strategy(vec![], vec![raw_commit("feat: something")], test_config());
+        s.git.reject_push = true;
+
+        let plan = s.plan().unwrap();
+        s.execute(&plan, false).unwrap();
+
+        // Branch push was attempted and rejected, but tag + release shipped.
+        assert_eq!(s.git.pushed_shas.lock().unwrap().len(), 1);
+        assert_eq!(*s.git.pushed_tags.lock().unwrap(), vec!["v0.1.0"]);
+        assert!(s.vcs.release_exists("v0.1.0").unwrap());
+    }
+
+    // --- resume tests ---
+
+    fn tag_at(version: &str, sha: &str) -> TagInfo {
+        TagInfo {
+            name: format!("v{version}"),
+            version: Version::parse(version).unwrap(),
+            sha: sha.repeat(40),
+        }
+    }
+
+    /// A strategy sitting on `v1.3.0` with no new commits: `plan` reports
+    /// NoCommits, which is where `sr release` hands over to `resume`.
+    fn tagged_strategy(config: Config) -> TestStrategy {
+        let s = make_strategy(
+            vec![tag_at("1.2.3", "a"), tag_at("1.3.0", "b")],
+            vec![],
+            config,
+        );
+        assert!(matches!(
+            s.plan().unwrap_err(),
+            ReleaseError::NoCommits { .. }
+        ));
+        s
+    }
+
+    fn with_release(s: TestStrategy, tag: &str) -> TestStrategy {
+        s.vcs
+            .releases
+            .lock()
+            .unwrap()
+            .push((tag.into(), "notes".into()));
+        s
+    }
+
+    /// Config whose only package publishes through a custom command that
+    /// creates `marker`; `check` (when wanted) reports published once it
+    /// exists.
+    fn publish_config(dir: &std::path::Path, command: &str, check: bool) -> Config {
+        let mut config = test_config();
+        config.packages[0].publish = Some(crate::config::PublishConfig::Custom {
+            command: command.into(),
+            check: check.then(|| "test -f marker".into()),
+            cwd: Some(dir.to_str().unwrap().into()),
+        });
+        config
+    }
+
+    #[test]
+    fn resume_is_noop_for_a_complete_release() {
+        let s = with_release(tagged_strategy(test_config()), "v1.3.0");
+        assert!(s.resume(false).unwrap().is_none());
+        assert!(s.git.force_pushed_tags.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resume_creates_missing_release_object_without_retagging() {
+        let s = tagged_strategy(test_config());
+        let plan = s.resume(false).unwrap().expect("release object is missing");
+
+        // The plan describes the release that is already tagged.
+        assert_eq!(plan.tag_name, "v1.3.0");
+        assert_eq!(plan.next_version, Version::new(1, 3, 0));
+        assert_eq!(plan.current_version, Some(Version::new(1, 2, 3)));
+        assert_eq!(plan.bump, BumpLevel::Minor);
+        assert_eq!(plan.base_sha, "b".repeat(40));
+
+        assert!(s.vcs.release_exists("v1.3.0").unwrap());
+        // The floating tag is caught up; nothing is committed or re-tagged.
+        assert_eq!(
+            *s.git.force_created_tags.lock().unwrap(),
+            vec![("v1".to_string(), "b".repeat(40))]
+        );
+        assert!(s.git.created_tags.lock().unwrap().is_empty());
+        assert!(s.git.pushed_tags.lock().unwrap().is_empty());
+        assert!(s.git.committed.lock().unwrap().is_empty());
+
+        // Converged: a second run has nothing left to do.
+        assert!(s.resume(false).unwrap().is_none());
+    }
+
+    #[test]
+    fn resume_uploads_only_assets_missing_from_the_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("present.tar.gz");
+        let missing = dir.path().join("missing.tar.gz");
+        std::fs::write(&missing, "fake").unwrap();
+
+        let mut config = test_config();
+        config.packages[0].artifacts = vec![
+            present.to_str().unwrap().to_string(),
+            missing.to_str().unwrap().to_string(),
+        ];
+        let s = with_release(tagged_strategy(config), "v1.3.0");
+        // `present` was uploaded by the failed run and is gone from disk.
+        s.vcs.stored_assets.lock().unwrap().push((
+            "v1.3.0".into(),
+            "present.tar.gz".into(),
+            Vec::new(),
+        ));
+
+        s.resume(false).unwrap().expect("an asset is missing");
+
+        assert_eq!(
+            *s.vcs.uploaded_assets.lock().unwrap(),
+            vec![(
+                "v1.3.0".to_string(),
+                vec![missing.to_str().unwrap().to_string()]
+            )]
+        );
+        // The existing release object is not rewritten.
+        assert_eq!(s.vcs.releases.lock().unwrap()[0].1, "notes");
+        assert!(s.resume(false).unwrap().is_none());
+    }
+
+    #[test]
+    fn resume_fails_when_a_missing_asset_is_not_on_disk() {
+        let mut config = test_config();
+        config.packages[0].artifacts = vec!["/definitely/not/here/app.tar.gz".into()];
+        let s = with_release(tagged_strategy(config), "v1.3.0");
+        let err = s.resume(false).unwrap_err();
+        assert!(err.to_string().contains("path does not exist"), "{err}");
+    }
+
+    #[test]
+    fn resume_retries_an_outstanding_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = publish_config(dir.path(), "touch marker", true);
+        let s = with_release(tagged_strategy(config), "v1.3.0");
+
+        s.resume(false).unwrap().expect("publish is outstanding");
+        assert!(dir.path().join("marker").exists());
+
+        assert!(s.resume(false).unwrap().is_none());
+    }
+
+    #[test]
+    fn resume_surfaces_a_publish_that_fails_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = publish_config(dir.path(), "false", true);
+        let s = with_release(tagged_strategy(config), "v1.3.0");
+        assert!(matches!(
+            s.resume(false).unwrap_err(),
+            ReleaseError::Hook(_)
+        ));
+    }
+
+    /// A publisher that cannot report its state is not evidence of an
+    /// incomplete release: its command must not run on every no-op release.
+    #[test]
+    fn resume_ignores_publishers_with_unknown_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = publish_config(dir.path(), "touch marker", false);
+        let s = with_release(tagged_strategy(config), "v1.3.0");
+
+        assert!(s.resume(false).unwrap().is_none());
+        assert!(!dir.path().join("marker").exists());
+    }
+
+    #[test]
+    fn resume_dry_run_reports_but_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = publish_config(dir.path(), "touch marker", true);
+        let s = tagged_strategy(config);
+
+        let plan = s.resume(true).unwrap().expect("release is incomplete");
+        assert_eq!(plan.tag_name, "v1.3.0");
+        assert!(!s.vcs.release_exists("v1.3.0").unwrap());
+        assert!(s.git.force_created_tags.lock().unwrap().is_empty());
+        assert!(!dir.path().join("marker").exists());
+    }
+
+    /// Only the tagged commit itself is resumed: a checkout before or after
+    /// the tag does not hold the tree that was released.
+    #[test]
+    fn resume_requires_the_checkout_to_be_the_tagged_commit() {
+        let s = tagged_strategy(test_config());
+        s.git.set_head(&"c".repeat(40));
+        assert!(s.resume(false).unwrap().is_none());
+        assert!(!s.vcs.release_exists("v1.3.0").unwrap());
+    }
+
+    /// Draft releases cannot be looked up by tag, so their state is unknown
+    /// and resuming would create a duplicate draft on every run.
+    #[test]
+    fn resume_leaves_draft_releases_alone() {
+        let mut s = tagged_strategy(test_config());
+        s.draft = true;
+        assert!(s.resume(false).unwrap().is_none());
+        assert!(s.vcs.releases.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resume_first_release_measures_from_zero() {
+        let s = make_strategy(vec![tag_at("0.1.0", "a")], vec![], test_config());
+        let plan = s.resume(false).unwrap().expect("release object is missing");
+        assert_eq!(plan.current_version, None);
+        assert_eq!(plan.bump, BumpLevel::Minor);
+        assert_eq!(
+            s.git.between_calls.lock().unwrap().last().unwrap(),
+            &(None, "a".repeat(40))
+        );
     }
 }

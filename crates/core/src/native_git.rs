@@ -3,7 +3,7 @@ use std::process::Command;
 
 use crate::commit::Commit;
 use crate::error::ReleaseError;
-use crate::git::{GitRepository, TagInfo};
+use crate::git::{GitRepository, PushOutcome, TagInfo};
 use base64::Engine;
 use semver::Version;
 
@@ -224,9 +224,15 @@ impl GitRepository for NativeGitRepository {
         Ok(parse_commit_log(&output))
     }
 
-    fn create_tag(&self, name: &str, message: &str, sign: bool) -> Result<(), ReleaseError> {
+    fn create_tag(
+        &self,
+        name: &str,
+        message: &str,
+        sign: bool,
+        target: &str,
+    ) -> Result<(), ReleaseError> {
         let flag = if sign { "-s" } else { "-a" };
-        self.git(&["tag", flag, name, "-m", message])?;
+        self.git(&["tag", flag, name, "-m", message, target])?;
         Ok(())
     }
 
@@ -235,24 +241,45 @@ impl GitRepository for NativeGitRepository {
         Ok(())
     }
 
-    fn stage_and_commit(&self, paths: &[&str], message: &str) -> Result<bool, ReleaseError> {
+    fn stage_and_commit(
+        &self,
+        paths: &[&str],
+        message: &str,
+    ) -> Result<Option<String>, ReleaseError> {
         let mut args = vec!["add", "--"];
         args.extend(paths);
         self.git(&args)?;
 
         let status = self.git(&["status", "--porcelain"]);
         match status {
-            Ok(s) if s.is_empty() => Ok(false),
+            Ok(s) if s.is_empty() => Ok(None),
             _ => {
                 self.git(&["commit", "--no-verify", "-m", message])?;
-                Ok(true)
+                let sha = self.git(&["rev-parse", "HEAD"])?;
+                Ok(Some(sha))
             }
         }
     }
 
-    fn push(&self) -> Result<(), ReleaseError> {
-        self.git(&["push", "origin", "HEAD"])?;
-        Ok(())
+    fn push(&self, sha: &str) -> Result<PushOutcome, ReleaseError> {
+        let branch = self.git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+        if branch == "HEAD" {
+            return Err(ReleaseError::Git(
+                "cannot push release commit: detached HEAD has no branch to update".into(),
+            ));
+        }
+        let refspec = format!("{sha}:refs/heads/{branch}");
+        match self.git(&["push", "origin", &refspec]) {
+            Ok(_) => Ok(PushOutcome::Pushed),
+            Err(ReleaseError::Git(msg))
+                if msg.contains("non-fast-forward")
+                    || msg.contains("fetch first")
+                    || msg.contains("[rejected]") =>
+            {
+                Ok(PushOutcome::Rejected)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn tag_exists(&self, name: &str) -> Result<bool, ReleaseError> {
@@ -314,8 +341,8 @@ impl GitRepository for NativeGitRepository {
         Ok(date)
     }
 
-    fn force_create_tag(&self, name: &str) -> Result<(), ReleaseError> {
-        self.git(&["tag", "-f", name])?;
+    fn force_create_tag(&self, name: &str, target: &str) -> Result<(), ReleaseError> {
+        self.git(&["tag", "-f", name, target])?;
         Ok(())
     }
 
@@ -326,6 +353,10 @@ impl GitRepository for NativeGitRepository {
 
     fn head_sha(&self) -> Result<String, ReleaseError> {
         self.git(&["rev-parse", "HEAD"])
+    }
+
+    fn resolve_ref(&self, ref_name: &str) -> Result<String, ReleaseError> {
+        self.git(&["rev-parse", "--verify", &format!("{ref_name}^{{commit}}")])
     }
 
     fn commits_since_in_path(

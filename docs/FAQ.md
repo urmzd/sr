@@ -60,6 +60,27 @@ Run `sr prepare` **before** your build step so the bumped manifest is on disk wh
 
 The one escape hatch is `publish: custom`, which takes a shell command for registries without a built-in publisher (helm, private Maven, etc.).
 
+### Does updating lock files need a network resolve?
+
+No. After bumping the manifests, sr rewrites the affected entries in `Cargo.lock`, `uv.lock`, `poetry.lock` and `package-lock.json` in place — as TOML and JSON, never by invoking a resolver — then stages the lockfile in the release commit. It never shells out to `cargo update`, `uv lock`, `poetry lock` or `npm install`, so the release job needs no registry access and no repo needs a hook to keep its lockfile in sync.
+
+Only locally-sourced entries are touched:
+
+| Lock | Entries rewritten | Left alone |
+|---|---|---|
+| `Cargo.lock` | `[[package]]` with no `source` | anything with a `source` (registry deps) |
+| `uv.lock` | `[[package]]` whose `source` is `editable`, `virtual`, or `directory` | `registry` sources |
+| `poetry.lock` | `[[package]]` with `[package.source] type = "directory"` | registry and git sources; `content-hash` covers declared specs, not resolved versions |
+| `package-lock.json` | the root `version`, plus `packages` entries naming a workspace member | registry entries, integrity hashes, `link: true` pointers |
+
+`pnpm-lock.yaml` and `yarn.lock` need no sync at all: pnpm records workspace deps as `link:../core` and yarn omits members entirely, so neither stores a member version that a bump could invalidate.
+
+Intra-workspace pins don't go stale either, but each ecosystem gets there differently. uv drops the version specifier for anything resolved through `[tool.uv.sources]` with `workspace = true`, so nothing needs rewriting. Cargo and npm do enforce the requirement, so sr retargets it: a Cargo path dep carrying `{ path = ..., version = ... }` moves to the new version, and an npm sibling range moves from `^1.0.0` to `^2.0.0`. Ranges that stay satisfied (`>=1.0.0`), wildcards, and protocol specs (`workspace:*`, `file:../core`) are deliberately left alone.
+
+Because this reproduces a derived file, each rewrite is pinned to the format it was verified against — `Cargo.lock` v4, `uv.lock` v1 (revision 2), `poetry.lock` lock-version 2.x, `package-lock.json` v3. A newer structural version is refused outright rather than half-edited, because a partially-updated lock in a release commit is worse than a failed release.
+
+Those pins are held honest by a conformance suite (`just conformance`, also run weekly in CI) that builds a fixture, locks it with the real tool, bumps it with sr, re-locks, and requires the files be byte-identical. All four ecosystems pass, including a uv workspace with registry dependencies and environment markers.
+
 ### Does sr support cross-compilation?
 
 Not directly. Run your matrix in CI between `sr prepare` and `sr release`. Every build job downloads the prepared manifests (via `actions/upload-artifact` + `download-artifact`), builds for its target platform with the correct version embedded, and uploads its binary. The release job then downloads everything and runs `sr release` to tag + upload. See [examples/ci/cargo-multi-platform.yml](../examples/ci/cargo-multi-platform.yml).
@@ -67,6 +88,14 @@ Not directly. Run your matrix in CI between `sr prepare` and `sr release`. Every
 ### What happens if a release fails mid-flight?
 
 Re-run `sr release`. Every stage has a strict `is_complete` check reading external state (tag exists? release object exists? assets uploaded? package on registry?). The pipeline picks up exactly where it left off. There's no state file to corrupt.
+
+If the failure came after the tag was pushed, run it from the tagged commit (re-dispatch the workflow on the release branch). sr sees there are no new commits, checks the tagged release, and finishes whatever is missing: release object, assets, publish. See [Recovery from a broken release](../README.md#recovery-from-a-broken-release) for the limits.
+
+### What if the branch moves while a release is running?
+
+Nothing changes about what gets released. `sr plan` resolves the base commit once (HEAD, or `--base-ref`) and locks the release to it: the commit walk is bounded by that SHA, the tag targets exactly that commit (plus the `chore(release)` commit built on it), and the branch push carries only that SHA. With queued CI runs on a busy trunk, each run releases its own commit — if the remote branch has already advanced, the branch push is skipped with a warning and the release completes; the release commit stays reachable through the tag.
+
+If the *local checkout* moves between plan and execute (something rewrote HEAD under sr, or `--base-ref` doesn't match the checkout), sr refuses with a `base ref moved` error — bumping files on a tree that isn't the planned commit would corrupt the release.
 
 ### Monorepo with one release per package?
 

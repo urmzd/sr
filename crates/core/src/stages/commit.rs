@@ -36,9 +36,21 @@ impl Stage for Commit {
         }
 
         if !paths_to_stage.is_empty() {
+            // The release commit must sit directly on the locked base — if
+            // the checkout moved since plan time, committing here would build
+            // the release on an unplanned commit.
+            let head = ctx.git.head_sha()?;
+            if head != ctx.plan.base_sha {
+                return Err(ReleaseError::BaseRefMoved {
+                    expected: ctx.plan.base_sha.clone(),
+                    actual: head,
+                });
+            }
             let refs: Vec<&str> = paths_to_stage.iter().map(|s| s.as_str()).collect();
             let commit_msg = format!("chore(release): {} [skip ci]", ctx.plan.tag_name);
-            ctx.git.stage_and_commit(&refs, &commit_msg)?;
+            if let Some(sha) = ctx.git.stage_and_commit(&refs, &commit_msg)? {
+                ctx.release_sha = sha;
+            }
         }
         Ok(())
     }
