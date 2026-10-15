@@ -290,8 +290,13 @@ impl GitRepository for NativeGitRepository {
     }
 
     fn remote_tag_exists(&self, name: &str) -> Result<bool, ReleaseError> {
-        let output = self.git(&["ls-remote", "--tags", "origin", name])?;
-        Ok(!output.is_empty())
+        // ls-remote patterns match slash-separated suffixes: v1.0.0 also
+        // matches go/v1.0.0. Only the exact full ref proves this tag exists.
+        let reference = format!("refs/tags/{name}");
+        let output = self.git(&["ls-remote", "--tags", "--refs", "origin", &reference])?;
+        Ok(output
+            .lines()
+            .any(|line| line.split_whitespace().nth(1) == Some(reference.as_str())))
     }
 
     fn all_tags(&self, prefix: &str) -> Result<Vec<TagInfo>, ReleaseError> {
@@ -390,6 +395,41 @@ impl GitRepository for NativeGitRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_tag_exists_does_not_match_a_namespaced_tag() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = root.path().join("remote.git");
+        let local = root.path().join("local");
+        for (path, bare) in [(&remote, true), (&local, false)] {
+            let mut command = Command::new("git");
+            command.arg("init").arg("--quiet");
+            if bare {
+                command.arg("--bare");
+            }
+            assert!(command.arg(path).status().unwrap().success());
+        }
+        let repo = NativeGitRepository::open(&local)
+            .unwrap()
+            .with_identity(Some("Test".into()), Some("test@example.invalid".into()));
+        repo.git(&["config", "commit.gpgsign", "false"]).unwrap();
+        repo.git(&["commit", "--allow-empty", "-m", "feat: initial"])
+            .unwrap();
+        repo.git(&["remote", "add", "origin", remote.to_str().unwrap()])
+            .unwrap();
+        let head = repo.head_sha().unwrap();
+        repo.create_tag("go/v0.1.0", "Go release", false, &head)
+            .unwrap();
+        repo.push_tag("go/v0.1.0").unwrap();
+
+        assert!(repo.remote_tag_exists("go/v0.1.0").unwrap());
+        assert!(!repo.remote_tag_exists("v0.1.0").unwrap());
+        repo.create_tag("v0.1.0", "Root release", false, &head)
+            .unwrap();
+        repo.push_tag("v0.1.0").unwrap();
+        assert!(repo.remote_tag_exists("v0.1.0").unwrap());
+        assert!(!repo.remote_tag_exists("v0.1.1").unwrap());
+    }
 
     #[test]
     fn parse_ssh_remote() {
