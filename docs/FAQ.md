@@ -1,19 +1,19 @@
 ### Non-conventional commits are silently ignored
 
-sr only understands commits that match the configured commit pattern (derived from type names defined in `commit.types`; follows [Conventional Commits](https://www.conventionalcommits.org/) by default). Commits that don't match — merge commits, JIRA-style messages, freeform text — are silently skipped during release planning. They won't trigger a version bump or appear in the changelog.
+sr only understands commits that match the configured commit pattern (derived from type names defined in `commit.types`; follows [Conventional Commits](https://www.conventionalcommits.org/) by default). Commits that don't match (merge commits, JIRA-style messages, freeform text) are silently skipped during release planning. They won't trigger a version bump or appear in the changelog.
 
 This means:
-- **Merge commits** (`Merge pull request #123 from...`) — ignored, no impact
-- **Squash merges with conventional titles** (`feat: add search`) — work perfectly
-- **JIRA-style commits** (`PROJ-1234: fix login`) — ignored
-- **Dependabot commits** (`Bump serde from 1.0 to 1.1`) — ignored
-- **Freeform messages** (`fixed the bug`, `wip`) — ignored
+- **Merge commits** (`Merge pull request #123 from...`): ignored, no impact
+- **Squash merges with conventional titles** (`feat: add search`): work perfectly
+- **JIRA-style commits** (`PROJ-1234: fix login`): ignored
+- **Dependabot commits** (`Bump serde from 1.0 to 1.1`): ignored
+- **Freeform messages** (`fixed the bug`, `wip`): ignored
 
 If *all* commits since the last tag are non-conventional, sr exits with code 2 (no releasable changes).
 
 ### How merge strategies affect sr
 
-sr reads the commit history from HEAD back to the latest tag. It doesn't care *how* commits landed on the branch — only what the commit messages say.
+sr reads the commit history from HEAD back to the latest tag. It doesn't care *how* commits landed on the branch, only what the commit messages say.
 
 | Strategy | What sr sees | Impact |
 |----------|-------------|--------|
@@ -22,15 +22,15 @@ sr reads the commit history from HEAD back to the latest tag. It doesn't care *h
 | **Rebase merge** | All individual commits replayed onto the branch | Each commit is parsed independently. Same as regular commits. |
 | **Fast-forward** | All individual commits | Same as rebase. |
 
-**Recommendation:** Squash merges with conventional PR titles give the cleanest release history — one commit per PR, one changelog entry per feature/fix.
+**Recommendation:** Squash merges with conventional PR titles give the cleanest release history: one commit per PR, one changelog entry per feature/fix.
 
 ### `sr release` exits with code 2
 
-Exit code 2 means **no releasable commits** were found since the last tag. Not an error — all commits since the last release are non-bumping types (e.g. `chore`, `docs`, `ci`) or non-conventional messages. To force a release, push a `feat:`/`fix:`/`perf:`/`refactor:` commit (an empty commit works: `git commit --allow-empty -m "fix: trigger release"`).
+Exit code 2 means **no releasable commits** were found since the last tag. Not an error: all commits since the last release are non-bumping types (e.g. `chore`, `docs`, `ci`) or non-conventional messages. To force a release, push a `feat:`/`fix:`/`perf:`/`refactor:` commit (an empty commit works: `git commit --allow-empty -m "fix: trigger release"`).
 
 ### Changelog is not generated
 
-Set `changelog.file` in `sr.yaml` — changelog generation is opt-in:
+Set `changelog.file` in `sr.yaml`. Changelog generation is opt-in:
 
 ```yaml
 changelog:
@@ -39,7 +39,7 @@ changelog:
 
 ### Version files not updated
 
-Ensure your manifest files are listed in `packages[].version_files` and match a [supported format](../README.md#supported-version-files). Paths must be literal — no glob expansion.
+Ensure your manifest files are listed in `packages[].version_files` and match a [supported format](../README.md#supported-version-files). Paths must be literal, no glob expansion.
 
 ### Tags are not signed
 
@@ -56,13 +56,13 @@ Run `sr prepare` **before** your build step so the bumped manifest is on disk wh
 
 ### Why doesn't sr run build commands itself?
 
-`sr` is a release-state reconciler, not a task runner. It writes versions, creates tags + releases, invokes typed registry publishers (`cargo publish`, `npm publish`, `docker buildx build --push`, `uv publish`). Running arbitrary shell commands is a CI concern — not sr's.
+`sr` is a release-state reconciler, not a task runner. It writes versions, creates tags + releases, invokes typed registry publishers (`cargo publish`, `npm publish`, `docker buildx build --push`, `uv publish`). Running arbitrary shell commands is a CI concern, not sr's.
 
 The one escape hatch is `publish: custom`, which takes a shell command for registries without a built-in publisher (helm, private Maven, etc.).
 
 ### Does updating lock files need a network resolve?
 
-No. After bumping the manifests, sr rewrites the affected entries in `Cargo.lock`, `uv.lock`, `poetry.lock` and `package-lock.json` in place — as TOML and JSON, never by invoking a resolver — then stages the lockfile in the release commit. It never shells out to `cargo update`, `uv lock`, `poetry lock` or `npm install`, so the release job needs no registry access and no repo needs a hook to keep its lockfile in sync.
+No. After bumping the manifests, sr rewrites the affected entries in `Cargo.lock`, `uv.lock`, `poetry.lock` and `package-lock.json` in place (as TOML and JSON, never by invoking a resolver), then stages the lockfile in the release commit. It never shells out to `cargo update`, `uv lock`, `poetry lock` or `npm install`, so the release job needs no registry access and no repo needs a hook to keep its lockfile in sync.
 
 Only locally-sourced entries are touched:
 
@@ -77,7 +77,7 @@ Only locally-sourced entries are touched:
 
 Intra-workspace pins don't go stale either, but each ecosystem gets there differently. uv drops the version specifier for anything resolved through `[tool.uv.sources]` with `workspace = true`, so nothing needs rewriting. Cargo and npm do enforce the requirement, so sr retargets it: a Cargo path dep carrying `{ path = ..., version = ... }` moves to the new version, and an npm sibling range moves from `^1.0.0` to `^2.0.0`. Ranges that stay satisfied (`>=1.0.0`), wildcards, and protocol specs (`workspace:*`, `file:../core`) are deliberately left alone.
 
-Because this reproduces a derived file, each rewrite is pinned to the format it was verified against — `Cargo.lock` v4, `uv.lock` v1 (revision 2), `poetry.lock` lock-version 2.x, `package-lock.json` v3. A newer structural version is refused outright rather than half-edited, because a partially-updated lock in a release commit is worse than a failed release.
+Because this reproduces a derived file, each rewrite is pinned to the format it was verified against: `Cargo.lock` v4, `uv.lock` v1 (revision 2), `poetry.lock` lock-version 2.x, `package-lock.json` v3. A newer structural version is refused outright rather than half-edited, because a partially-updated lock in a release commit is worse than a failed release.
 
 Those pins are held honest by a conformance suite (`just conformance`, also run weekly in CI) that builds a fixture, locks it with the real tool, bumps it with sr, re-locks, and requires the files be byte-identical. All four ecosystems pass, including a uv workspace with registry dependencies and environment markers.
 
@@ -93,13 +93,13 @@ If the failure came after the tag was pushed, run it from the tagged commit (re-
 
 ### What if the branch moves while a release is running?
 
-Nothing changes about what gets released. `sr plan` resolves the base commit once (HEAD, or `--base-ref`) and locks the release to it: the commit walk is bounded by that SHA, the tag targets exactly that commit (plus the `chore(release)` commit built on it), and the branch push carries only that SHA. With queued CI runs on a busy trunk, each run releases its own commit — if the remote branch has already advanced, the branch push is skipped with a warning and the release completes; the release commit stays reachable through the tag.
+Nothing changes about what gets released. `sr plan` resolves the base commit once (HEAD, or `--base-ref`) and locks the release to it: the commit walk is bounded by that SHA, the tag targets exactly that commit (plus the `chore(release)` commit built on it), and the branch push carries only that SHA. With queued CI runs on a busy trunk, each run releases its own commit. If the remote branch has already advanced, the branch push is skipped with a warning and the release completes; the release commit stays reachable through the tag.
 
-If the *local checkout* moves between plan and execute (something rewrote HEAD under sr, or `--base-ref` doesn't match the checkout), sr refuses with a `base ref moved` error — bumping files on a tree that isn't the planned commit would corrupt the release.
+If the *local checkout* moves between plan and execute (something rewrote HEAD under sr, or `--base-ref` doesn't match the checkout), sr refuses with a `base ref moved` error: bumping files on a tree that isn't the planned commit would corrupt the release.
 
 ### Monorepo with one release per package?
 
-Not supported. `sr` releases one tag per repo, one version across every package. Per-package tags (`core/v1.2.0`, `cli-v3.0.0`) are deliberately out of scope — that model is what changesets / Lerna are for.
+Not supported. `sr` releases one tag per repo, one version across every package. Per-package tags (`core/v1.2.0`, `cli-v3.0.0`) are deliberately out of scope; that model is what changesets / Lerna are for.
 
 For workspace-aware ecosystems, declare one entry at the workspace root with `publish.workspace: true`; every member publishes at the shared version.
 

@@ -1019,6 +1019,12 @@ Re-run `sr release`. Every stage has a strict `is_complete` check reading extern
 
 If the failure came after the tag was pushed, run it from the tagged commit (re-dispatch the workflow on the release branch). sr sees there are no new commits, checks the tagged release, and finishes whatever is missing: release object, assets, publish. See [Recovery from a broken release](#recovery-from-a-broken-release) for the limits.
 
+### What if the branch moves while a release is running?
+
+Nothing changes about what gets released. `sr plan` resolves the base commit once (HEAD, or `--base-ref`) and locks the release to it: the commit walk is bounded by that SHA, the tag targets exactly that commit (plus the `chore(release)` commit built on it), and the branch push carries only that SHA. With queued CI runs on a busy trunk, each run releases its own commit. If the remote branch has already advanced, the branch push is skipped with a warning and the release completes; the release commit stays reachable through the tag.
+
+If the *local checkout* moves between plan and execute (something rewrote HEAD under sr, or `--base-ref` doesn't match the checkout), sr refuses with a `base ref moved` error: bumping files on a tree that isn't the planned commit would corrupt the release.
+
 ### Monorepo with one release per package?
 
 Not supported. `sr` releases one tag per repo, one version across every package. Per-package tags (`core/v1.2.0`, `cli-v3.0.0`) are deliberately out of scope; that model is what changesets / Lerna are for.
