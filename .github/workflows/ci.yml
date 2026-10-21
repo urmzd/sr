@@ -79,14 +79,14 @@ jobs:
     name: Action outputs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - run: bash scripts/action-outputs.test.sh
 
   conformance:
     name: Lock conformance
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           path: sr
       - uses: dtolnay/rust-toolchain@stable
