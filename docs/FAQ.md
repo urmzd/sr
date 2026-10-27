@@ -39,7 +39,7 @@ changelog:
 
 ### Version files not updated
 
-Ensure your manifest files are listed in `packages[].version_files` and match a [supported format](../README.md#supported-version-files). Paths must be literal, no glob expansion.
+Ensure your manifest files are listed in `packages[].version_files` and match a [supported format](https://github.com/urmzd/sr/blob/main/README.md#supported-version-files). Paths must be literal, no glob expansion.
 
 ### Tags are not signed
 
@@ -52,7 +52,7 @@ Most build tools read the version from a manifest at compile time:
 - `npm pack` reads `package.json`
 - `uv build` reads `pyproject.toml`
 
-Run `sr prepare` **before** your build step so the bumped manifest is on disk when the build runs. Then `sr release` commits, tags, uploads, and publishes. See [examples/ci/cargo-multi-platform.yml](../examples/ci/cargo-multi-platform.yml) for the three-job shape (prepare → matrix build → release).
+Run `sr prepare` **before** your build step so the bumped manifest is on disk when the build runs. Then `sr release` commits, tags, uploads, and publishes. See [examples/ci/cargo-multi-platform.yml](https://github.com/urmzd/sr/blob/main/examples/ci/cargo-multi-platform.yml) for the three-job shape (prepare → matrix build → release).
 
 ### Why doesn't sr run build commands itself?
 
@@ -83,13 +83,13 @@ Those pins are held honest by a conformance suite (`just conformance`, also run 
 
 ### Does sr support cross-compilation?
 
-Not directly. Run your matrix in CI between `sr prepare` and `sr release`. Every build job downloads the prepared manifests (via `actions/upload-artifact` + `download-artifact`), builds for its target platform with the correct version embedded, and uploads its binary. The release job then downloads everything and runs `sr release` to tag + upload. See [examples/ci/cargo-multi-platform.yml](../examples/ci/cargo-multi-platform.yml).
+Not directly. Run your matrix in CI between `sr prepare` and `sr release`. Every build job downloads the prepared manifests (via `actions/upload-artifact` + `download-artifact`), builds for its target platform with the correct version embedded, and uploads its binary. The release job then downloads everything and runs `sr release` to tag + upload. See [examples/ci/cargo-multi-platform.yml](https://github.com/urmzd/sr/blob/main/examples/ci/cargo-multi-platform.yml).
 
 ### What happens if a release fails mid-flight?
 
 Re-run `sr release`. Every stage has a strict `is_complete` check reading external state (tag exists? release object exists? assets uploaded? package on registry?). The pipeline picks up exactly where it left off. There's no state file to corrupt.
 
-If the failure came after the tag was pushed, run it from the tagged commit (re-dispatch the workflow on the release branch). sr sees there are no new commits, checks the tagged release, and finishes whatever is missing: release object, assets, publish. See [Recovery from a broken release](../README.md#recovery-from-a-broken-release) for the limits.
+If the failure came after the tag was pushed, run it from the tagged commit (re-dispatch the workflow on the release branch). sr sees there are no new commits, checks the tagged release, and finishes whatever is missing: release object, assets, publish. See [Recovery from a broken release](https://github.com/urmzd/sr/blob/main/README.md#recovery-from-a-broken-release) for the limits.
 
 ### What if the branch moves while a release is running?
 
@@ -105,4 +105,4 @@ For workspace-aware ecosystems, declare one entry at the workspace root with `pu
 
 ### Migrating from v7.x
 
-Run `sr migrate` or read [migration.md](../crates/cli/docs/migration.md). The v8 jump is breaking: `sr status` → `sr plan`; `packages[].independent` / `tag_prefix` / `hooks` are gone; `publish:` becomes a typed enum; globs in `artifacts`/`stage_files` become literal paths; `sr-manifest.json` is no longer produced.
+Run `sr migrate` or read [migration.md](https://github.com/urmzd/sr/blob/main/crates/cli/docs/migration.md). The v8 jump is breaking: `sr status` → `sr plan`; `packages[].independent` / `tag_prefix` / `hooks` are gone; `publish:` becomes a typed enum; globs in `artifacts`/`stage_files` become literal paths; `sr-manifest.json` is no longer produced.
