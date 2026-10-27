@@ -13,6 +13,9 @@
 
 <p align="center">
   <a href="https://github.com/urmzd/sr/actions/workflows/ci.yml"><img src="https://github.com/urmzd/sr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  &nbsp;
+  <a href="https://github.com/urmzd/sr/releases"><img src="https://img.shields.io/github/v/release/urmzd/sr" alt="Release"></a>
+  &nbsp;
   <a href="https://crates.io/crates/sr-cli"><img src="https://img.shields.io/crates/v/sr-cli" alt="crates.io"></a>
   &nbsp;
   <a href="LICENSE"><img src="https://img.shields.io/github/license/urmzd/sr" alt="License"></a>
@@ -20,38 +23,88 @@
 
 ## Contents
 
-- [Why?](#why)
-- [Quick Start](#quick-start)
+- [Features](#features)
 - [Installation](#installation)
-- [Prerequisites](#prerequisites)
-- [GitHub Enterprise Server (GHES)](#github-enterprise-server-ghes)
-- [Branch Protection](#branch-protection)
-- [Three verbs: plan, prepare, release](#three-verbs-plan-prepare-release)
-- [Publishers](#publishers)
-- [CLI Reference](#cli-reference)
+- [Quick Start](#quick-start)
+- [Examples](#examples)
+- [Usage](#usage)
 - [Configuration](#configuration)
-- [FAQ / Troubleshooting](#faq--troubleshooting)
-- [Architecture](#architecture)
-- [Design Philosophy](#design-philosophy)
+- [FAQ](#faq)
 - [Development](#development)
-- [Contributing](#contributing)
+- [Documentation](#documentation)
 - [Agent Skill](#agent-skill)
 - [License](#license)
 
-## Why?
+## Features
 
-Most release tools require Node.js, a pile of plugins, and still only handle the tagging step. **sr** is a single static binary that treats releases as state to reconcile: declare desired state in `sr.yaml`, let commits describe the diff, apply.
-
-- **Terraform-shaped verbs**: `sr plan` previews, `sr prepare` writes manifests + changelog, `sr release` applies. Idempotent; safe to re-run.
-- **Typed publishers**: built-in cargo / npm / docker / pypi / go. Each queries its registry before publishing, skips when already there.
-- **Workspace-aware**: cargo / npm / pnpm / yarn / uv monorepos publish every member in one go; one tag, one version.
+- **Terraform-shaped verbs**: `sr plan` previews, `sr prepare` writes manifests and changelog, `sr release` applies. Idempotent and safe to re-run.
+- **Typed publishers**: built-in cargo, npm, docker, pypi and go. Each queries its registry before publishing and skips when the version is already there.
+- **Workspace-aware**: cargo, npm, pnpm, yarn and uv monorepos publish every member in one go, with one tag and one version.
 - **Release channels**: named channels (canary, rc, stable) for trunk-based promotion.
-- **Agent skill**: ships as a portable [Agent Skill](https://agentskills.io) for Claude Code, Gemini CLI, Cursor, and other AI tools.
+- **Self-healing releases**: state lives in git, GitHub and registries. Re-run after a failure and sr finishes whatever is missing.
 - **Single static binary**: no runtime, no plugins, no async runtime.
+
+## Installation
+
+### Prerequisites
+
+| Requirement | Notes |
+|-------------|-------|
+| `git` | sr shells out to git for tags, commits and pushes |
+| `GH_TOKEN` or `GITHUB_TOKEN` | Needed by `sr release` to call the GitHub REST API. Not needed for `--dry-run` |
+
+The GitHub Action sets the token from its `github-token` input.
+
+### Script (macOS / Linux)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/urmzd/sr/main/install.sh | sh
+```
+
+The installer adds `~/.local/bin` to your `PATH` in your shell profile (`.zshrc`, `.bashrc`, or `config.fish`).
+
+### GitHub Action
+
+```yaml
+- uses: urmzd/sr@v9
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+See [GitHub Action](#github-action) for workflows, inputs and outputs.
+
+### Manual
+
+Download a pre-built binary from the [releases page](https://github.com/urmzd/sr/releases/latest):
+
+| Target | File |
+|--------|------|
+| Linux x86_64 (glibc) | `sr-x86_64-unknown-linux-gnu` |
+| Linux aarch64 (glibc) | `sr-aarch64-unknown-linux-gnu` |
+| Linux x86_64 (musl/static) | `sr-x86_64-unknown-linux-musl` |
+| Linux aarch64 (musl/static) | `sr-aarch64-unknown-linux-musl` |
+| macOS x86_64 | `sr-x86_64-apple-darwin` |
+| macOS aarch64 | `sr-aarch64-apple-darwin` |
+| Windows x86_64 | `sr-x86_64-pc-windows-msvc.exe` |
+
+Prefer the statically linked musl variants on Linux: they run on any distribution (Alpine, Debian, RHEL, etc.).
+
+```bash
+mkdir -p ~/.local/bin
+chmod +x sr-* && mv sr-* ~/.local/bin/sr
+```
+
+### Build from source
+
+```bash
+cargo install --path crates/cli
+```
 
 ## Quick Start
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/urmzd/sr/main/install.sh | sh
+
 # Initialize config. Pass an example name to scaffold from a template.
 sr init
 sr init --list  # show bundled templates
@@ -72,255 +125,30 @@ sr release --dry-run
 sr completions bash >> ~/.bashrc
 ```
 
-Most users run just `sr release` in CI. Use `sr prepare` when you need pre-built artifacts to embed the new version (see [`examples/ci/`](examples/ci/)).
+Most users run only `sr release` in CI. Use `sr prepare` when pre-built artifacts must embed the new version (see [`examples/ci/`](examples/ci/)).
 
-## Installation
+## Examples
 
-### Shell installer (Linux/macOS)
+Each file in [`examples/`](examples/) is a complete `sr.yaml` for one release scenario. Copy the closest match and adjust paths.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/urmzd/sr/main/install.sh | sh
-```
+| Example | Description |
+|---------|-------------|
+| [`cargo-single`](examples/cargo-single.yaml) | Single Rust crate to crates.io |
+| [`cargo-workspace`](examples/cargo-workspace.yaml) | Rust workspace; every member publishes at the shared version |
+| [`npm-single`](examples/npm-single.yaml) | Single npm package to registry.npmjs.org |
+| [`npm-workspace`](examples/npm-workspace.yaml) | npm workspaces (`npm publish --workspaces`) |
+| [`pnpm-workspace`](examples/pnpm-workspace.yaml) | pnpm monorepo (`pnpm publish -r`) |
+| [`uv-workspace`](examples/uv-workspace.yaml) | uv / Python monorepo to PyPI |
+| [`go`](examples/go.yaml) | Go module (tag-only; no registry) |
+| [`docker`](examples/docker.yaml) | Container image to any OCI registry |
+| [`multi-language`](examples/multi-language.yaml) | Rust core + Node CLI, one tag |
+| [`custom`](examples/custom.yaml) | Arbitrary publish command + state check |
 
-The installer automatically adds `~/.local/bin` to your `PATH` in your shell profile (`.zshrc`, `.bashrc`, or `config.fish`).
+See [`examples/ci/`](examples/ci/) for matching `.github/workflows/release.yml` files.
 
-### GitHub Action (recommended)
+## Usage
 
-```yaml
-- uses: urmzd/sr@v9
-  with:
-    github-token: ${{ secrets.GITHUB_TOKEN }}
-```
-
-Minimal: release on every push to `main`:
-
-```yaml
-name: Release
-on:
-  push:
-    branches: [main]
-
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: urmzd/sr@v9
-```
-
-Plan-only on pull requests (preview the next version without cutting a release):
-
-```yaml
-- uses: urmzd/sr@v9
-  with:
-    mode: plan
-```
-
-Use outputs in subsequent steps:
-
-```yaml
-- uses: urmzd/sr@v9
-  id: sr
-- if: steps.sr.outputs.released == 'true'
-  run: echo "Released ${{ steps.sr.outputs.version }}"
-```
-
-Verify the downloaded sr binary with a SHA256 checksum:
-
-```yaml
-- uses: urmzd/sr@v9
-  with:
-    sha256: "abc123..."
-```
-
-For maximum security, pin the action to a full-length commit SHA:
-
-```yaml
-- uses: urmzd/sr@<commit-sha>
-  with:
-    sha256: "abc123..."
-```
-
-Manual re-trigger with `workflow_dispatch` (useful when a previous release partially failed; re-runs reconcile any missing state idempotently, no special flag needed):
-
-```yaml
-name: Release
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: urmzd/sr@v9
-```
-
-#### Inputs
-
-| Input | Description | Default |
-|-------|-------------|---------|
-| `mode` | `plan` \| `prepare` \| `release`. Default `release`. | `release` |
-| `dry-run` | Deprecated alias for `mode: plan`. | `false` |
-| `github-token` | GitHub token for creating releases | `${{ github.token }}` |
-| `git-user-name` | Git author/committer name for the release commit and tag. Pass empty to let `sr.yaml` (`git.user.name`) or the repo's git config take over | `sr-releaser[bot]` |
-| `git-user-email` | Git author/committer email for the release commit and tag. Pass empty to let `sr.yaml` (`git.user.email`) or the repo's git config take over | `sr-releaser[bot]@users.noreply.github.com` |
-| `artifacts` | Literal paths to artifact files to upload (space-separated) | `""` |
-| `channel` | Release channel (e.g. canary, rc, stable) | `""` |
-| `prerelease` | Pre-release identifier (e.g. alpha, beta, rc) | `""` |
-| `stage-files` | Additional literal paths to stage in the release commit (space-separated) | `""` |
-| `sign-tags` | Sign tags with GPG/SSH | `false` |
-| `draft` | Create GitHub release as a draft | `false` |
-| `base-ref` | Commit to release (ref or SHA), locked at plan time so queued runs each release their own commit | `${{ github.sha }}` |
-| `sha256` | Expected SHA256 checksum of the sr binary (hex string) | `""` |
-
-#### Outputs
-
-| Output | Description |
-|--------|-------------|
-| `version` | The released version (empty if no release) |
-| `previous-version` | The previous version before this release (empty if first release) |
-| `tag` | The git tag created for this release (empty if no release) |
-| `bump` | The bump level applied (`major`/`minor`/`patch`, empty if no release) |
-| `floating-tag` | The floating major tag (e.g. `v3`, empty if disabled or no release) |
-| `commit-count` | Number of commits included in this release |
-| `released` | Whether a release was created (`true`/`false`) |
-| `json` | Full release metadata as JSON (empty if no release) |
-
-### Binary download
-
-Download the latest release for your platform from
-[Releases](https://github.com/urmzd/sr/releases):
-
-| Target | File |
-|--------|------|
-| Linux x86_64 (glibc) | `sr-x86_64-unknown-linux-gnu` |
-| Linux aarch64 (glibc) | `sr-aarch64-unknown-linux-gnu` |
-| Linux x86_64 (musl/static) | `sr-x86_64-unknown-linux-musl` |
-| Linux aarch64 (musl/static) | `sr-aarch64-unknown-linux-musl` |
-| macOS x86_64 | `sr-x86_64-apple-darwin` |
-| macOS aarch64 | `sr-aarch64-apple-darwin` |
-| Windows x86_64 | `sr-x86_64-pc-windows-msvc.exe` |
-
-The MUSL variants are statically linked and work on any Linux distribution (Alpine, Debian, RHEL, etc.). Prefer these for maximum compatibility.
-
-```bash
-mkdir -p ~/.local/bin
-chmod +x sr-* && mv sr-* ~/.local/bin/sr
-```
-
-Ensure `~/.local/bin` is on your `$PATH`.
-
-### Build from source
-
-```bash
-cargo install --path crates/sr-cli
-```
-
-## Prerequisites
-
-`sr release` calls the GitHub REST API directly; no external tools are needed. Authentication is via an environment variable:
-
-```bash
-export GH_TOKEN=ghp_xxxxxxxxxxxx  # or GITHUB_TOKEN
-```
-
-The GitHub Action sets this automatically via the `github-token` input. Dry-run mode (`sr release --dry-run`) works without a token.
-
-## GitHub Enterprise Server (GHES)
-
-`sr` works with GitHub Enterprise Server out of the box. The hostname is auto-detected from your git remote URL. Changelog links, compare URLs, and API calls will point to the correct host automatically.
-
-### Setup
-
-Set your `GH_TOKEN` (or `GITHUB_TOKEN`) environment variable with a token that has access to your GHES instance:
-
-```bash
-export GH_TOKEN=ghp_xxxxxxxxxxxx
-```
-
-No additional host configuration is needed: `sr` derives the API base URL from the git remote hostname automatically (e.g. `ghes.example.com` → `https://ghes.example.com/api/v3`).
-
-### How it works
-
-1. `sr` reads the `origin` remote URL and extracts the hostname (e.g. `ghes.example.com`).
-2. Changelog links and compare URLs use `https://<hostname>/owner/repo/...` instead of hardcoded `github.com`.
-3. REST API calls are routed to `https://<hostname>/api/v3/...` automatically.
-
-## Branch Protection
-
-If your repository requires signed commits or restricts direct pushes to the release branch, use a **GitHub App** to authenticate `sr`. Commits pushed with a GitHub App installation token are automatically signed by GitHub and can bypass branch rulesets.
-
-### Setup
-
-**1. Create a GitHub App**
-
-- Go to **GitHub Settings → Developer settings → GitHub Apps → New GitHub App**
-- Name: e.g. `sr-bot`
-- Homepage URL: your repo URL
-- Uncheck **Webhook → Active**
-- Repository permissions: **Contents → Read & write**
-- Where can this app be installed: **Only on this account**
-- Create the app, then **Generate a private key**
-- Install the app on your repositories
-
-**2. Store secrets**
-
-Add these as repository or organization secrets:
-
-| Secret | Value |
-|--------|-------|
-| `SR_APP_ID` | The App ID (from the App's settings page) |
-| `SR_APP_PRIVATE_KEY` | The downloaded `.pem` file contents |
-
-**3. Configure repository rulesets**
-
-> Use **repository rulesets**, not legacy branch protection. Legacy branch protection does not support GitHub App bypass for signed commit requirements.
-
-- Go to **repo Settings → Rules → Rulesets → New ruleset**
-- Target branch: `main`
-- Enable: **Require signed commits**, **Require a pull request before merging**
-- Add your GitHub App to the **Bypass list**
-
-### Workflow example
-
-```yaml
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Generate App token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.SR_APP_ID }}
-          private-key: ${{ secrets.SR_APP_PRIVATE_KEY }}
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
-
-      - uses: urmzd/sr@v9
-        with:
-          github-token: ${{ steps.app-token.outputs.token }}
-```
-
-## Three verbs: plan, prepare, release
-
-`sr` is a release-state reconciler, not a task runner. Three verbs:
+### Three verbs: plan, prepare, release
 
 | Verb | Reads | Writes |
 |---|---|---|
@@ -328,19 +156,19 @@ jobs:
 | `sr prepare` | config + commits | manifest files + changelog (no git) |
 | `sr release` | everything | commit, tag, push, release, upload, publish |
 
-sr does not run user shell commands. Artifact builds happen in CI between `sr prepare` and `sr release` so binaries / wheels / packed tarballs embed the newly-bumped version.
+sr does not run user shell commands. Build artifacts in CI between `sr prepare` and `sr release` so binaries, wheels and packed tarballs embed the bumped version.
 
-### Single-job release
+#### Single-job release
 
-For repos where `cargo publish` / `npm publish` builds and uploads internally, one verb is enough:
+When `cargo publish` / `npm publish` builds and uploads internally, one verb is enough:
 
 ```yaml
 - uses: urmzd/sr@v9
 ```
 
-### Multi-platform binaries (prepare → build matrix → release)
+#### Multi-platform binaries (prepare, build matrix, release)
 
-When you need pre-built binaries for multiple targets, split into three jobs:
+For pre-built binaries on multiple targets, split into three jobs:
 
 ```yaml
 jobs:
@@ -388,50 +216,147 @@ jobs:
 
 Full worked examples per ecosystem live in [`examples/ci/`](examples/ci/).
 
-## Publishers
+### GitHub Action
 
-Every package's `publish:` is a typed variant: sr handles the registry check + publish command internally, so users never write shell.
+Release on every push to `main`. The `workflow_dispatch` trigger lets you re-run a partially failed release; sr reconciles missing state idempotently, no special flag needed:
 
 ```yaml
-packages:
-  - path: .
-    version_files: [Cargo.toml]
-    publish:
-      type: cargo  # cargo publish to crates.io
+name: Release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
-  - path: packages/web
-    version_files: [packages/web/package.json]
-    publish:
-      type: npm  # npm publish; auto-detects pnpm / yarn
-      workspace: true  # pnpm publish -r / npm publish --workspaces
-
-  - path: services/api
-    publish:
-      type: docker
-      image: ghcr.io/urmzd/api
-      platforms: [linux/amd64, linux/arm64]
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: urmzd/sr@v9
 ```
 
-Supported types: `cargo`, `npm`, `docker`, `pypi`, `go`, `custom`. Each publisher queries its registry's API to decide if work is needed (e.g. `GET https://crates.io/api/v1/crates/<name>/<version>`: 200 means already published, skip). Re-running `sr release` on an already-published package is a noop. See [`examples/`](examples/) for one complete config per ecosystem.
+Preview the next version on pull requests without cutting a release:
 
-### JSON output schema
-
-All three verbs emit the same flat JSON to stdout on success:
-
-```json
-{
-  "version": "1.2.3",
-  "previous_version": "1.2.2",
-  "tag": "v1.2.3",
-  "bump": "patch",
-  "floating_tag": "v1",
-  "commit_count": 4
-}
+```yaml
+- uses: urmzd/sr@v9
+  with:
+    mode: plan
 ```
 
-`sr plan` additionally includes a `resources` array (Terraform-style resource diff). Diagnostic messages and publisher output (`npm publish`, `cargo publish`, custom commands) go to stderr; stdout is always clean JSON (or empty on exit code 2, "no releasable changes").
+Use outputs in later steps:
 
-## CLI Reference
+```yaml
+- uses: urmzd/sr@v9
+  id: sr
+- if: steps.sr.outputs.released == 'true'
+  run: echo "Released ${{ steps.sr.outputs.version }}"
+```
+
+Verify the downloaded binary with a SHA256 checksum, and pin the action to a full-length commit SHA for maximum security:
+
+```yaml
+- uses: urmzd/sr@<commit-sha>
+  with:
+    sha256: "abc123..."
+```
+
+#### Inputs
+
+| Input | Description | Default |
+|-------|-------------|---------|
+| `mode` | `plan` \| `prepare` \| `release` | `release` |
+| `dry-run` | Deprecated alias for `mode: plan` | `false` |
+| `github-token` | GitHub token for creating releases | `${{ github.token }}` |
+| `git-user-name` | Git author/committer name for the release commit and tag. Pass empty to defer to `sr.yaml` (`git.user.name`) or the repo's git config | `sr-releaser[bot]` |
+| `git-user-email` | Git author/committer email for the release commit and tag. Pass empty to defer to `sr.yaml` (`git.user.email`) or the repo's git config | `sr-releaser[bot]@users.noreply.github.com` |
+| `artifacts` | Literal paths to artifact files to upload (space-separated) | `""` |
+| `channel` | Release channel (e.g. canary, rc, stable) | `""` |
+| `prerelease` | Pre-release identifier (e.g. alpha, beta, rc) | `""` |
+| `stage-files` | Additional literal paths to stage in the release commit (space-separated) | `""` |
+| `sign-tags` | Sign tags with GPG/SSH | `false` |
+| `draft` | Create GitHub release as a draft | `false` |
+| `base-ref` | Commit to release (ref or SHA), locked at plan time so queued runs each release their own commit | `${{ github.sha }}` |
+| `sha256` | Expected SHA256 checksum of the sr binary (hex string) | `""` |
+
+#### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `version` | The released version (empty if no release) |
+| `previous-version` | The previous version before this release (empty if first release) |
+| `tag` | The git tag created for this release (empty if no release) |
+| `bump` | The bump level applied (`major`/`minor`/`patch`, empty if no release) |
+| `floating-tag` | The floating major tag (e.g. `v3`, empty if disabled or no release) |
+| `commit-count` | Number of commits included in this release |
+| `released` | Whether a release was created (`true`/`false`) |
+| `json` | Full release metadata as JSON (empty if no release) |
+
+### GitHub Enterprise Server
+
+sr works with GHES with no extra configuration. It reads the `origin` remote hostname (e.g. `ghes.example.com`) and uses it for changelog links, compare URLs, and REST API calls (`https://ghes.example.com/api/v3`). Set `GH_TOKEN` (or `GITHUB_TOKEN`) to a token with access to your GHES instance.
+
+### Branch protection
+
+If the release branch requires signed commits or restricts direct pushes, authenticate sr with a **GitHub App**. GitHub signs commits pushed with an App installation token, and the App can bypass branch rulesets.
+
+**1. Create a GitHub App**
+
+- Go to **GitHub Settings → Developer settings → GitHub Apps → New GitHub App**
+- Name: e.g. `sr-bot`
+- Homepage URL: your repo URL
+- Uncheck **Webhook → Active**
+- Repository permissions: **Contents → Read & write**
+- Where can this app be installed: **Only on this account**
+- Create the app, then **Generate a private key**
+- Install the app on your repositories
+
+**2. Store secrets**
+
+Add these as repository or organization secrets:
+
+| Secret | Value |
+|--------|-------|
+| `SR_APP_ID` | The App ID (from the App's settings page) |
+| `SR_APP_PRIVATE_KEY` | The downloaded `.pem` file contents |
+
+**3. Configure repository rulesets**
+
+> Use **repository rulesets**, not legacy branch protection. Legacy branch protection does not support GitHub App bypass for signed commit requirements.
+
+- Go to **repo Settings → Rules → Rulesets → New ruleset**
+- Target branch: `main`
+- Enable: **Require signed commits**, **Require a pull request before merging**
+- Add your GitHub App to the **Bypass list**
+
+**4. Use the App token in the workflow**
+
+```yaml
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.SR_APP_ID }}
+          private-key: ${{ secrets.SR_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: urmzd/sr@v9
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+```
 
 ### Commands
 
@@ -465,6 +390,23 @@ sr init --list  # list available examples
 sr init --force  # overwrite existing config
 ```
 
+### JSON output
+
+All three verbs emit the same flat JSON to stdout on success:
+
+```json
+{
+  "version": "1.2.3",
+  "previous_version": "1.2.2",
+  "tag": "v1.2.3",
+  "bump": "patch",
+  "floating_tag": "v1",
+  "commit_count": 4
+}
+```
+
+`sr plan` also includes a `resources` array (Terraform-style resource diff). Diagnostics and publisher output (`npm publish`, `cargo publish`, custom commands) go to stderr; stdout is always clean JSON, or empty on exit code 2.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -475,29 +417,29 @@ sr init --force  # overwrite existing config
 
 ### Recovery from a broken release
 
-The pipeline is idempotent. Re-running `sr release` after any mid-flight failure picks up exactly where it left off. Tag created but release object missing? The next run creates the release object and skips tag creation. Assets uploaded but publish failed? The next run skips the upload and retries the publish.
+Re-run `sr release` after any mid-flight failure; it picks up exactly where it left off. Tag created but release object missing? The next run creates the release object and skips tag creation. Assets uploaded but publish failed? The next run skips the upload and retries the publish.
 
 This holds after the version is tagged too. With no new commits `sr release` would normally exit `2`, but when the checkout is the latest tag's commit it first reads that release's actual state: the release object, the declared assets, and each publisher's registry check. Anything missing is completed for the tagged version (no new commit, no new tag) and the run exits `0` with that version's JSON. A complete release still exits `2`.
 
-Three limits, all because sr only resumes what it can observe on the tree that was released:
+sr only resumes what it can observe on the released tree, which sets three limits:
 
 - The checkout must be the tagged commit. Re-dispatch the workflow on the release branch rather than using "Re-run failed jobs", which checks out the commit from before the release commit.
 - A `custom` publisher needs a `check` command to be retried on its own; without one its state is unknown.
 - Draft releases are skipped, since GitHub cannot look a draft up by tag.
 
-No state files, no local checkpoints. Actual state lives in git + GitHub + registries; sr reads and converges. See [Architecture](#architecture) for the reconciler contract.
+sr keeps no state files or local checkpoints.
+
+### Limitations
+
+- **GitHub only**: GitHub.com and GitHub Enterprise Server are the only supported VCS providers.
 
 ## Configuration
 
-`sr` looks for `sr.yaml` in the repository root. All fields are optional and have sensible defaults.
+sr reads `sr.yaml` from the repository root. Every field is optional and has a default. Run `sr init` to generate a fully-commented `sr.yaml` with every option documented inline.
 
-Running `sr init` generates a fully-commented `sr.yaml` with every available option documented inline.
+The config has six top-level sections: `git`, `commit`, `changelog`, `channels`, `vcs`, and `packages`.
 
-### Configuration reference
-
-The config has 6 top-level sections: `git`, `commit`, `changelog`, `channels`, `vcs`, and `packages`:
-
-#### `git`
+### `git`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -509,9 +451,9 @@ The config has 6 top-level sections: `git`, `commit`, `changelog`, `channels`, `
 | `git.user.email` | `string?` | `null` | Git author/committer email. When unset, sr uses the repo's git config (or the env fallback `SR_GIT_USER_EMAIL`) |
 | `git.skip_patterns` | `string[]` | `["[skip release]", "[skip sr]"]` | Substrings that, when present in a commit message, exclude that commit from release planning and the changelog |
 
-Identity precedence: `--git-user-name` / `--git-user-email` flags > `git.user` in `sr.yaml` > `SR_GIT_USER_NAME` / `SR_GIT_USER_EMAIL` env > git's own resolution. sr passes the chosen identity via `git -c user.name=… -c user.email=…` per invocation, so persisted git config is never rewritten. `skip_patterns` is a plain substring match against the full commit message, so the token can live in the subject or the body.
+Identity precedence: `--git-user-name` / `--git-user-email` flags > `git.user` in `sr.yaml` > `SR_GIT_USER_NAME` / `SR_GIT_USER_EMAIL` env > git's own resolution. sr passes the identity via `git -c user.name=… -c user.email=…` per invocation and never rewrites persisted git config. `skip_patterns` is a plain substring match against the full commit message, so the token can live in the subject or the body.
 
-#### `commit`
+### `commit`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -520,7 +462,12 @@ Identity precedence: `--git-user-name` / `--git-user-email` flags > `git.user` i
 | `commit.types.patch` | `string[]` | `["fix", "perf", "refactor"]` | Types that trigger a patch bump |
 | `commit.types.none` | `string[]` | `["docs", "revert", "chore", "ci", "test", "build", "style"]` | Types that do not trigger a release |
 
-#### `changelog`
+sr derives the commit pattern from the type names and ignores any type not listed. Breaking changes are detected per the [Conventional Commits](https://www.conventionalcommits.org/) spec and trigger a `major` bump regardless of type:
+
+1. **`!` suffix**: e.g. `feat!: new API` or `fix(core)!: rename method`
+2. **`BREAKING CHANGE:` footer**: a line starting with `BREAKING CHANGE:` or `BREAKING-CHANGE:` in the commit body
+
+### `changelog`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -530,7 +477,51 @@ Identity precedence: `--git-user-name` / `--git-user-email` flags > `git.user` i
 | `changelog.groups[].name` | `string` | None (required) | Section heading name |
 | `changelog.groups[].content` | `string[]` | None (required) | Commit types that appear in this section. Use `"breaking"` for breaking changes |
 
-#### `channels`
+When `changelog.file` is set:
+
+- If the file doesn't exist, it's created with a `# Changelog` heading
+- If it exists, new entries are inserted after the first heading (prepended, not appended)
+- Each entry has the format: `## <version> (<date>)`
+- Sections appear in the order defined in `changelog.groups`
+- Commits link to their full SHA on GitHub when the repo URL is available
+
+#### Changelog templates
+
+Set `changelog.template` to a [minijinja](https://docs.rs/minijinja) (Jinja2-compatible) template file for full control over changelog output. When set, it replaces the default markdown format entirely.
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `entries` | `ChangelogEntry[]` | Array of release entries (newest first) |
+| `entries[].version` | `string` | Version string (e.g. `1.2.3`) |
+| `entries[].date` | `string` | Release date (`YYYY-MM-DD`) |
+| `entries[].commits` | `ConventionalCommit[]` | Array of commits in this release |
+| `entries[].compare_url` | `string?` | GitHub compare URL (may be null) |
+| `entries[].repo_url` | `string?` | Repository URL (may be null) |
+| `entries[].commits[].sha` | `string` | Full commit SHA |
+| `entries[].commits[].type` | `string` | Commit type (e.g. `feat`, `fix`) |
+| `entries[].commits[].scope` | `string?` | Commit scope (may be null) |
+| `entries[].commits[].description` | `string` | Commit description |
+| `entries[].commits[].body` | `string?` | Commit body (may be null) |
+| `entries[].commits[].breaking` | `bool` | Whether this is a breaking change |
+
+```yaml
+changelog:
+  file: CHANGELOG.md
+  template: changelog.md.j2
+```
+
+`changelog.md.j2`:
+
+```jinja
+{% for entry in entries %}
+## {{ entry.version }} ({{ entry.date }})
+{% for c in entry.commits %}
+- {% if c.scope %}**{{ c.scope }}**: {% endif %}{{ c.description }}
+{% endfor %}
+{% endfor %}
+```
+
+### `channels`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -541,15 +532,47 @@ Identity precedence: `--git-user-name` / `--git-user-email` flags > `git.user` i
 | `channels.content[].prerelease` | `string?` | `null` | Pre-release identifier (e.g. `"canary"`, `"rc"`). None = stable |
 | `channels.content[].draft` | `bool` | `false` | Create GitHub release as draft |
 
-#### `vcs`
+Channels model trunk-based promotion from a single branch:
+
+```yaml
+channels:
+  default: stable
+  branch: main
+  content:
+    - name: canary
+      prerelease: canary
+    - name: rc
+      prerelease: rc
+      draft: true
+    - name: stable
+```
+
+```bash
+sr release --channel canary  # 1.2.0-canary.1
+sr release --channel rc  # 1.2.0-rc.1
+sr release  # 1.2.0 (stable, uses default channel)
+```
+
+#### Pre-releases
+
+Set `prerelease` on a channel, or pass `sr release --prerelease alpha`, to produce versions like `1.2.0-alpha.1` instead of `1.2.0`:
+
+- The version is based on the latest *stable* tag (pre-release tags are skipped when computing the base)
+- The counter auto-increments by scanning existing tags: `1.2.0-alpha.1` → `1.2.0-alpha.2` → ...
+- Switching identifiers resets the counter: `1.2.0-alpha.3` → `1.2.0-beta.1`
+- The GitHub release is marked as a pre-release
+- Floating tags are not updated for pre-releases
+- Stable releases (`prerelease: null`) skip over pre-release tags entirely
+
+### `vcs`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `vcs.github.release_name_template` | `string?` | `null` | Minijinja template for the GitHub release name. Variables: `version`, `tag_name`, `tag_prefix` |
 
-#### `packages`
+### `packages`
 
-Monorepos list one entry per package. Every package shares the same global version: `packages[]` describes *where to write versions, what to upload, and how to publish*, not *how to version*.
+List one entry per package. Every package shares the same global version: `packages[]` declares *where to write versions, what to upload, and how to publish*, not *how to version*.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -561,9 +584,29 @@ Monorepos list one entry per package. Every package shares the same global versi
 | `packages[].changelog` | `ChangelogConfig?` | inherits top-level | Changelog config override for this package. |
 | `packages[].publish` | `PublishConfig?` | `null` | Publish target. See [Publishers](#publishers). |
 
-#### `packages[].publish`
+#### Publishers
 
-Typed enum: pick the registry type and sr handles the check + publish command. No user shell required.
+`packages[].publish` is a typed variant: pick the registry type and sr runs the registry check and publish command, with no user shell.
+
+```yaml
+packages:
+  - path: .
+    version_files: [Cargo.toml]
+    publish:
+      type: cargo  # cargo publish to crates.io
+
+  - path: packages/web
+    version_files: [packages/web/package.json]
+    publish:
+      type: npm  # npm publish; auto-detects pnpm / yarn
+      workspace: true  # pnpm publish -r / npm publish --workspaces
+
+  - path: services/api
+    publish:
+      type: docker
+      image: ghcr.io/urmzd/api
+      platforms: [linux/amd64, linux/arm64]
+```
 
 | Type | Fields | Notes |
 |---|---|---|
@@ -573,6 +616,90 @@ Typed enum: pick the registry type and sr handles the check + publish command. N
 | `pypi` | `repository: string?`, `workspace: bool`, `dist_dir: string?` | Auto-detects `uv` vs `twine`. `workspace: true` iterates `[tool.uv.workspace].members`; each member's wheel + sdist are resolved from `<package_path>/<dist_dir>` (default `dist/`, matching `uv build --all`). |
 | `go` | None | No-op. Go modules publish via git tag, which sr already cuts. |
 | `custom` | `command: string`, `check: string?`, `cwd: string?` | Escape hatch for registries without built-in support (helm, private Maven, etc.). |
+
+Each publisher queries its registry to decide if work is needed (e.g. `GET https://crates.io/api/v1/crates/<name>/<version>`: 200 means already published, skip). Re-running `sr release` on an already-published package is a noop.
+
+#### Monorepos
+
+One tag, one version, every package. Each package's `version_files` are bumped in lockstep:
+
+```yaml
+packages:
+  - path: crates/core
+    version_files: [crates/core/Cargo.toml]
+    publish:
+      type: cargo
+
+  - path: crates/cli
+    version_files: [crates/cli/Cargo.toml]
+    stage_files: [crates/cli/Cargo.lock]
+    publish:
+      type: cargo
+```
+
+For workspace-aware ecosystems, one entry at the root is enough:
+
+```yaml
+packages:
+  - path: .
+    version_files: [Cargo.toml]  # sr finds every [workspace].members crate
+    stage_files: [Cargo.lock]
+    publish:
+      type: cargo
+      workspace: true  # publishes every member
+```
+
+Per-package changelog sections render automatically when more than one package has commits. The tag is always repo-wide (`git.tag_prefix` + semver); there are no per-package tags.
+
+### Supported version files
+
+| Filename | Key updated | Method | Notes |
+|---|---|---|---|
+| `Cargo.toml` | `package.version` or `workspace.package.version` | TOML parser | Preserves formatting/comments. Also updates `[workspace.dependencies]` entries that have both `path` and `version` fields. **Auto-discovers workspace members** |
+| `package.json` | `version` | JSON parser | Pretty-printed output with trailing newline. **Auto-discovers npm workspace members** |
+| `pyproject.toml` | `project.version` or `tool.poetry.version` | TOML parser | Preserves formatting/comments. Supports both PEP 621 and Poetry layouts. **Auto-discovers uv workspace members** |
+| `pom.xml` | First `<version>` after `</parent>` (or `</modelVersion>`) | Regex | Skips the `<parent>` block to avoid changing the parent version |
+| `build.gradle` | `version = '...'` or `version = "..."` | Regex | Only replaces the first match (avoids changing dependency versions) |
+| `build.gradle.kts` | `version = "..."` | Regex | Only replaces the first match |
+| `*.go` | `var Version = "..."` or `const Version string = "..."` | Regex | Matches the first `Version` variable/constant declaration |
+
+#### Workspace auto-discovery
+
+When bumping a workspace root, sr finds and bumps every member manifest, so list only the root in `version_files`:
+
+| Ecosystem | Root indicator | Members discovered via |
+|-----------|---------------|----------------------|
+| **Cargo** | `[workspace]` with `members` | `workspace.members` globs → member `Cargo.toml` files (skips `version.workspace = true`) |
+| **npm** | `workspaces` array in `package.json` | `workspaces` globs → member `package.json` files (skips members without `version`) |
+| **uv** | `[tool.uv.workspace]` with `members` | `tool.uv.workspace.members` globs → member `pyproject.toml` files (skips members without `version`) |
+
+sr keeps lock files and intra-workspace dependency requirements in sync at the same time. `Cargo.lock`, `uv.lock`, `poetry.lock` and `package-lock.json` are rewritten in place and staged in the release commit; Cargo path deps (`{ path = ..., version = ... }`) and npm sibling ranges (`^1.0.0`) are retargeted so a major bump doesn't leave the workspace unresolvable. This is plain data editing: no `cargo update`, `uv lock`, `poetry lock` or `npm install`, and no network access. Registry entries and their hashes are untouched. See the [FAQ](docs/FAQ.md#does-updating-lock-files-need-a-network-resolve) for the matching rules and verified format versions.
+
+### Environment variables
+
+| Variable | Context | Description |
+|----------|---------|-------------|
+| `GH_TOKEN` / `GITHUB_TOKEN` | Release | GitHub API token for creating releases and uploading artifacts. Not needed for `--dry-run` |
+| `SR_GIT_USER_NAME` | Release | Fallback git author/committer name. Consulted only when neither `--git-user-name` nor `git.user.name` in `sr.yaml` is set |
+| `SR_GIT_USER_EMAIL` | Release | Fallback git author/committer email. Same precedence as `SR_GIT_USER_NAME` |
+| `SR_BASE_REF` | Plan / Prepare / Release | Fallback for `--base-ref`: the commit the release is locked to. Consulted only when the flag is not given; empty means lock to HEAD at plan time |
+| `SR_VERSION` | Publish | The new version string (e.g. `1.2.3`), set in the environment of publisher commands, including `custom` |
+| `SR_TAG` | Publish | The new tag name (e.g. `v1.2.3`), set in the environment of publisher commands, including `custom` |
+
+### Release execution order
+
+1. **Parse commits**: determine version bump from commits since the last tag
+2. **Bump version files**: every `packages[].version_files` entry across every package is rewritten on disk to the new version (workspace roots auto-expand to members)
+3. **Write changelog**: `changelog.file` is updated (if configured)
+4. **Validate artifacts**: every declared `artifacts` path must exist on disk (built in CI between `sr prepare` and `sr release`)
+5. **Git commit**: bumped manifests + changelog + `stage_files` are committed as `chore(release): <tag> [skip ci]`
+6. **Create and push tag**: annotated tag at HEAD (signed with GPG/SSH when `git.sign_tags: true`)
+7. **Create/update floating tag** (if `git.floating_tag: true`)
+8. **Create or update GitHub release**: PATCH-semantic update preserves existing assets on re-runs
+9. **Upload artifacts**: MIME-type-aware uploads to the GitHub release (aggregated from every package)
+10. **Publish**: typed publishers run per package; each queries its registry first and skips if already published
+
+Each stage checks external state (tag existence, release object, asset basenames, registry versions) and skips when already converged. Re-running a completed release is a full noop.
 
 ### Example config
 
@@ -639,18 +766,6 @@ channels:
   content:
     - name: stable
 
-# Optional: pre-release or draft channels
-# channels:
-#   default: stable
-#   branch: main
-#   content:
-#     - name: canary
-#       prerelease: canary
-#     - name: rc
-#       prerelease: rc
-#       draft: true
-#     - name: stable
-
 vcs:
   github:
     release_name_template: "{{ tag_name }}"
@@ -672,258 +787,7 @@ packages:
 
 More complete examples (pnpm, uv, docker, multi-language, custom) live in [`examples/`](examples/).
 
-### Supported version files
-
-| Filename | Key updated | Method | Notes |
-|---|---|---|---|
-| `Cargo.toml` | `package.version` or `workspace.package.version` | TOML parser | Preserves formatting/comments. Also updates `[workspace.dependencies]` entries that have both `path` and `version` fields. **Auto-discovers workspace members** |
-| `package.json` | `version` | JSON parser | Pretty-printed output with trailing newline. **Auto-discovers npm workspace members** |
-| `pyproject.toml` | `project.version` or `tool.poetry.version` | TOML parser | Preserves formatting/comments. Supports both PEP 621 and Poetry layouts. **Auto-discovers uv workspace members** |
-| `pom.xml` | First `<version>` after `</parent>` (or `</modelVersion>`) | Regex | Skips the `<parent>` block to avoid changing the parent version |
-| `build.gradle` | `version = '...'` or `version = "..."` | Regex | Only replaces the first match (avoids changing dependency versions) |
-| `build.gradle.kts` | `version = "..."` | Regex | Only replaces the first match |
-| `*.go` | `var Version = "..."` or `const Version string = "..."` | Regex | Matches the first `Version` variable/constant declaration |
-
-#### Workspace auto-discovery
-
-When bumping a workspace root, `sr` automatically finds and bumps all member manifests (no need to list them individually in `version_files`):
-
-| Ecosystem | Root indicator | Members discovered via |
-|-----------|---------------|----------------------|
-| **Cargo** | `[workspace]` with `members` | `workspace.members` globs → member `Cargo.toml` files (skips `version.workspace = true`) |
-| **npm** | `workspaces` array in `package.json` | `workspaces` globs → member `package.json` files (skips members without `version`) |
-| **uv** | `[tool.uv.workspace]` with `members` | `tool.uv.workspace.members` globs → member `pyproject.toml` files (skips members without `version`) |
-
-Lock files and intra-workspace dependency requirements are kept in sync at the same time. `Cargo.lock`, `uv.lock`, `poetry.lock` and `package-lock.json` are rewritten in place and staged in the release commit; Cargo path deps (`{ path = ..., version = ... }`) and npm sibling ranges (`^1.0.0`) are retargeted so a major bump doesn't leave the workspace unresolvable. All of it is plain data editing: no `cargo update`, `uv lock`, `poetry lock` or `npm install`, and no network access. Registry entries and their hashes are untouched. See the [FAQ](docs/FAQ.md#does-updating-lock-files-need-a-network-resolve) for the exact matching rules and the format versions each rewrite is verified against.
-
-For example, a Cargo workspace only needs the root listed:
-
-```yaml
-packages:
-  - path: .
-    version_files:
-      - Cargo.toml  # automatically bumps all workspace member Cargo.toml files
-```
-
-### Environment variables
-
-| Variable | Context | Description |
-|----------|---------|-------------|
-| `GH_TOKEN` / `GITHUB_TOKEN` | Release | GitHub API token for creating releases and uploading artifacts. Not needed for `--dry-run` |
-| `SR_GIT_USER_NAME` | Release | Fallback git author/committer name. Consulted only when neither `--git-user-name` nor `git.user.name` in `sr.yaml` is set |
-| `SR_GIT_USER_EMAIL` | Release | Fallback git author/committer email. Same precedence as `SR_GIT_USER_NAME` |
-| `SR_BASE_REF` | Plan / Prepare / Release | Fallback for `--base-ref`: the commit the release is locked to. Consulted only when the flag is not given; empty means lock to HEAD at plan time |
-| `SR_VERSION` | Release hooks | The new version string (e.g. `1.2.3`), set for `pre_release` and `post_release` hooks |
-| `SR_TAG` | Release hooks | The new tag name (e.g. `v1.2.3`), set for `pre_release` and `post_release` hooks |
-
-### Commit types
-
-Commit types are grouped by their bump level under `commit.types`:
-
-```yaml
-commit:
-  types:
-    minor:
-      - feat
-    patch:
-      - fix
-      - perf
-      - refactor
-    none:
-      - docs
-      - revert
-      - chore
-      - ci
-      - test
-      - build
-      - style
-```
-
-The commit pattern is derived automatically from the type names. Any commit type not listed is silently ignored.
-
-Breaking changes are detected in two ways per the [Conventional Commits](https://www.conventionalcommits.org/) spec:
-
-1. **`!` suffix**: e.g. `feat!: new API` or `fix(core)!: rename method`
-2. **`BREAKING CHANGE:` footer**: a line starting with `BREAKING CHANGE:` or `BREAKING-CHANGE:` in the commit body
-
-Either form triggers a `major` bump regardless of the type's configured bump level.
-
-#### Default commit-type mapping
-
-| Type | Bump | Notes |
-|------|------|-------|
-| `feat` | minor | |
-| `fix` | patch | |
-| `perf` | patch | |
-| `refactor` | patch | |
-| `docs` | none | |
-| `revert` | none | |
-| `chore` | none | |
-| `ci` | none | |
-| `test` | none | |
-| `build` | none | |
-| `style` | none | |
-
-Types in the `none` group do not trigger a release on their own. Changelog sections are configured separately under `changelog.groups`.
-
-### Changelog behavior
-
-When `changelog.file` is set:
-- If the file doesn't exist, it's created with a `# Changelog` heading
-- If it already exists, new entries are inserted after the first heading (prepended, not appended)
-- Each entry has the format: `## <version> (<date>)`
-- Sections appear in the order defined in `changelog.groups`
-- Commits link to their full SHA on GitHub when the repo URL is available
-
-### Changelog templates
-
-Set `changelog.template` to a path pointing to a [minijinja](https://docs.rs/minijinja) (Jinja2-compatible) template file for full control over changelog output. When set, the default markdown format is bypassed entirely.
-
-**Template context:**
-
-| Variable | Type | Description |
-|----------|------|-------------|
-| `entries` | `ChangelogEntry[]` | Array of release entries (newest first) |
-| `entries[].version` | `string` | Version string (e.g. `1.2.3`) |
-| `entries[].date` | `string` | Release date (`YYYY-MM-DD`) |
-| `entries[].commits` | `ConventionalCommit[]` | Array of commits in this release |
-| `entries[].compare_url` | `string?` | GitHub compare URL (may be null) |
-| `entries[].repo_url` | `string?` | Repository URL (may be null) |
-| `entries[].commits[].sha` | `string` | Full commit SHA |
-| `entries[].commits[].type` | `string` | Commit type (e.g. `feat`, `fix`) |
-| `entries[].commits[].scope` | `string?` | Commit scope (may be null) |
-| `entries[].commits[].description` | `string` | Commit description |
-| `entries[].commits[].body` | `string?` | Commit body (may be null) |
-| `entries[].commits[].breaking` | `bool` | Whether this is a breaking change |
-
-**Example template:**
-
-```yaml
-changelog:
-  file: CHANGELOG.md
-  template: changelog.md.j2
-```
-
-`changelog.md.j2`:
-
-```jinja
-{% for entry in entries %}
-## {{ entry.version }} ({{ entry.date }})
-{% for c in entry.commits %}
-- {% if c.scope %}**{{ c.scope }}**: {% endif %}{{ c.description }}
-{% endfor %}
-{% endfor %}
-```
-
-### Release execution order
-
-1. **Parse commits**: determine version bump from commits since the last tag
-2. **Bump version files**: every `packages[].version_files` entry across every package is rewritten on disk to the new version (workspace roots auto-expand to members)
-3. **Write changelog**: `changelog.file` is updated (if configured)
-4. **Validate artifacts**: every declared `artifacts` path must exist on disk (built in CI between `sr prepare` and `sr release`)
-5. **Git commit**: bumped manifests + changelog + `stage_files` are committed as `chore(release): <tag> [skip ci]`
-6. **Create and push tag**: annotated tag at HEAD (signed with GPG/SSH when `git.sign_tags: true`)
-7. **Create/update floating tag** (if `git.floating_tag: true`)
-8. **Create or update GitHub release**: PATCH-semantic update preserves existing assets on re-runs
-9. **Upload artifacts**: MIME-type-aware uploads to the GitHub release (aggregated from every package)
-10. **Publish**: typed publishers run per package; each queries its registry first and skips if already published
-
-Every stage's `is_complete` check reads external state (tag existence, release object, asset basenames, registry versions) and short-circuits when converged. Re-running a completed release is a full noop.
-
-### Release channels
-
-Channels model trunk-based promotion: channels specify which branch they release from and optional pre-release identifiers:
-
-```yaml
-channels:
-  default: stable
-  branch: main
-  content:
-    - name: canary
-      prerelease: canary
-    - name: rc
-      prerelease: rc
-      draft: true
-    - name: stable
-```
-
-```bash
-sr release --channel canary  # 1.2.0-canary.1
-sr release --channel rc  # 1.2.0-rc.1
-sr release  # 1.2.0 (stable, uses default channel)
-```
-
-**Channel fields:**
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `name` | `string` | None (required) | Channel name |
-| `prerelease` | `string?` | `null` | Pre-release identifier. None = stable |
-| `draft` | `bool` | `false` | Create GitHub release as draft |
-
-### Pre-releases
-
-Set `prerelease` on a channel to produce versions like `1.2.0-alpha.1` instead of `1.2.0`:
-
-```yaml
-channels:
-  default: stable
-  branch: main
-  content:
-    - name: alpha
-      prerelease: alpha
-    - name: stable
-```
-
-Or via CLI: `sr release --prerelease alpha`
-
-**Behavior:**
-- The version is based on the latest *stable* tag (pre-release tags are skipped when computing the base)
-- The counter auto-increments by scanning existing tags: `1.2.0-alpha.1` → `1.2.0-alpha.2` → ...
-- Switching identifiers resets the counter: `1.2.0-alpha.3` → `1.2.0-beta.1`
-- The GitHub release is marked as a pre-release
-- Floating tags are not updated for pre-releases
-- Stable releases (`prerelease: null`) skip over pre-release tags entirely
-
-### Monorepo support
-
-One tag, one version, every package. Multiple packages in `packages[]` share the same global version; each one's `version_files` are bumped in lockstep on release.
-
-```yaml
-packages:
-  - path: crates/core
-    version_files: [crates/core/Cargo.toml]
-    publish:
-      type: cargo
-
-  - path: crates/cli
-    version_files: [crates/cli/Cargo.toml]
-    stage_files: [crates/cli/Cargo.lock]
-    publish:
-      type: cargo
-```
-
-For workspace-aware ecosystems, one entry at the root is enough: `sr` walks the workspace:
-
-```yaml
-packages:
-  - path: .
-    version_files: [Cargo.toml]  # sr finds every [workspace].members crate
-    stage_files: [Cargo.lock]
-    publish:
-      type: cargo
-      workspace: true  # publishes every member
-```
-
-Per-package changelog sections render automatically when more than one package has commits. The tag is always repo-wide (`git.tag_prefix` + semver); there are no per-package tags.
-
-See [`examples/`](examples/) for cargo/npm/pnpm/uv workspace templates.
-
-### Limitations
-
-- **GitHub only**: the `VcsProvider` trait exists for extensibility, but only GitHub is implemented
-
-## FAQ / Troubleshooting
+## FAQ
 
 <!-- fsrc src="docs/FAQ.md" -->
 ### Non-conventional commits are silently ignored
@@ -967,7 +831,7 @@ changelog:
 
 ### Version files not updated
 
-Ensure your manifest files are listed in `packages[].version_files` and match a [supported format](#supported-version-files). Paths must be literal, no glob expansion.
+Ensure your manifest files are listed in `packages[].version_files` and match a [supported format](../README.md#supported-version-files). Paths must be literal, no glob expansion.
 
 ### Tags are not signed
 
@@ -980,7 +844,7 @@ Most build tools read the version from a manifest at compile time:
 - `npm pack` reads `package.json`
 - `uv build` reads `pyproject.toml`
 
-Run `sr prepare` **before** your build step so the bumped manifest is on disk when the build runs. Then `sr release` commits, tags, uploads, and publishes. See [examples/ci/cargo-multi-platform.yml](examples/ci/cargo-multi-platform.yml) for the three-job shape (prepare → matrix build → release).
+Run `sr prepare` **before** your build step so the bumped manifest is on disk when the build runs. Then `sr release` commits, tags, uploads, and publishes. See [examples/ci/cargo-multi-platform.yml](../examples/ci/cargo-multi-platform.yml) for the three-job shape (prepare → matrix build → release).
 
 ### Why doesn't sr run build commands itself?
 
@@ -1011,13 +875,13 @@ Those pins are held honest by a conformance suite (`just conformance`, also run 
 
 ### Does sr support cross-compilation?
 
-Not directly. Run your matrix in CI between `sr prepare` and `sr release`. Every build job downloads the prepared manifests (via `actions/upload-artifact` + `download-artifact`), builds for its target platform with the correct version embedded, and uploads its binary. The release job then downloads everything and runs `sr release` to tag + upload. See [examples/ci/cargo-multi-platform.yml](examples/ci/cargo-multi-platform.yml).
+Not directly. Run your matrix in CI between `sr prepare` and `sr release`. Every build job downloads the prepared manifests (via `actions/upload-artifact` + `download-artifact`), builds for its target platform with the correct version embedded, and uploads its binary. The release job then downloads everything and runs `sr release` to tag + upload. See [examples/ci/cargo-multi-platform.yml](../examples/ci/cargo-multi-platform.yml).
 
 ### What happens if a release fails mid-flight?
 
 Re-run `sr release`. Every stage has a strict `is_complete` check reading external state (tag exists? release object exists? assets uploaded? package on registry?). The pipeline picks up exactly where it left off. There's no state file to corrupt.
 
-If the failure came after the tag was pushed, run it from the tagged commit (re-dispatch the workflow on the release branch). sr sees there are no new commits, checks the tagged release, and finishes whatever is missing: release object, assets, publish. See [Recovery from a broken release](#recovery-from-a-broken-release) for the limits.
+If the failure came after the tag was pushed, run it from the tagged commit (re-dispatch the workflow on the release branch). sr sees there are no new commits, checks the tagged release, and finishes whatever is missing: release object, assets, publish. See [Recovery from a broken release](../README.md#recovery-from-a-broken-release) for the limits.
 
 ### What if the branch moves while a release is running?
 
@@ -1033,41 +897,8 @@ For workspace-aware ecosystems, declare one entry at the workspace root with `pu
 
 ### Migrating from v7.x
 
-Run `sr migrate` or read [migration.md](crates/cli/docs/migration.md). The v8 jump is breaking: `sr status` → `sr plan`; `packages[].independent` / `tag_prefix` / `hooks` are gone; `publish:` becomes a typed enum; globs in `artifacts`/`stage_files` become literal paths; `sr-manifest.json` is no longer produced.
+Run `sr migrate` or read [migration.md](../crates/cli/docs/migration.md). The v8 jump is breaking: `sr status` → `sr plan`; `packages[].independent` / `tag_prefix` / `hooks` are gone; `publish:` becomes a typed enum; globs in `artifacts`/`stage_files` become literal paths; `sr-manifest.json` is no longer produced.
 <!-- /fsrc -->
-
-## Architecture
-
-| Crate | Description |
-|-------|-------------|
-| [`sr-core`](crates/sr-core/) | Everything: config, release logic, git, GitHub API |
-| [`sr-cli`](crates/sr-cli/) | CLI binary: command handlers, argument parsing |
-
-`action.yml` in the repo root is the GitHub Action composite wrapper.
-
-`sr` uses a pluggable `VcsProvider` trait and currently ships with GitHub support. GitLab, Bitbucket, and other providers can be added as separate crates implementing the same trait.
-
-### Core traits
-
-| Trait | Purpose |
-|-------|---------|
-| `GitRepository` | Tag discovery, commit listing, tag creation, push |
-| `VcsProvider` | Remote release creation, updates, asset uploads, verification |
-| `CommitParser` | Raw commit to conventional commit |
-| `ChangelogFormatter` | Render changelog entries to text |
-| `Publisher` | Registry-aware publish (cargo, npm, docker, pypi, go, custom) |
-| `ReleaseStrategy` | Orchestrate plan / prepare / release |
-
-## Design Philosophy
-
-1. **VCS is state, commits are the diff.** Current state lives in git + GitHub + registries, never in an sr-managed file. The commits since the last tag define what changes we want to release. `sr` applies the diff.
-2. **Reconciler, not task runner.** Every stage reads external state via `is_complete`, runs only when actual ≠ desired, and re-running a converged release is a noop. Partial failure recovery is automatic: re-run and `sr` picks up wherever reality diverges from the plan.
-3. **No user shell hooks.** `sr` does not run arbitrary pre/post/build commands. Builds belong in CI between `sr prepare` and `sr release`; publishing is handled by typed registry publishers. The only user-shell escape hatch is `publish: custom`.
-4. **Literal paths, not globs.** `artifacts`, `stage_files`, and `version_files` list exact filenames. Workspace member discovery inside Cargo.toml/package.json/pyproject.toml uses those tools' native manifest globs.
-5. **Trunk-based flow.** Releases happen from a single branch; no release branches.
-6. **Conventional commits as the versioning contract.** Commit messages drive the bump decision.
-7. **Language-agnostic at the core.** `sr` knows git and semver; registry specifics live in the typed publishers.
-8. **Skills-native.** AI assistants use sr through portable [Agent Skills](https://agentskills.io), not baked-in AI backends.
 
 ## Development
 
@@ -1077,9 +908,16 @@ cargo clippy --workspace  # lint
 cargo build  # build
 ```
 
-## Contributing
-
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and PR guidelines.
+
+## Documentation
+
+- [FAQ](docs/FAQ.md)
+- [Migration guide](crates/cli/docs/migration.md)
+- [Example configs](examples/README.md)
+- [CI workflow examples](examples/ci/README.md)
+- [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## Agent Skill
 
