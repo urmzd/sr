@@ -673,7 +673,7 @@ When bumping a workspace root, sr finds and bumps every member manifest, so list
 | **npm** | `workspaces` array in `package.json` | `workspaces` globs → member `package.json` files (skips members without `version`) |
 | **uv** | `[tool.uv.workspace]` with `members` | `tool.uv.workspace.members` globs → member `pyproject.toml` files (skips members without `version`) |
 
-sr keeps lock files and intra-workspace dependency requirements in sync at the same time. `Cargo.lock`, `uv.lock`, `poetry.lock` and `package-lock.json` are rewritten in place and staged in the release commit; Cargo path deps (`{ path = ..., version = ... }`) and npm sibling ranges (`^1.0.0`) are retargeted so a major bump doesn't leave the workspace unresolvable. This is plain data editing: no `cargo update`, `uv lock`, `poetry lock` or `npm install`, and no network access. Registry entries and their hashes are untouched. See the [FAQ](docs/FAQ.md#does-updating-lock-files-need-a-network-resolve) for the matching rules and verified format versions.
+sr keeps lock files and intra-workspace dependency requirements in sync at the same time. `Cargo.lock`, `uv.lock`, `poetry.lock` and `package-lock.json` are rewritten in place and staged in the release commit; Cargo path deps (`{ path = ..., version = ... }`) and npm sibling ranges (`^1.0.0`) are retargeted so a major bump doesn't leave the workspace unresolvable. This is plain data editing: no `cargo update`, `uv lock`, `poetry lock` or `npm install`, and no network access. Registry entries and their hashes are untouched. See the [FAQ](docs/reference/faq.md#does-updating-lock-files-need-a-network-resolve) for the matching rules and verified format versions.
 
 ### Environment variables
 
@@ -789,7 +789,7 @@ More complete examples (pnpm, uv, docker, multi-language, custom) live in [`exam
 
 ## FAQ
 
-<!-- fsrc src="docs/FAQ.md" -->
+<!-- fsrc src="docs/reference/faq.md" -->
 ### Non-conventional commits are silently ignored
 
 sr only understands commits that match the configured commit pattern (derived from type names defined in `commit.types`; follows [Conventional Commits](https://www.conventionalcommits.org/) by default). Commits that don't match (merge commits, JIRA-style messages, freeform text) are silently skipped during release planning. They won't trigger a version bump or appear in the changelog.
@@ -912,7 +912,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and PR
 
 ## Documentation
 
-- [FAQ](docs/FAQ.md)
+- [FAQ](docs/reference/faq.md)
 - [Migration guide](crates/cli/docs/migration.md)
 - [Example configs](examples/README.md)
 - [CI workflow examples](examples/ci/README.md)
