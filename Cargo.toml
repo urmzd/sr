@@ -16,7 +16,7 @@ sr-core = { path = "crates/core", version = "9.0.4" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_yaml_ng = "0.10"
+serde_yaml_ng = { package = "serde_norway", version = "0.9.42" }
 
 # Regex
 regex = "1"
