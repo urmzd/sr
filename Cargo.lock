@@ -888,7 +888,7 @@ checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 
 [[package]]
 name = "sr-cli"
-version = "9.0.4"
+version = "9.0.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "sr-core"
-version = "9.0.4"
+version = "9.0.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
