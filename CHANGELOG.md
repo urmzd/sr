@@ -1,5 +1,20 @@
 # Changelog
 
+## 9.0.4 (2026-10-29)
+
+### Bug Fixes
+
+- **deps**: patch vulnerable dependencies (#40) ([7e46e9e](https://github.com/urmzd/sr/commit/7e46e9eb1464fef248fdbfe2c37fe3cb4bfd59e1))
+
+### Misc
+
+- move docs into the scaffold-docs layout (#39) ([11073fe](https://github.com/urmzd/sr/commit/11073fe25b5050616e5206c2c0ddcd9c5cb42327))
+- **faq**: use absolute links so the README embed resolves ([f40298f](https://github.com/urmzd/sr/commit/f40298faecbe705e09f992156f0d78b757b52895))
+- align README with standalone structure ([917d7f2](https://github.com/urmzd/sr/commit/917d7f263134a164c8df76e4556437e267f0854b))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v9.0.3...v9.0.4)
+
+
 ## 9.0.3 (2026-10-15)
 
 ### Bug Fixes
