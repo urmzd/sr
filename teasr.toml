@@ -12,20 +12,20 @@ family = "Iosevka Nerd Font Mono"
 
 [[scenes]]
 type = "terminal"
-name = "sr-commit"
+name = "sr-plan"
 theme = "dracula"
-cols = 110
-rows = 40
+cols = 100
+rows = 32
 
 [scenes.intro]
-text = "sr commit\nAI-powered atomic commits"
+text = "sr plan\nPreview the next release before it happens"
 duration = 2000
 center = true
 
-# Hidden: reset one commit to stage changes for the demo
+# Hidden: neutral prompt, plus one unreleased feat commit so the plan has work to show
 [[scenes.interactions]]
 type = "type"
-text = "git reset --soft HEAD~1 && clear"
+text = "export PS1='$ ' && git commit --allow-empty -qm 'feat: add a demo feature' && clear"
 speed = 0
 hidden = true
 [[scenes.interactions]]
@@ -40,11 +40,22 @@ hidden = true
 # Visible demo
 [[scenes.interactions]]
 type = "type"
-text = "sr commit --dry-run"
+text = "sr plan"
 speed = 50
 [[scenes.interactions]]
 type = "key"
 key = "enter"
 [[scenes.interactions]]
 type = "wait"
-duration = 15000
+duration = 4000
+
+# Hidden: drop the demo commit
+[[scenes.interactions]]
+type = "type"
+text = "git reset -q --soft HEAD~1"
+speed = 0
+hidden = true
+[[scenes.interactions]]
+type = "key"
+key = "enter"
+hidden = true

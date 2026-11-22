@@ -21,6 +21,8 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/urmzd/sr" alt="License"></a>
 </p>
 
+<p align="center"><img src="showcase/sr-plan.gif" alt="Terminal demo of sr plan previewing the next release: a new tag, version file bump, GitHub release and cargo publishes" width="80%"></p>
+
 ## Contents
 
 - [Features](#features)
