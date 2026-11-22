@@ -23,3 +23,5 @@ release-assets/
 
 # Embedding model cache
 .fastembed_cache/
+
+.worktrees/
