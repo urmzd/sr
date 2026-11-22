@@ -1,5 +1,19 @@
 # Changelog
 
+## 9.0.6 (2026-11-22)
+
+### Bug Fixes
+
+- **action**: authenticate the release lookup (#43) ([24b3538](https://github.com/urmzd/sr/commit/24b353866cecc6a5f9a5ebf20a06cba662c2b742))
+
+### Misc
+
+- move docs into the scaffold-docs layout (#42) ([b5dc28b](https://github.com/urmzd/sr/commit/b5dc28ba3cff594b71c971898317f2c1fc38e06f))
+- **deps**: bump actions/checkout from 6 to 7 (#38) ([b91cc9d](https://github.com/urmzd/sr/commit/b91cc9dece32b1ae3895318e2b148f009c356609))
+
+[Full Changelog](https://github.com/urmzd/sr/compare/v9.0.5...v9.0.6)
+
+
 ## 9.0.5 (2026-10-29)
 
 ### Bug Fixes
