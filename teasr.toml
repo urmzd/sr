@@ -15,7 +15,7 @@ type = "terminal"
 name = "sr-plan"
 theme = "dracula"
 cols = 100
-rows = 32
+rows = 34
 
 [scenes.intro]
 text = "sr plan\nPreview the next release before it happens"
@@ -40,14 +40,59 @@ hidden = true
 # Visible demo
 [[scenes.interactions]]
 type = "type"
-text = "sr plan"
-speed = 50
+text = "s"
+speed = 80
+[[scenes.interactions]]
+type = "wait"
+duration = 250
+[[scenes.interactions]]
+type = "type"
+text = "r"
+speed = 80
+[[scenes.interactions]]
+type = "wait"
+duration = 250
+[[scenes.interactions]]
+type = "type"
+text = " "
+speed = 80
+[[scenes.interactions]]
+type = "wait"
+duration = 250
+[[scenes.interactions]]
+type = "type"
+text = "p"
+speed = 80
+[[scenes.interactions]]
+type = "wait"
+duration = 250
+[[scenes.interactions]]
+type = "type"
+text = "l"
+speed = 80
+[[scenes.interactions]]
+type = "wait"
+duration = 250
+[[scenes.interactions]]
+type = "type"
+text = "a"
+speed = 80
+[[scenes.interactions]]
+type = "wait"
+duration = 250
+[[scenes.interactions]]
+type = "type"
+text = "n"
+speed = 80
+[[scenes.interactions]]
+type = "wait"
+duration = 250
 [[scenes.interactions]]
 type = "key"
 key = "enter"
 [[scenes.interactions]]
 type = "wait"
-duration = 4000
+duration = 5000
 
 # Hidden: drop the demo commit
 [[scenes.interactions]]
