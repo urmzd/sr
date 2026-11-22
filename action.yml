@@ -93,6 +93,7 @@ runs:
     - name: Download sr binary
       shell: bash
       env:
+        GH_TOKEN: ${{ inputs.github-token }}
         SR_REPO: ${{ github.action_repository }}
         SR_REF: ${{ github.action_ref }}
         SR_SHA256: ${{ inputs.sha256 }}
@@ -114,8 +115,19 @@ runs:
         DEST="$HOME/.local/bin/sr"
         mkdir -p "$HOME/.local/bin"
 
+        # Authenticated API calls get the token's rate limit instead of the
+        # runner IP's shared 60 requests an hour. Falls back to anonymous when
+        # the token cannot read this repository.
+        api_get() {
+          if [ -n "${GH_TOKEN:-}" ]; then
+            curl -fsSL --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" "$1" && return 0
+            echo "::warning::Authenticated request to $1 failed; retrying without a token" >&2
+          fi
+          curl -fsSL --retry 3 "$1"
+        }
+
         API="https://api.github.com/repos/${SR_REPO}"
-        TAGS=$(curl -fsSL "${API}/releases?per_page=100" | jq -r '.[].tag_name')
+        TAGS=$(api_get "${API}/releases?per_page=100" | jq -r '.[].tag_name')
         RELEASE_TAG=$(echo "$TAGS" | grep -xF "$SR_REF" | head -1 || true)
         [ -z "$RELEASE_TAG" ] && RELEASE_TAG=$(echo "$TAGS" | grep "^${SR_REF}\." | head -1 || true)
         [ -z "$RELEASE_TAG" ] && RELEASE_TAG=$(echo "$TAGS" | head -1)
